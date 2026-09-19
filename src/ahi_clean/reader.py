@@ -20,6 +20,8 @@ class SheetGrid:
     rows: list[list]
     styles: list[list] = field(default_factory=list)
     error_cells: list[str] = field(default_factory=list)
+    formula_cells: list[str] = field(default_factory=list)
+    uncached_formula_cells: list[str] = field(default_factory=list)
     merged_ranges: list[str] = field(default_factory=list)
     image_count: int = 0
 
@@ -36,7 +38,29 @@ def read_workbook(path) -> list[SheetGrid]:
     """Load every sheet of ``path`` into a :class:`SheetGrid`."""
     # data_only=True gives us cached formula results rather than formula text.
     workbook = openpyxl.load_workbook(path, data_only=True)
-    return [_read_sheet(worksheet) for worksheet in workbook.worksheets]
+    # A second, cheap pass over the formula text. data_only gives the value Excel
+    # cached the last time it saved; a workbook written by a library and never opened
+    # in Excel has no cache, so a formula-driven column arrives silently empty. Knowing
+    # which cells hold formulas is the difference between reporting that and shipping
+    # a column of nulls as if the source were blank.
+    formulas = openpyxl.load_workbook(path, data_only=False)
+    grids = []
+    for worksheet in workbook.worksheets:
+        grid = _read_sheet(worksheet)
+        _note_formulas(grid, formulas[worksheet.title])
+        grids.append(grid)
+    return grids
+
+
+def _note_formulas(grid: SheetGrid, worksheet) -> None:
+    for row in worksheet.iter_rows():
+        for cell in row:
+            if cell.data_type != "f":
+                continue
+            grid.formula_cells.append(cell.coordinate)
+            value = grid.rows[cell.row - 1][cell.column - 1] if cell.row <= grid.height else None
+            if value is None:
+                grid.uncached_formula_cells.append(cell.coordinate)
 
 
 def count_embedded_images(path) -> int:

@@ -24,7 +24,10 @@ from .typing_utils import is_blank
 
 SPARSE_RATIO = 0.6
 SUM_TOLERANCE = 0.01
-MIN_SUMMED_ROWS = 2
+# A section can legitimately contain a single record, and its subtotal then equals
+# that one row. The candidate must already be sparse to reach the arithmetic at all,
+# which is what keeps this from matching an ordinary repeated value.
+MIN_SUMMED_ROWS = 1
 
 DATA = "DATA"
 BANNER = "BANNER"
@@ -32,9 +35,13 @@ FOOTER = "FOOTER"
 SUBTOTAL = "SUBTOTAL"
 GRAND_TOTAL = "GRAND_TOTAL"
 REPEATED_HEADER = "REPEATED_HEADER"
+UNVERIFIED_TOTAL = "UNVERIFIED_TOTAL"
 SPARSE_KEPT = "SPARSE_KEPT"
 
-DROPPED = {BANNER, FOOTER, SUBTOTAL, GRAND_TOTAL, REPEATED_HEADER}
+DROPPED = {BANNER, FOOTER, SUBTOTAL, GRAND_TOTAL, REPEATED_HEADER, UNVERIFIED_TOTAL}
+
+HEADER_CONTRAST = 0.6
+HEADER_TEXTNESS = 0.8
 
 # Corroboration only. Never sufficient on its own to drop a row.
 _TOTAL_HINT = re.compile(r"\b(total|subtotal|sum|sub-total|gesamt|totale|suma)\b", re.IGNORECASE)
@@ -62,21 +69,36 @@ def classify_rows(body, header_names=None, header_row=None) -> list[RowVerdict]:
 
     modal = signals.modal_fill(body)
     threshold = max(modal * SPARSE_RATIO, 2) if modal else 0
+    width = max((len(row) for row in body), default=0)
+    profile = signals.type_profile(body, width)
 
     verdicts: list[RowVerdict] = []
     for index, row in enumerate(body):
-        verdicts.append(_initial_verdict(index, row, threshold, header_row))
+        verdicts.append(_initial_verdict(index, row, threshold, header_row, profile))
 
     _confirm_totals(body, verdicts)
     _resolve_unconfirmed(body, verdicts)
     return verdicts
 
 
-def _initial_verdict(index, row, threshold, header_row) -> RowVerdict:
+def _initial_verdict(index, row, threshold, header_row, profile) -> RowVerdict:
     fill = signals.fill_count(row)
 
     if header_row is not None and _matches_header(row, header_row):
         return RowVerdict(index, REPEATED_HEADER, "row repeats the header labels")
+
+    if header_row is not None and _repeats_header_labels(row, header_row):
+        return RowVerdict(
+            index, REPEATED_HEADER, "populated cells repeat the header's labels in place"
+        )
+
+    if _reads_as_a_header(row, profile):
+        return RowVerdict(
+            index,
+            REPEATED_HEADER,
+            "row is text where its columns hold numbers, dates or ids -- a header in "
+            "different words",
+        )
 
     if fill >= threshold:
         return RowVerdict(index, DATA, f"fill {fill} meets the region's baseline")
@@ -101,6 +123,40 @@ def _matches_header(row, header_row) -> bool:
 
     values = norm(row)
     return bool(values) and values == norm(header_row)
+
+
+def _repeats_header_labels(row, header_row) -> bool:
+    """Whether a partial row echoes the header's own labels at the same positions.
+
+    A section marker like ``Policy Summary | | | | Premium | PolicyNumber`` is a
+    fragment of the header, not a record. Checked positionally against the header
+    this region already found, so it needs no vocabulary of its own.
+    """
+    matched = 0
+    for index, cell in enumerate(row):
+        if is_blank(cell) or index >= len(header_row) or is_blank(header_row[index]):
+            continue
+        if str(cell).strip().casefold() == str(header_row[index]).strip().casefold():
+            matched += 1
+        else:
+            return False
+    return matched >= 2
+
+
+def _reads_as_a_header(row, profile) -> bool:
+    """Whether a row is text sitting where its columns hold something else.
+
+    A section that restates the header in different words -- ``PC Number`` for
+    ``ProfitCenterNumber`` -- cannot be caught by comparing labels. It is caught the
+    same way the header itself was found: it is text where the column beneath it is
+    numeric, dated or an identifier.
+    """
+    if signals.fill_count(row) < 2:
+        return False
+    return (
+        signals.type_contrast(row, profile) >= HEADER_CONTRAST
+        and signals.textness(row) >= HEADER_TEXTNESS
+    )
 
 
 def _lead_text(row) -> str:
@@ -222,8 +278,18 @@ def _resolve_unconfirmed(body, verdicts) -> None:
         if verdict.classification != SPARSE_KEPT:
             continue
         lead = _lead_text(body[verdict.index])
-        verdict.confidence = 0.5
         if _TOTAL_HINT.search(lead):
-            verdict.reason += "; text hints at a total but the numbers do not sum"
+            # The row is already sparse on structure alone; the wording only decides
+            # which kind of non-record it is. Real reports carry totals whose figures
+            # are stale, hand-edited or rounded, and keeping those as data corrupts
+            # every downstream sum. Dropped, but into its own class and flagged, never
+            # conflated with a total the arithmetic actually proved.
+            verdict.classification = UNVERIFIED_TOTAL
+            verdict.confidence = 0.5
+            verdict.reason = (
+                f"{verdict.reason}; labelled a total but the figure does not reconcile "
+                "with the rows above -- dropped, needs review"
+            )
         else:
+            verdict.confidence = 0.5
             verdict.reason += "; kept as a partially-filled record"

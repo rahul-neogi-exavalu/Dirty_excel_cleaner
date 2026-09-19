@@ -1,0 +1,2 @@
+scenario,purpose
+ProfitCenterNumber stored partly in scientific notation,"Some ID values got auto-converted by Excel to scientific-notation floats/strings (1.005E+03) instead of the integer 1005 — type normalization must recover the intended integer ID, not just cast-to-float blindly."

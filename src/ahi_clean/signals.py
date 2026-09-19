@@ -21,13 +21,30 @@ def fill_count(cells) -> int:
     return len(populated(cells))
 
 
+def is_merged_banner(cells) -> bool:
+    """Whether a row is one value stretched across several columns.
+
+    openpyxl reports a merged range as its value repeated in every covered cell, so a
+    merged title spanning the sheet arrives looking as densely filled as a real record.
+    Judged by repetition rather than by the merge list, this also catches a title that
+    was copied across cells instead of merged.
+    """
+    values = populated(cells)
+    return len(values) >= 2 and len({str(value).strip() for value in values}) == 1
+
+
+def effective_fill(cells) -> int:
+    """Populated-cell count, with a merged banner counted as the one value it holds."""
+    return 1 if is_merged_banner(cells) else fill_count(cells)
+
+
 def modal_fill(lines) -> int:
     """The most common populated-cell count across a set of lines.
 
     This is the baseline a real record is expected to meet. Banners, footers and
     total rows fall far below it, which is how they are found without a keyword list.
     """
-    counts = [fill_count(line) for line in lines if fill_count(line) > 0]
+    counts = [effective_fill(line) for line in lines if fill_count(line) > 0]
     if not counts:
         return 0
     return Counter(counts).most_common(1)[0][0]
@@ -68,16 +85,35 @@ def type_profile(lines, width: int) -> tuple[str, ...]:
     return tuple(profile)
 
 
-def profile_similarity(left: tuple[str, ...], right: tuple[str, ...]) -> float:
-    """Share of column positions where two profiles agree.
+def profile_coverage(left: tuple[str, ...], right: tuple[str, ...]) -> float:
+    """How far two profiles occupy the same columns, ignoring what type they hold.
 
-    Positions empty on both sides are skipped: a column unused by either block says
-    nothing about whether they are the same table.
+    Two chunks of one table use the same columns; a banner uses one column of many.
+    Kept separate from type agreement because they answer different questions, and
+    conflating them makes a one-column banner look identical to the table below it.
+    """
+    left_columns = {index for index, kind in enumerate(left) if kind != EMPTY}
+    right_columns = {index for index, kind in enumerate(right) if kind != EMPTY}
+    if not left_columns or not right_columns:
+        return 0.0
+    return len(left_columns & right_columns) / len(left_columns | right_columns)
+
+
+def profile_similarity(left: tuple[str, ...], right: tuple[str, ...]) -> float:
+    """Type agreement across the columns both profiles actually populate.
+
+    A position empty on either side is skipped rather than counted as a mismatch. An
+    absent value is not contrary evidence: one chunk of a table having no date on its
+    only row says nothing about whether it belongs with the chunk below. Counting
+    silence as disagreement is how a table gets split at a row that merely has a gap.
+
+    Coverage is checked separately, so skipping here cannot make a narrow block look
+    like a wide one.
     """
     pairs = [
         (one, other)
         for one, other in zip(left, right)
-        if not (one == EMPTY and other == EMPTY)
+        if one != EMPTY and other != EMPTY
     ]
     if not pairs:
         return 0.0

@@ -1,0 +1,2 @@
+scenario,purpose
+A 40-row junk/reference table (unrelated schema) sits above the much smaller real 8-row commission table,"Breaks any heuristic that picks 'the largest contiguous data block' as the table — table selection must be schema-aware (does the block's headers resolve against the canonical alias dictionary?), not row-count-aware."

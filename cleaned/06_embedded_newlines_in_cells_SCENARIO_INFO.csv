@@ -1,0 +1,2 @@
+scenario,purpose
+Cell values contain embedded newline characters,"Producer and Company name cells contain literal \n inside the string, which breaks any parsing logic that assumes one logical record = one physical text line (a risk mainly for naive CSV-based readers, but worth normalizing away regardless)."

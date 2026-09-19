@@ -1,0 +1,2 @@
+scenario,purpose
+The real table sits at columns AB:AI; columns A through AA are entirely blank,"Column-offset detection must generalize past 'a column or two of gutter' to arbitrarily large blank offsets, and must not assume the table starts anywhere near column A."

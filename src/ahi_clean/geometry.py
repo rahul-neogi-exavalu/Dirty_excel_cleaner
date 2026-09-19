@@ -14,11 +14,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import signals
-from .typing_utils import is_blank
+from .typing_utils import EMPTY, is_blank
 
 PROFILE_MATCH_THRESHOLD = 0.7
+COVERAGE_MATCH_THRESHOLD = 0.7
 EXTENT_MATCH_THRESHOLD = 0.75
+GUTTER_MAX_WIDTH = 1
 MIN_TABLE_ROWS = 2
+MAX_JUNK_RUN_ROWS = 2
+PROFILE_SAMPLE_ROWS = 5
 
 
 @dataclass
@@ -92,24 +96,50 @@ def _runs_of_populated_rows(grid) -> list[tuple[int, int]]:
     return runs
 
 
+def _profile_rows(rows):
+    """The rows of a run that best represent its data shape.
+
+    The first row of a run is very often a header, and its all-text signature would
+    otherwise dominate the profile of a short run -- a two-row run of header plus one
+    record profiles as pure text and then matches nothing. Skip it when there is
+    anything else to go on, and prefer the rows nearest the boundary being judged.
+    """
+    body = rows[1:] if len(rows) > 1 else rows
+    return body[-PROFILE_SAMPLE_ROWS:]
+
+
+def _columns_used(profile) -> set[int]:
+    return {index for index, kind in enumerate(profile) if kind != EMPTY}
+
+
 def _belongs_to_previous(anchor_rows, candidate_rows, width) -> bool:
     """Whether a run continues the region before it, across a gap of any size."""
+    anchor_profile = signals.type_profile(_profile_rows(anchor_rows), width)
+    candidate_profile = signals.type_profile(_profile_rows(candidate_rows), width)
     anchor_fill = signals.modal_fill(anchor_rows)
     candidate_fill = signals.modal_fill(candidate_rows)
 
-    # A run of single-cell lines is a banner or a footer, never a table. Attaching it
-    # here keeps it out of the region list and lets row classification judge it against
-    # the real table's fill baseline. Note this tests for *one* populated cell, not
-    # merely "fewer than the table" -- a genuine narrow table alongside a wide one is
-    # sparse by that looser measure and must not be swallowed.
-    if candidate_fill <= 1 < anchor_fill:
+    # A short, sparse run whose columns are a subset of the table's is decoration --
+    # a subtotal, a page footer, a confidentiality line -- not a new table. Attaching
+    # it keeps it out of the region list and, just as importantly, stops it acting as
+    # a wall that cuts one table into two.
+    #
+    # Length is what separates it from a genuinely narrower table placed below: an
+    # adjustment table brings its own header and several rows, decoration does not.
+    if (
+        candidate_fill < anchor_fill
+        and len(candidate_rows) <= MAX_JUNK_RUN_ROWS
+        and _columns_used(candidate_profile) <= _columns_used(anchor_profile)
+    ):
         return True
 
-    similarity = signals.profile_similarity(
-        signals.type_profile(anchor_rows, width),
-        signals.type_profile(candidate_rows, width),
-    )
-    return similarity >= PROFILE_MATCH_THRESHOLD
+    # Both questions must be answered yes. Coverage asks whether the two runs use the
+    # same columns at all; similarity asks whether those shared columns hold the same
+    # kinds of value. A banner passes the second on its single column and fails the
+    # first; a chunk of the same table with a gap in one field passes both.
+    coverage = signals.profile_coverage(anchor_profile, candidate_profile)
+    similarity = signals.profile_similarity(anchor_profile, candidate_profile)
+    return coverage >= COVERAGE_MATCH_THRESHOLD and similarity >= PROFILE_MATCH_THRESHOLD
 
 
 def _segment_rows(grid: list[list]) -> list[Region]:
@@ -201,9 +231,17 @@ def _segment_columns(region: Region) -> list[Region]:
     groups: list[list[tuple[int, int]]] = [[runs[0]]]
     for run in runs[1:]:
         previous = groups[-1][-1]
-        if _extents_match(
-            _row_extent(region.rows, *previous), _row_extent(region.rows, *run)
-        ):
+        left = _row_extent(region.rows, *previous)
+        right = _row_extent(region.rows, *run)
+        gap = run[0] - previous[1]
+
+        # A narrow gap spanning the same rows is decoration inside one table. A wider
+        # one is only a gutter if the two sides cover *exactly* the same rows: two
+        # tables placed side by side almost always differ in length, and that
+        # difference is the one honest signal that they are unrelated.
+        same_rows = left is not None and left == right
+        gutter = same_rows or (gap <= GUTTER_MAX_WIDTH and _extents_match(left, right))
+        if gutter:
             groups[-1].append(run)
         else:
             groups.append([run])

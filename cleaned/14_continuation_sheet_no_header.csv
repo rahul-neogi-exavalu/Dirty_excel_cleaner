@@ -1,0 +1,9 @@
+source_sheet,profitcentername,profitcenternumber,producer_agencyname,insurancecompanyname,premium,policynumber,accountingeffectivedate,commission
+Report,South Zone PC,1005,Pinnacle Agency Partners,National Indemnity Co,15109.2,POL-200001,2026-01-01,11.06
+Report,West Zone PC,1012,Apex Insurance Brokers,Heritage Casualty Co,35586.47,POL-200002,2026-01-08,17.96
+Report,East Zone PC,1093,Metro Agency Group,Global Assurance Corp,37066.89,POL-200003,2026-01-15,5.98
+Report,Central PC,1083,Pinnacle Agency Partners,Zenith Insurance Group,11316.22,POL-200004,2026-01-22,5.14
+Continued,North Zone PC,1040,Coastal Risk Advisors,Global Assurance Corp,34420.75,POL-200005,2026-01-29,18.13
+Continued,East Zone PC,1049,Sunrise Producers LLC,Heritage Casualty Co,42775.85,POL-200006,2026-02-05,8.15
+Continued,Central PC,1077,MJC Agency Group,National Indemnity Co,19888.2,POL-200007,2026-02-12,12.25
+Continued,South Zone PC,1055,Metro Agency Group,Zenith Insurance Group,24001.11,POL-200008,2026-02-19,9.75

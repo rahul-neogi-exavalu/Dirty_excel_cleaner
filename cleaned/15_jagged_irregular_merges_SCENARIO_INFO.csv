@@ -1,0 +1,2 @@
+scenario,purpose
+"Merged ranges are irregular: a 2-column merge and a 1x2 vertical merge in the header, plus merges inside the body that span rows in one place and columns in another","Non-rectangular, inconsistent merge patterns break naive 'unmerge = copy top-left value to whole range' logic when merges cross between what should be independent records — tests robustness of the unmerge step under irregular geometry."

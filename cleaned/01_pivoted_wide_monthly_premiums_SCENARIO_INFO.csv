@@ -1,0 +1,2 @@
+scenario,purpose
+Wide/pivoted monthly premium matrix,"Rows=Producer, columns=month. This is not a row-classification problem at all — it needs detection of a pivot layout and an unpivot/melt step to reach the canonical long format (one row per Producer x Month)."

@@ -62,7 +62,12 @@ def _numeric_measure_columns(frame: pd.DataFrame) -> list[str]:
             continue
         fractional = any(float(value) % 1 for value in values)
         repeats = values.nunique() / len(values) < KEY_DISTINCT_RATIO
-        if fractional or repeats:
+        # A negative value settles it on its own: identifiers, codes and ZIPs are
+        # never negative, so a column that goes below zero is a quantity. This is
+        # what stops an adjustment table of whole, all-distinct amounts from being
+        # mistaken for a lookup.
+        signed = any(float(value) < 0 for value in values)
+        if fractional or repeats or signed:
             measures.append(column)
     return measures
 
@@ -184,8 +189,47 @@ def _stack_decision(left, right) -> tuple[bool, dict]:
 # --------------------------------------------------------------------------- #
 
 
+def adopt_sibling_headers(results) -> list[dict]:
+    """Give a headerless table the column names of a sibling it continues.
+
+    A report split across sheets often puts the header only on the first one; the
+    continuation sheet is pure data. Per sheet that is genuinely headerless and the
+    extractor is right to say so -- naming a data row as the header would be worse.
+    The workbook is the level that can see the answer: another table with the same
+    number of columns and the same per-column types, which does have a header.
+
+    Matching is on shape and type, never on position or sheet name, so a continuation
+    is recognised whether it comes before or after the sheet it belongs to.
+    """
+    adoptions: list[dict] = []
+    donors = [
+        result
+        for result in results
+        if result.trace.get("header", {}).get("detected") and not result.frame.empty
+    ]
+    for result in results:
+        if result.frame.empty or result.trace.get("header", {}).get("detected"):
+            continue
+        for donor in donors:
+            if len(donor.frame.columns) != len(result.frame.columns):
+                continue
+            if profile_overlap(donor.frame, result.frame) < PROFILE_OVERLAP_THRESHOLD:
+                continue
+            result.frame.columns = list(donor.frame.columns)
+            result.trace["header"]["adopted_from"] = donor.label
+            result.trace["header"]["detected"] = True
+            result.trace["notes"].append(
+                f"no header on this table; adopted the column names of '{donor.label}', "
+                "which has the same width and the same per-column types"
+            )
+            adoptions.append({"table": result.label, "adopted_from": donor.label})
+            break
+    return adoptions
+
+
 def plan_workbook(results, stem: str) -> tuple[list[Output], dict]:
     """Classify tables, decide their relationships, and produce the outputs."""
+    adoptions = adopt_sibling_headers(results)
     live = [result for result in results if not result.frame.empty]
     roles: dict[str, str] = {}
     evidence: list[dict] = []
@@ -194,7 +238,12 @@ def plan_workbook(results, stem: str) -> tuple[list[Output], dict]:
         roles[result.label] = role
         evidence.append(why)
 
-    report: dict = {"table_roles": evidence, "relationships": [], "join": None}
+    report: dict = {
+        "table_roles": evidence,
+        "relationships": [],
+        "join": None,
+        "header_adoptions": adoptions,
+    }
     facts = [result for result in live if roles[result.label] == FACT]
     dimensions = [result for result in live if roles[result.label] == DIMENSION]
 

@@ -1,0 +1,208 @@
+{
+  "source_file": "sample_files_uncleaned\\00_README_master.xlsx",
+  "generated_at": "2026-09-20T04:06:46",
+  "embedded_images": 0,
+  "tables": [
+    {
+      "sheet": "README",
+      "region": 1,
+      "regions_on_sheet": 1,
+      "region_shape": [
+        19,
+        3
+      ],
+      "region_origin": {
+        "row": 0,
+        "column": 0,
+        "how": "row_segmentation"
+      },
+      "error_cells_nulled": [],
+      "formula_cells": 0,
+      "uncached_formula_cells": [],
+      "merged_ranges": [],
+      "dropped_rows": [],
+      "notes": [
+        "orientation margin 0.00 is narrow; decided by shape (18 records vs 3 fields)"
+      ],
+      "orientation": {
+        "row_score": 2.0,
+        "column_score": 2.0,
+        "margin": 0.0,
+        "confident": false,
+        "decided_by": "shape",
+        "orientation": "normal"
+      },
+      "header": {
+        "row_index": 0,
+        "detected": true,
+        "score": 0.85,
+        "multi_row": false,
+        "scores": [
+          {
+            "row": 0,
+            "score": 0.85,
+            "contrast": 0.0,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 1.0
+          },
+          {
+            "row": 1,
+            "score": 0.65,
+            "contrast": 0.0,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 0.5,
+            "emphasis": 0.0
+          },
+          {
+            "row": 2,
+            "score": 0.65,
+            "contrast": 0.0,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 0.5,
+            "emphasis": 0.0
+          },
+          {
+            "row": 3,
+            "score": 0.65,
+            "contrast": 0.0,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 0.5,
+            "emphasis": 0.0
+          },
+          {
+            "row": 4,
+            "score": 0.65,
+            "contrast": 0.0,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 0.5,
+            "emphasis": 0.0
+          },
+          {
+            "row": 5,
+            "score": 0.65,
+            "contrast": 0.0,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 0.5,
+            "emphasis": 0.0
+          },
+          {
+            "row": 6,
+            "score": 0.65,
+            "contrast": 0.0,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 0.5,
+            "emphasis": 0.0
+          },
+          {
+            "row": 7,
+            "score": 0.65,
+            "contrast": 0.0,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 0.5,
+            "emphasis": 0.0
+          },
+          {
+            "row": 8,
+            "score": 0.65,
+            "contrast": 0.0,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 0.5,
+            "emphasis": 0.0
+          },
+          {
+            "row": 9,
+            "score": 0.65,
+            "contrast": 0.0,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 0.5,
+            "emphasis": 0.0
+          }
+        ]
+      },
+      "inferred_types": {
+        "file": "text",
+        "scenario": "text",
+        "what_it_s_testing_why_it_s_hard": "text"
+      },
+      "coercion_failures": [],
+      "validation": [],
+      "column_names": [
+        "file",
+        "scenario",
+        "what_it_s_testing_why_it_s_hard"
+      ],
+      "clean_shape": [
+        18,
+        3
+      ]
+    }
+  ],
+  "workbook": {
+    "table_roles": [
+      {
+        "table": "README",
+        "rows": 18,
+        "measure_columns": [],
+        "key_columns": [
+          "file",
+          "scenario",
+          "what_it_s_testing_why_it_s_hard"
+        ],
+        "date_columns": [],
+        "reason": "small, one unique entity per row, no continuous measures",
+        "name_hint": false,
+        "role": "DIMENSION"
+      }
+    ],
+    "relationships": [],
+    "join": null,
+    "header_adoptions": []
+  },
+  "outputs": [
+    {
+      "file": "00_README_master.csv",
+      "kind": "standalone",
+      "source_sheets": [
+        "README"
+      ],
+      "rows": 18,
+      "columns": [
+        "file",
+        "scenario",
+        "what_it_s_testing_why_it_s_hard"
+      ]
+    }
+  ],
+  "summary": {
+    "rows_dropped": 0,
+    "dropped_by_classification": {},
+    "coercion_failures": 0,
+    "validation_findings": 0,
+    "join_values_needing_review": 0,
+    "tables_found": 1,
+    "headerless_tables": 0,
+    "low_confidence_orientations": 1
+  },
+  "needs_human_review": []
+}

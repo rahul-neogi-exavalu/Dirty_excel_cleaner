@@ -1,0 +1,2 @@
+scenario,purpose
+"Percent column mixes 0-100 scale, 0-1 fraction scale, '%' suffix text, and padded whitespace",Commission% has four different representations of the same underlying concept in one column — naive numeric coercion silently produces wrong magnitudes for the fraction-scale rows.

@@ -114,12 +114,27 @@ def test_a_sparse_genuine_record_is_kept_not_dropped():
     assert "kept as a partially-filled record" in verdicts[-1].reason
 
 
-def test_a_row_saying_total_whose_numbers_do_not_sum_is_kept_and_flagged():
+def test_a_sparse_row_labelled_total_whose_figure_is_wrong_is_dropped_and_flagged():
+    """Real reports carry stale totals; keeping one as data corrupts every sum.
+
+    The row is already sparse on structure alone -- the wording only decides which
+    kind of non-record it is, and it lands in its own class with a review flag rather
+    than being passed off as an arithmetically proven total.
+    """
     body = [record(index, 100.0) for index in range(4)]
     body.append(["Total Risk Centre", None, 12.34, None])
     verdicts = classify_rows(body)
-    assert verdicts[-1].dropped is False
-    assert "do not sum" in verdicts[-1].reason
+    assert verdicts[-1].classification == rowclass.UNVERIFIED_TOTAL
+    assert verdicts[-1].dropped is True
+    assert verdicts[-1].confidence < 1.0
+    assert "does not reconcile" in verdicts[-1].reason
+
+
+def test_wording_alone_cannot_drop_a_full_row():
+    """The row must be sparse first. A full record named 'Total ...' stays."""
+    body = [record(index, 100.0) for index in range(3)]
+    body.append(["Total Risk PC", "Metro Agency", 12.34, "POL-0099"])
+    assert classify_rows(body)[-1].classification == rowclass.DATA
 
 
 def test_a_full_row_named_total_is_plain_data():
@@ -147,8 +162,42 @@ def test_empty_body_is_handled():
     assert classify_rows([]) == []
 
 
-def test_a_two_row_body_does_not_crash_the_sum_check():
+def test_a_subtotal_over_a_single_row_section_is_proven_not_guessed():
+    """A section of one record still has a subtotal, and it is arithmetic, not wording."""
     body = [record(0, 100.0), ["Total", None, 100.0, None]]
-    # One row above is below MIN_SUMMED_ROWS, so it cannot be confirmed as a total.
     verdicts = classify_rows(body)
-    assert verdicts[-1].dropped is False
+    assert verdicts[-1].classification == rowclass.GRAND_TOTAL
+    assert "equals the sum of" in verdicts[-1].reason
+
+
+def wide_record(index):
+    """A record with enough non-text columns for type contrast to mean something."""
+    return [
+        f"Zone {index}", "Metro Agency", 100.5 + index,
+        f"POL-{index:04d}", f"2026-01-{index + 1:02d}", 5.5 + index,
+    ]
+
+
+def test_a_header_restated_in_different_words_is_dropped():
+    """'PC Number' for 'ProfitCenterNumber' cannot be caught by comparing labels."""
+    body = [wide_record(index) for index in range(3)]
+    body.append(["Profit Centre", "Producer", "Premium ($)", "Policy No.", "Eff Dt", "Comm %"])
+    body += [wide_record(index) for index in range(3, 6)]
+    verdicts = classify_rows(body)
+    assert verdicts[3].classification == rowclass.REPEATED_HEADER
+    assert "text where its columns hold" in verdicts[3].reason
+
+
+def test_a_genuine_record_is_never_mistaken_for_a_restated_header():
+    """The guard that makes the rule safe: records are not text in numeric columns."""
+    body = [wide_record(index) for index in range(6)]
+    assert all(verdict.classification == rowclass.DATA for verdict in classify_rows(body))
+
+
+def test_a_partial_header_fragment_is_dropped():
+    header = ["Centre", "Producer", "Premium", "Policy"]
+    body = [record(index, 100.0) for index in range(3)]
+    body.append([None, None, "Premium", "Policy"])
+    verdicts = classify_rows(body, header_row=header)
+    assert verdicts[-1].classification == rowclass.REPEATED_HEADER
+    assert "repeat the header's labels in place" in verdicts[-1].reason

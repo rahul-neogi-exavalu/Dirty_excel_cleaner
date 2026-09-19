@@ -1,0 +1,2 @@
+scenario,purpose
+"PolicyNumber header is present and correctly detected, but every single value beneath it is blank","A schema-presence check alone ('is there a PolicyNumber column?') passes, but the field is functionally missing. Validation must also check completeness/non-null rate on required fields, not just header presence."

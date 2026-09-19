@@ -1,0 +1,2 @@
+scenario,purpose
+"Headers contaminated with non-breaking spaces, zero-width spaces, accented chars, emoji","Visually identical headers that fail exact/naive string matching because of invisible Unicode characters (\u00a0, \u200b) or accent substitution — alias matching must normalize Unicode, not just ASCII whitespace."

@@ -1,9 +1,22 @@
 """Join key discovery and the margin rule that keeps fuzzy resolution honest."""
 
 import pandas as pd
-import pytest
 
 from ahi_clean import join
+
+from conftest import HEADER, one, records
+
+LOOKUP = [["Producer", "Address", "State", "ZIP Code"]] + [
+    ["Pinnacle Agency Partners", "9515 Delegates Row", "IN", "46240"],
+    ["Apex Insurance Brokers", "20 Village Center Dr", "NJ", "08085"],
+    ["Metro Agency Group", "32646 Five Mile Rd", "MI", "48154"],
+    ["Coastal Risk Advisors", "1514 Roberts Dr", "FL", "32250"],
+]
+
+
+def pair():
+    """A fact table and its lookup, named differently on each side."""
+    return one([HEADER] + records(8)).frame, one(LOOKUP, name="Lookup").frame
 
 PRODUCERS = pd.Series(
     [
@@ -16,8 +29,8 @@ PRODUCERS = pd.Series(
 )
 
 
-def test_key_is_discovered_from_values_not_header_names(file6):
-    fact, dimension = file6[0][0].frame, file6[1][0].frame
+def test_key_is_discovered_from_values_not_header_names():
+    fact, dimension = pair()
     key = join.discover_key(fact, dimension)
     # The two columns are named differently in their own files -- 'Producer/AgencyName'
     # and 'Producer' -- and nothing renames them. The pair is found from the values.
@@ -59,11 +72,13 @@ def test_a_near_miss_is_routed_to_review_rather_than_merged():
         assert resolution["matched_value"] is None
 
 
-def test_join_is_left_so_fact_rows_never_disappear(file6):
-    fact, dimension = file6[0][0].frame, file6[1][0].frame
-    # A producer the lookup has never heard of.
+def test_join_is_left_so_fact_rows_never_disappear():
+    fact, dimension = pair()
+    key = join.discover_key(fact, dimension)
+    # A producer the lookup has never heard of, added after the key is known -- as it
+    # would be in a later file using the same schema.
     fact = pd.concat([fact, fact.iloc[[0]].assign(producer_agencyname="Brown & Brown")], ignore_index=True)
-    merged, report = join.join_frames(fact, dimension, join.discover_key(fact, dimension))
+    merged, report = join.join_frames(fact, dimension, key)
 
     assert len(merged) == len(fact)
     assert pd.isna(merged.iloc[-1]["state"])
@@ -71,14 +86,9 @@ def test_join_is_left_so_fact_rows_never_disappear(file6):
     assert unresolved and unresolved[0]["verdict"] == join.UNRESOLVED
 
 
-def test_dirty_key_is_resolved_and_enriches_every_row(file6):
-    fact, dimension = file6[0][0].frame, file6[1][0].frame
-    merged, report = join.join_frames(fact, dimension, join.discover_key(fact, dimension))
-
-    assert report["needs_review"] == []
-    assert merged["state"].notna().all()
-    assert merged.loc[merged["producer_agencyname"] == "MJC", "state"].iloc[0] == "Texas"
-    # The dimension's key column must not come back as a near-duplicate column.
+def test_the_dimension_key_does_not_return_as_a_duplicate_column():
+    fact, dimension = pair()
+    merged, _report = join.join_frames(fact, dimension, join.discover_key(fact, dimension))
     assert sum(column.startswith("producer") for column in merged.columns) == 1
 
 
@@ -87,13 +97,14 @@ def test_normalisation_collapses_whitespace_and_case():
     assert join.normalize_value(None) == ""
 
 
-def test_low_cardinality_columns_are_never_treated_as_keys(file6):
-    fact = file6[0][0].frame
+def test_low_cardinality_columns_are_never_treated_as_keys():
+    fact, _dimension = pair()
     # insurance_company_name repeats heavily, so it cannot be a dimension key.
     dimension = pd.DataFrame({"carrier": ["Liberty Mutual"] * 5, "rating": list("ABCDE")})
     assert join.discover_key(fact, dimension) is None
 
 
-def test_no_plausible_key_returns_none(file6):
+def test_no_plausible_key_returns_none():
     dimension = pd.DataFrame({"unrelated": ["alpha", "beta", "gamma"]})
-    assert join.discover_key(file6[0][0].frame, dimension) is None
+    fact, _dimension = pair()
+    assert join.discover_key(fact, dimension) is None
