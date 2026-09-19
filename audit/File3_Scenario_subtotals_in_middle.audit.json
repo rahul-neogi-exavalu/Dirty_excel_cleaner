@@ -1,0 +1,196 @@
+{
+  "source_file": "sample_files_uncleaned\\File3_Scenario_subtotals_in_middle.xlsx",
+  "generated_at": "2026-09-20T02:23:33",
+  "embedded_images": 0,
+  "sheets": [
+    {
+      "sheet": "Sheet",
+      "raw_shape": [
+        14,
+        8
+      ],
+      "error_cells_nulled": [],
+      "merged_ranges": [],
+      "dropped_rows": [
+        {
+          "row_index": 5,
+          "classification": "SUBTOTAL",
+          "content": "Subtotal - East Zone PC |  |  |  | 70464.59"
+        },
+        {
+          "row_index": 9,
+          "classification": "SUBTOTAL",
+          "content": "Subtotal - West Zone PC |  |  |  | 107164.96"
+        },
+        {
+          "row_index": 13,
+          "classification": "SUBTOTAL",
+          "content": "Subtotal - North Zone PC |  |  |  | 102102.74"
+        }
+      ],
+      "notes": [],
+      "block_origin": {
+        "row": 0,
+        "column": 0
+      },
+      "orientation": {
+        "row_alias_rate": 1.0,
+        "column_alias_rate": 0.091,
+        "decided_by": "alias_match",
+        "orientation": "normal"
+      },
+      "header": {
+        "row_index": 0,
+        "alias_rate": 1.0,
+        "scores": [
+          {
+            "row": 0,
+            "alias_rate": 1.0,
+            "matched": 8
+          },
+          {
+            "row": 1,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 2,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 3,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 4,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 5,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 6,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 7,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 8,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 9,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 10,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 11,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 12,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 13,
+            "alias_rate": 0.0,
+            "matched": 0
+          }
+        ]
+      },
+      "column_mapping": {
+        "profitCenterName": "profit_center_name",
+        "ProfitCenterNumber": "profit_center_number",
+        "Producer/AgencyName": "producer_agency_name",
+        "InsuranceCompanyName": "insurance_company_name",
+        "Premium": "premium",
+        "PolicyNumber": "policy_number",
+        "AccountingEffectiveDate": "accounting_effective_date",
+        "Commission%": "commission_pct"
+      },
+      "unmapped_columns": [],
+      "coercion_failures": [],
+      "validation": [],
+      "clean_shape": [
+        10,
+        8
+      ],
+      "canonical_fields": [
+        "accounting_effective_date",
+        "commission_pct",
+        "insurance_company_name",
+        "policy_number",
+        "premium",
+        "producer_agency_name",
+        "profit_center_name",
+        "profit_center_number"
+      ]
+    }
+  ],
+  "workbook": {
+    "sheet_roles": [
+      {
+        "sheet": "Sheet",
+        "rows": 10,
+        "fact_signal_fields": [
+          "accounting_effective_date",
+          "commission_pct",
+          "policy_number",
+          "premium"
+        ],
+        "reason": "carries transactional fields (premium / policy / date)",
+        "name_hint": false,
+        "role": "FACT"
+      }
+    ],
+    "relationships": [],
+    "join": null
+  },
+  "outputs": [
+    {
+      "file": "File3_Scenario_subtotals_in_middle.csv",
+      "kind": "standalone",
+      "source_sheets": [
+        "Sheet"
+      ],
+      "rows": 10,
+      "columns": [
+        "profit_center_name",
+        "profit_center_number",
+        "producer_agency_name",
+        "insurance_company_name",
+        "premium",
+        "policy_number",
+        "accounting_effective_date",
+        "commission_pct"
+      ]
+    }
+  ],
+  "summary": {
+    "rows_dropped": 3,
+    "dropped_by_classification": {
+      "SUBTOTAL": 3
+    },
+    "coercion_failures": 0,
+    "validation_findings": 0,
+    "join_values_needing_review": 0
+  },
+  "needs_human_review": []
+}

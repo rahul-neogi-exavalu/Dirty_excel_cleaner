@@ -1,0 +1,11 @@
+profit_center_name,profit_center_number,producer_agency_name,insurance_company_name,premium,policy_number,accounting_effective_date,commission_pct
+East Zone PC,1023,Metro Agency Group,Heritage Casualty Co,19559.67,POL-1000001,2026-01-01,16.93
+East Zone PC,1023,Apex Insurance Brokers,Global Assurance Corp,18149.08,POL-1000002,2026-01-08,18.04
+East Zone PC,1023,Metro Agency Group,Global Assurance Corp,25043.47,POL-1000003,2026-01-15,10.25
+East Zone PC,1023,Apex Insurance Brokers,Heritage Casualty Co,7712.37,POL-1000004,2026-01-22,9.62
+West Zone PC,1087,Pinnacle Agency Partners,Zenith Insurance Group,38958.73,POL-1000005,2026-01-29,14.06
+West Zone PC,1087,Metro Agency Group,Heritage Casualty Co,37791.99,POL-1000006,2026-02-05,10.58
+West Zone PC,1087,Sunrise Producers LLC,Zenith Insurance Group,30414.24,POL-1000007,2026-02-12,17.96
+North Zone PC,1029,Pinnacle Agency Partners,Liberty Mutual,37135.46,POL-1000008,2026-02-19,15.67
+North Zone PC,1029,Pinnacle Agency Partners,Liberty Mutual,31206.02,POL-1000009,2026-02-26,11.35
+North Zone PC,1029,Pinnacle Agency Partners,Heritage Casualty Co,33761.26,POL-1000010,2026-03-05,18.16

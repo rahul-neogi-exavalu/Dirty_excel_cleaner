@@ -1,0 +1,244 @@
+{
+  "source_file": "sample_files_uncleaned\\File2_Scenarios5-8_Combined.xlsx",
+  "generated_at": "2026-09-20T02:23:33",
+  "embedded_images": 1,
+  "sheets": [
+    {
+      "sheet": "Data",
+      "raw_shape": [
+        21,
+        8
+      ],
+      "error_cells_nulled": [
+        "A1=#VALUE!"
+      ],
+      "merged_ranges": [
+        "A1:D2"
+      ],
+      "dropped_rows": [
+        {
+          "row_index": 0,
+          "classification": "BANNER",
+          "content": "Exavalu"
+        },
+        {
+          "row_index": 2,
+          "classification": "BANNER",
+          "content": "Report Generated On: 2026-09-18 17:02 IST"
+        },
+        {
+          "row_index": 3,
+          "classification": "BANNER",
+          "content": "Confidential - Internal Use Only"
+        },
+        {
+          "row_index": 15,
+          "classification": "SUBTOTAL",
+          "content": "Grand Total |  |  |  | 230712.19 |  |  | 13.87"
+        },
+        {
+          "row_index": 17,
+          "classification": "FOOTER",
+          "content": "*** End of Report ***"
+        },
+        {
+          "row_index": 18,
+          "classification": "FOOTER",
+          "content": "For queries contact: support@example.com"
+        }
+      ],
+      "notes": [
+        "leading empty gutter trimmed: 2 row(s), 0 column(s)"
+      ],
+      "block_origin": {
+        "row": 2,
+        "column": 0
+      },
+      "orientation": {
+        "row_alias_rate": 1.0,
+        "column_alias_rate": 0.091,
+        "decided_by": "alias_match",
+        "orientation": "normal"
+      },
+      "header": {
+        "row_index": 4,
+        "alias_rate": 1.0,
+        "scores": [
+          {
+            "row": 0,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 1,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 2,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 3,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 4,
+            "alias_rate": 1.0,
+            "matched": 8
+          },
+          {
+            "row": 5,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 6,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 7,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 8,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 9,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 10,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 11,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 12,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 13,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 14,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 15,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 16,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 17,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 18,
+            "alias_rate": 0.0,
+            "matched": 0
+          }
+        ]
+      },
+      "column_mapping": {
+        "profitCenterName": "profit_center_name",
+        "ProfitCenterNumber": "profit_center_number",
+        "Producer/AgencyName": "producer_agency_name",
+        "InsuranceCompanyName": "insurance_company_name",
+        "Premium": "premium",
+        "PolicyNumber": "policy_number",
+        "AccountingEffectiveDate": "accounting_effective_date",
+        "Commission%": "commission_pct"
+      },
+      "unmapped_columns": [],
+      "coercion_failures": [],
+      "validation": [],
+      "clean_shape": [
+        10,
+        8
+      ],
+      "canonical_fields": [
+        "accounting_effective_date",
+        "commission_pct",
+        "insurance_company_name",
+        "policy_number",
+        "premium",
+        "producer_agency_name",
+        "profit_center_name",
+        "profit_center_number"
+      ]
+    }
+  ],
+  "workbook": {
+    "sheet_roles": [
+      {
+        "sheet": "Data",
+        "rows": 10,
+        "fact_signal_fields": [
+          "accounting_effective_date",
+          "commission_pct",
+          "policy_number",
+          "premium"
+        ],
+        "reason": "carries transactional fields (premium / policy / date)",
+        "name_hint": false,
+        "role": "FACT"
+      }
+    ],
+    "relationships": [],
+    "join": null
+  },
+  "outputs": [
+    {
+      "file": "File2_Scenarios5-8_Combined.csv",
+      "kind": "standalone",
+      "source_sheets": [
+        "Data"
+      ],
+      "rows": 10,
+      "columns": [
+        "profit_center_name",
+        "profit_center_number",
+        "producer_agency_name",
+        "insurance_company_name",
+        "premium",
+        "policy_number",
+        "accounting_effective_date",
+        "commission_pct"
+      ]
+    }
+  ],
+  "summary": {
+    "rows_dropped": 6,
+    "dropped_by_classification": {
+      "BANNER": 3,
+      "FOOTER": 2,
+      "SUBTOTAL": 1
+    },
+    "coercion_failures": 0,
+    "validation_findings": 0,
+    "join_values_needing_review": 0
+  },
+  "needs_human_review": []
+}

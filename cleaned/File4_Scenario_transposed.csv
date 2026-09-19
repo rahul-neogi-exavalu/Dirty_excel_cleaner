@@ -1,0 +1,11 @@
+profit_center_name,profit_center_number,producer_agency_name,insurance_company_name,premium,policy_number,accounting_effective_date,commission_pct
+Central PC,1097,Pinnacle Agency Partners,Liberty Mutual,36650.94,POL-1100001,2026-01-01,15.54
+South Zone PC,1033,Metro Agency Group,Zenith Insurance Group,32043.76,POL-1100002,2026-01-08,13.53
+Central PC,1005,Pinnacle Agency Partners,Zenith Insurance Group,49273.26,POL-1100003,2026-01-15,9.4
+East Zone PC,1016,Pinnacle Agency Partners,Liberty Mutual,24105.48,POL-1100004,2026-01-22,17.36
+North Zone PC,1011,Sunrise Producers LLC,Zenith Insurance Group,30151.09,POL-1100005,2026-01-29,18.56
+South Zone PC,1054,Coastal Risk Advisors,National Indemnity Co,22710.27,POL-1100006,2026-02-05,14.0
+South Zone PC,1046,Pinnacle Agency Partners,Zenith Insurance Group,37188.16,POL-1100007,2026-02-12,15.73
+North Zone PC,1042,Sunrise Producers LLC,Heritage Casualty Co,25243.25,POL-1100008,2026-02-19,9.74
+South Zone PC,1061,Apex Insurance Brokers,National Indemnity Co,36505.38,POL-1100009,2026-02-26,5.68
+South Zone PC,1045,Coastal Risk Advisors,Liberty Mutual,36478.55,POL-1100010,2026-03-05,10.83

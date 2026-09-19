@@ -1,0 +1,342 @@
+{
+  "source_file": "sample_files_uncleaned\\File6_Scenarios_MultipleSheetJoin.xlsx",
+  "generated_at": "2026-09-20T02:23:33",
+  "embedded_images": 0,
+  "sheets": [
+    {
+      "sheet": "Report",
+      "raw_shape": [
+        11,
+        8
+      ],
+      "error_cells_nulled": [],
+      "merged_ranges": [],
+      "dropped_rows": [],
+      "notes": [],
+      "block_origin": {
+        "row": 0,
+        "column": 0
+      },
+      "orientation": {
+        "row_alias_rate": 1.0,
+        "column_alias_rate": 0.091,
+        "decided_by": "alias_match",
+        "orientation": "normal"
+      },
+      "header": {
+        "row_index": 0,
+        "alias_rate": 1.0,
+        "scores": [
+          {
+            "row": 0,
+            "alias_rate": 1.0,
+            "matched": 8
+          },
+          {
+            "row": 1,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 2,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 3,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 4,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 5,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 6,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 7,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 8,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 9,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 10,
+            "alias_rate": 0.0,
+            "matched": 0
+          }
+        ]
+      },
+      "column_mapping": {
+        "profitCenterName": "profit_center_name",
+        "ProfitCenterNumber": "profit_center_number",
+        "Producer/AgencyName": "producer_agency_name",
+        "InsuranceCompanyName": "insurance_company_name",
+        "Premium": "premium",
+        "PolicyNumber": "policy_number",
+        "AccountingEffectiveDate": "accounting_effective_date",
+        "Commission%": "commission_pct"
+      },
+      "unmapped_columns": [],
+      "coercion_failures": [],
+      "validation": [],
+      "clean_shape": [
+        10,
+        8
+      ],
+      "canonical_fields": [
+        "accounting_effective_date",
+        "commission_pct",
+        "insurance_company_name",
+        "policy_number",
+        "premium",
+        "producer_agency_name",
+        "profit_center_name",
+        "profit_center_number"
+      ]
+    },
+    {
+      "sheet": "Producer",
+      "raw_shape": [
+        6,
+        4
+      ],
+      "error_cells_nulled": [],
+      "merged_ranges": [],
+      "dropped_rows": [],
+      "notes": [],
+      "block_origin": {
+        "row": 0,
+        "column": 0
+      },
+      "orientation": {
+        "row_alias_rate": 1.0,
+        "column_alias_rate": 0.167,
+        "decided_by": "alias_match",
+        "orientation": "normal"
+      },
+      "header": {
+        "row_index": 0,
+        "alias_rate": 1.0,
+        "scores": [
+          {
+            "row": 0,
+            "alias_rate": 1.0,
+            "matched": 4
+          },
+          {
+            "row": 1,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 2,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 3,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 4,
+            "alias_rate": 0.0,
+            "matched": 0
+          },
+          {
+            "row": 5,
+            "alias_rate": 0.0,
+            "matched": 0
+          }
+        ]
+      },
+      "column_mapping": {
+        "Producer": "producer_agency_name",
+        "Address": "address",
+        "State": "state",
+        "ZIP Code": "zip_code"
+      },
+      "unmapped_columns": [],
+      "coercion_failures": [],
+      "validation": [],
+      "clean_shape": [
+        5,
+        4
+      ],
+      "canonical_fields": [
+        "address",
+        "producer_agency_name",
+        "state",
+        "zip_code"
+      ]
+    }
+  ],
+  "workbook": {
+    "sheet_roles": [
+      {
+        "sheet": "Report",
+        "rows": 10,
+        "fact_signal_fields": [
+          "accounting_effective_date",
+          "commission_pct",
+          "policy_number",
+          "premium"
+        ],
+        "reason": "carries transactional fields (premium / policy / date)",
+        "name_hint": false,
+        "role": "FACT"
+      },
+      {
+        "sheet": "Producer",
+        "rows": 5,
+        "fact_signal_fields": [],
+        "reason": "small, one unique entity per row, no transactional fields",
+        "name_hint": true,
+        "role": "DIMENSION"
+      }
+    ],
+    "relationships": [
+      {
+        "sheets": [
+          "Report",
+          "Producer"
+        ],
+        "schema_overlap": 0.091,
+        "roles": [
+          "FACT",
+          "DIMENSION"
+        ],
+        "decision": "JOIN",
+        "discovered_key": {
+          "fact_column": "producer_agency_name",
+          "dimension_column": "producer_agency_name",
+          "exact_overlap": 0.8,
+          "fuzzy_overlap": null,
+          "method": "exact_value_overlap"
+        }
+      }
+    ],
+    "join": {
+      "join_key": {
+        "fact_column": "producer_agency_name",
+        "dimension_column": "producer_agency_name"
+      },
+      "discovery": {
+        "exact_overlap": 0.8,
+        "fuzzy_overlap": null,
+        "method": "exact_value_overlap"
+      },
+      "resolutions": [
+        {
+          "source_value": "MJC",
+          "matched_value": "MJC Agency Group",
+          "candidate_value": "MJC Agency Group",
+          "verdict": "auto_resolved",
+          "best_score": 100.0,
+          "runner_up_score": 9.5,
+          "method": "fuzzy_token_set"
+        },
+        {
+          "source_value": "Pinnacle Agency Partners",
+          "matched_value": "Pinnacle Agency Partners",
+          "verdict": "auto_resolved",
+          "best_score": 100.0,
+          "runner_up_score": null,
+          "method": "exact"
+        },
+        {
+          "source_value": "Coastal Risk Advisors",
+          "matched_value": "Coastal Risk Advisors",
+          "verdict": "auto_resolved",
+          "best_score": 100.0,
+          "runner_up_score": null,
+          "method": "exact"
+        },
+        {
+          "source_value": "Apex Insurance Brokers",
+          "matched_value": "Apex Insurance Brokers",
+          "verdict": "auto_resolved",
+          "best_score": 100.0,
+          "runner_up_score": null,
+          "method": "exact"
+        },
+        {
+          "source_value": "Metro Agency Group",
+          "matched_value": "Metro Agency Group",
+          "verdict": "auto_resolved",
+          "best_score": 100.0,
+          "runner_up_score": null,
+          "method": "exact"
+        }
+      ],
+      "needs_review": [],
+      "fact_rows_in": 10,
+      "fact_rows_out": 10,
+      "enriched_rows": 10
+    }
+  },
+  "outputs": [
+    {
+      "file": "File6_Scenarios_MultipleSheetJoin.csv",
+      "kind": "joined",
+      "source_sheets": [
+        "Report",
+        "Producer"
+      ],
+      "rows": 10,
+      "columns": [
+        "profit_center_name",
+        "profit_center_number",
+        "producer_agency_name",
+        "insurance_company_name",
+        "premium",
+        "policy_number",
+        "accounting_effective_date",
+        "commission_pct",
+        "address",
+        "state",
+        "zip_code"
+      ]
+    },
+    {
+      "file": "File6_Scenarios_MultipleSheetJoin_Producer.csv",
+      "kind": "dimension",
+      "source_sheets": [
+        "Producer"
+      ],
+      "rows": 5,
+      "columns": [
+        "producer_agency_name",
+        "address",
+        "state",
+        "zip_code"
+      ]
+    }
+  ],
+  "summary": {
+    "rows_dropped": 0,
+    "dropped_by_classification": {},
+    "coercion_failures": 0,
+    "validation_findings": 0,
+    "join_values_needing_review": 0
+  },
+  "needs_human_review": []
+}

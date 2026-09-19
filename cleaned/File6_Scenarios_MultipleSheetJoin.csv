@@ -1,0 +1,11 @@
+profit_center_name,profit_center_number,producer_agency_name,insurance_company_name,premium,policy_number,accounting_effective_date,commission_pct,address,state,zip_code
+InstaCover,PC0002,MJC,Zenith Insurance Group,12486.7,POL-1000005,2026-04-19,10.0,"1200 Main Street, Suite 400, Dallas",Texas,75202
+InstaCover,PC0002,Pinnacle Agency Partners,Heritage Casualty Co,18786.34,POL-1000006,2026-04-20,10.0,"9515 Delegates Row, Indianapolis",Indiana,46240
+InstaCover,PC0002,Coastal Risk Advisors,National Indemnity Co,11624.81,POL-1000007,2026-04-21,10.0,"1514 Roberts Dr, Jacksonville Beach",Florida,32250
+InstaCover,PC0002,Apex Insurance Brokers,Liberty Mutual,15030.96,POL-1000001,2026-04-22,10.0,"20 Village Center Dr, Swedesboro",New Jersey,08085
+InstaCover,PC0002,Metro Agency Group,Heritage Casualty Co,29278.27,POL-1000002,2026-04-23,10.0,"32646 Five Mile Rd, Livonia",Michigan,48154
+InstaCover,PC0002,Metro Agency Group,National Indemnity Co,38701.69,POL-1000003,2026-04-24,10.0,"32646 Five Mile Rd, Livonia",Michigan,48154
+InstaCover,PC0002,Coastal Risk Advisors,Heritage Casualty Co,24274.04,POL-1000004,2026-04-25,10.0,"1514 Roberts Dr, Jacksonville Beach",Florida,32250
+InstaCover,PC0002,Pinnacle Agency Partners,Global Assurance Corp,9710.56,POL-1000008,2026-04-26,10.0,"9515 Delegates Row, Indianapolis",Indiana,46240
+InstaCover,PC0002,Metro Agency Group,Global Assurance Corp,38901.66,POL-1000009,2026-04-27,10.0,"32646 Five Mile Rd, Livonia",Michigan,48154
+InstaCover,PC0002,Pinnacle Agency Partners,Heritage Casualty Co,31917.16,POL-1000010,2026-04-28,10.0,"9515 Delegates Row, Indianapolis",Indiana,46240
