@@ -1,161 +1,210 @@
 {
   "source_file": "sample_files_uncleaned\\File3_Scenario_subtotals_in_middle.xlsx",
-  "generated_at": "2026-09-20T02:23:33",
+  "generated_at": "2026-09-20T03:22:29",
   "embedded_images": 0,
-  "sheets": [
+  "tables": [
     {
       "sheet": "Sheet",
-      "raw_shape": [
+      "region": 1,
+      "regions_on_sheet": 1,
+      "region_shape": [
         14,
         8
       ],
+      "region_origin": {
+        "row": 0,
+        "column": 0,
+        "how": "row_segmentation"
+      },
       "error_cells_nulled": [],
       "merged_ranges": [],
       "dropped_rows": [
         {
-          "row_index": 5,
+          "sheet_row": 6,
+          "region_row": 5,
           "classification": "SUBTOTAL",
+          "reason": "column 4 equals the sum of the 4 data rows above",
           "content": "Subtotal - East Zone PC |  |  |  | 70464.59"
         },
         {
-          "row_index": 9,
+          "sheet_row": 10,
+          "region_row": 9,
           "classification": "SUBTOTAL",
+          "reason": "column 4 equals the sum of the 3 data rows above",
           "content": "Subtotal - West Zone PC |  |  |  | 107164.96"
         },
         {
-          "row_index": 13,
+          "sheet_row": 14,
+          "region_row": 13,
           "classification": "SUBTOTAL",
+          "reason": "column 4 equals the sum of the 3 data rows above",
           "content": "Subtotal - North Zone PC |  |  |  | 102102.74"
         }
       ],
       "notes": [],
-      "block_origin": {
-        "row": 0,
-        "column": 0
-      },
       "orientation": {
-        "row_alias_rate": 1.0,
-        "column_alias_rate": 0.091,
-        "decided_by": "alias_match",
+        "row_score": 1.938,
+        "column_score": 0.904,
+        "margin": 1.034,
+        "confident": true,
         "orientation": "normal"
       },
       "header": {
         "row_index": 0,
-        "alias_rate": 1.0,
+        "detected": true,
+        "score": 0.887,
+        "multi_row": false,
         "scores": [
           {
             "row": 0,
-            "alias_rate": 1.0,
-            "matched": 8
+            "score": 0.887,
+            "contrast": 0.62,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 1,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.544,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 2,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.544,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 3,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.544,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 4,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.544,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 5,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.463,
+            "contrast": 0.0,
+            "textness": 0.5,
+            "uniqueness": 1.0,
+            "fill_ratio": 0.25,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 6,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.544,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 7,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.544,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 8,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.544,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 9,
-            "alias_rate": 0.0,
-            "matched": 0
-          },
-          {
-            "row": 10,
-            "alias_rate": 0.0,
-            "matched": 0
-          },
-          {
-            "row": 11,
-            "alias_rate": 0.0,
-            "matched": 0
-          },
-          {
-            "row": 12,
-            "alias_rate": 0.0,
-            "matched": 0
-          },
-          {
-            "row": 13,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.463,
+            "contrast": 0.0,
+            "textness": 0.5,
+            "uniqueness": 1.0,
+            "fill_ratio": 0.25,
+            "brevity": 1.0,
+            "emphasis": 0.0
           }
         ]
       },
-      "column_mapping": {
-        "profitCenterName": "profit_center_name",
-        "ProfitCenterNumber": "profit_center_number",
-        "Producer/AgencyName": "producer_agency_name",
-        "InsuranceCompanyName": "insurance_company_name",
-        "Premium": "premium",
-        "PolicyNumber": "policy_number",
-        "AccountingEffectiveDate": "accounting_effective_date",
-        "Commission%": "commission_pct"
+      "inferred_types": {
+        "profitcentername": "text",
+        "profitcenternumber": "int",
+        "producer_agencyname": "text",
+        "insurancecompanyname": "text",
+        "premium": "float",
+        "policynumber": "id_string",
+        "accountingeffectivedate": "date_string",
+        "commission": "float"
       },
-      "unmapped_columns": [],
       "coercion_failures": [],
       "validation": [],
+      "column_names": [
+        "profitcentername",
+        "profitcenternumber",
+        "producer_agencyname",
+        "insurancecompanyname",
+        "premium",
+        "policynumber",
+        "accountingeffectivedate",
+        "commission"
+      ],
       "clean_shape": [
         10,
         8
-      ],
-      "canonical_fields": [
-        "accounting_effective_date",
-        "commission_pct",
-        "insurance_company_name",
-        "policy_number",
-        "premium",
-        "producer_agency_name",
-        "profit_center_name",
-        "profit_center_number"
       ]
     }
   ],
   "workbook": {
-    "sheet_roles": [
+    "table_roles": [
       {
-        "sheet": "Sheet",
+        "table": "Sheet",
         "rows": 10,
-        "fact_signal_fields": [
-          "accounting_effective_date",
-          "commission_pct",
-          "policy_number",
-          "premium"
+        "measure_columns": [
+          "profitcenternumber",
+          "premium",
+          "commission"
         ],
-        "reason": "carries transactional fields (premium / policy / date)",
+        "key_columns": [
+          "premium",
+          "policynumber",
+          "accountingeffectivedate",
+          "commission"
+        ],
+        "date_columns": [
+          "accountingeffectivedate"
+        ],
+        "reason": "has continuous measures alongside a key or a date",
         "name_hint": false,
         "role": "FACT"
       }
@@ -172,14 +221,14 @@
       ],
       "rows": 10,
       "columns": [
-        "profit_center_name",
-        "profit_center_number",
-        "producer_agency_name",
-        "insurance_company_name",
+        "profitcentername",
+        "profitcenternumber",
+        "producer_agencyname",
+        "insurancecompanyname",
         "premium",
-        "policy_number",
-        "accounting_effective_date",
-        "commission_pct"
+        "policynumber",
+        "accountingeffectivedate",
+        "commission"
       ]
     }
   ],
@@ -190,7 +239,10 @@
     },
     "coercion_failures": 0,
     "validation_findings": 0,
-    "join_values_needing_review": 0
+    "join_values_needing_review": 0,
+    "tables_found": 1,
+    "headerless_tables": 0,
+    "low_confidence_orientations": 0
   },
   "needs_human_review": []
 }

@@ -13,8 +13,16 @@ from ahi_clean.reader import read_workbook  # noqa: E402
 
 
 def sheets(filename):
-    """Every sheet of a sample workbook, already extracted."""
+    """Every sheet of a sample workbook, extracted.
+
+    One entry per sheet, each a list of that sheet's table regions -- normally one.
+    """
     return [extract_sheet(grid) for grid in read_workbook(SAMPLES / filename)]
+
+
+def tables(filename):
+    """Every table region in a workbook, flattened across sheets."""
+    return [region for grid in read_workbook(SAMPLES / filename) for region in extract_sheet(grid)]
 
 
 @pytest.fixture(scope="session")

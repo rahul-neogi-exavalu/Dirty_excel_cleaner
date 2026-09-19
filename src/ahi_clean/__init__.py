@@ -1,3 +1,14 @@
-"""Generic cleaner that turns report-shaped Excel exports into table-ready CSVs."""
+"""Schema-free cleaner: report-shaped Excel exports into table-ready CSVs."""
 
-__all__ = ["schema", "typing_utils", "reader", "extract", "orchestrate", "join", "audit"]
+__all__ = [
+    "signals",
+    "typing_utils",
+    "reader",
+    "geometry",
+    "header",
+    "rowclass",
+    "extract",
+    "orchestrate",
+    "join",
+    "audit",
+]

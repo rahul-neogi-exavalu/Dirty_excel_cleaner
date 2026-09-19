@@ -1,233 +1,323 @@
 {
   "source_file": "sample_files_uncleaned\\File6_Scenarios_MultipleSheetJoin.xlsx",
-  "generated_at": "2026-09-20T02:23:33",
+  "generated_at": "2026-09-20T03:22:29",
   "embedded_images": 0,
-  "sheets": [
+  "tables": [
     {
       "sheet": "Report",
-      "raw_shape": [
+      "region": 1,
+      "regions_on_sheet": 1,
+      "region_shape": [
         11,
         8
       ],
+      "region_origin": {
+        "row": 0,
+        "column": 0,
+        "how": "row_segmentation"
+      },
       "error_cells_nulled": [],
       "merged_ranges": [],
       "dropped_rows": [],
       "notes": [],
-      "block_origin": {
-        "row": 0,
-        "column": 0
-      },
       "orientation": {
-        "row_alias_rate": 1.0,
-        "column_alias_rate": 0.091,
-        "decided_by": "alias_match",
+        "row_score": 1.935,
+        "column_score": 0.557,
+        "margin": 1.378,
+        "confident": true,
         "orientation": "normal"
       },
       "header": {
         "row_index": 0,
-        "alias_rate": 1.0,
+        "detected": true,
+        "score": 0.887,
+        "multi_row": false,
         "scores": [
           {
             "row": 0,
-            "alias_rate": 1.0,
-            "matched": 8
+            "score": 0.887,
+            "contrast": 0.62,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 1,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.562,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.12
           },
           {
             "row": 2,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.581,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.25
           },
           {
             "row": 3,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.581,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.25
           },
           {
             "row": 4,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.581,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.25
           },
           {
             "row": 5,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.581,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.25
           },
           {
             "row": 6,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.581,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.25
           },
           {
             "row": 7,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.562,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.12
           },
           {
             "row": 8,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.562,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.12
           },
           {
             "row": 9,
-            "alias_rate": 0.0,
-            "matched": 0
-          },
-          {
-            "row": 10,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.562,
+            "contrast": 0.0,
+            "textness": 0.38,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.12
           }
         ]
       },
-      "column_mapping": {
-        "profitCenterName": "profit_center_name",
-        "ProfitCenterNumber": "profit_center_number",
-        "Producer/AgencyName": "producer_agency_name",
-        "InsuranceCompanyName": "insurance_company_name",
-        "Premium": "premium",
-        "PolicyNumber": "policy_number",
-        "AccountingEffectiveDate": "accounting_effective_date",
-        "Commission%": "commission_pct"
+      "inferred_types": {
+        "profitcentername": "text",
+        "profitcenternumber": "id_string",
+        "producer_agencyname": "text",
+        "insurancecompanyname": "text",
+        "premium": "float",
+        "policynumber": "id_string",
+        "accountingeffectivedate": "date",
+        "commission": "int"
       },
-      "unmapped_columns": [],
       "coercion_failures": [],
       "validation": [],
+      "column_names": [
+        "profitcentername",
+        "profitcenternumber",
+        "producer_agencyname",
+        "insurancecompanyname",
+        "premium",
+        "policynumber",
+        "accountingeffectivedate",
+        "commission"
+      ],
       "clean_shape": [
         10,
         8
-      ],
-      "canonical_fields": [
-        "accounting_effective_date",
-        "commission_pct",
-        "insurance_company_name",
-        "policy_number",
-        "premium",
-        "producer_agency_name",
-        "profit_center_name",
-        "profit_center_number"
       ]
     },
     {
       "sheet": "Producer",
-      "raw_shape": [
+      "region": 1,
+      "regions_on_sheet": 1,
+      "region_shape": [
         6,
         4
       ],
+      "region_origin": {
+        "row": 0,
+        "column": 0,
+        "how": "row_segmentation"
+      },
       "error_cells_nulled": [],
       "merged_ranges": [],
       "dropped_rows": [],
-      "notes": [],
-      "block_origin": {
-        "row": 0,
-        "column": 0
-      },
+      "notes": [
+        "orientation margin 0.19 is narrow; decided by shape (5 records vs 4 fields)"
+      ],
       "orientation": {
-        "row_alias_rate": 1.0,
-        "column_alias_rate": 0.167,
-        "decided_by": "alias_match",
+        "row_score": 1.944,
+        "column_score": 1.75,
+        "margin": 0.194,
+        "confident": false,
         "orientation": "normal"
       },
       "header": {
         "row_index": 0,
-        "alias_rate": 1.0,
+        "detected": true,
+        "score": 0.925,
+        "multi_row": false,
         "scores": [
           {
             "row": 0,
-            "alias_rate": 1.0,
-            "matched": 4
+            "score": 0.925,
+            "contrast": 0.25,
+            "textness": 1.0,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 1.0
           },
           {
             "row": 1,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.637,
+            "contrast": 0.0,
+            "textness": 0.75,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 2,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.637,
+            "contrast": 0.0,
+            "textness": 0.75,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 3,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.637,
+            "contrast": 0.0,
+            "textness": 0.75,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           },
           {
             "row": 4,
-            "alias_rate": 0.0,
-            "matched": 0
-          },
-          {
-            "row": 5,
-            "alias_rate": 0.0,
-            "matched": 0
+            "score": 0.637,
+            "contrast": 0.0,
+            "textness": 0.75,
+            "uniqueness": 1.0,
+            "fill_ratio": 1.0,
+            "brevity": 1.0,
+            "emphasis": 0.0
           }
         ]
       },
-      "column_mapping": {
-        "Producer": "producer_agency_name",
-        "Address": "address",
-        "State": "state",
-        "ZIP Code": "zip_code"
+      "inferred_types": {
+        "producer": "text",
+        "address": "text",
+        "state": "text",
+        "zip_code": "int"
       },
-      "unmapped_columns": [],
       "coercion_failures": [],
       "validation": [],
+      "column_names": [
+        "producer",
+        "address",
+        "state",
+        "zip_code"
+      ],
       "clean_shape": [
         5,
         4
-      ],
-      "canonical_fields": [
-        "address",
-        "producer_agency_name",
-        "state",
-        "zip_code"
       ]
     }
   ],
   "workbook": {
-    "sheet_roles": [
+    "table_roles": [
       {
-        "sheet": "Report",
+        "table": "Report",
         "rows": 10,
-        "fact_signal_fields": [
-          "accounting_effective_date",
-          "commission_pct",
-          "policy_number",
-          "premium"
+        "measure_columns": [
+          "premium",
+          "commission"
         ],
-        "reason": "carries transactional fields (premium / policy / date)",
+        "key_columns": [
+          "premium",
+          "policynumber",
+          "accountingeffectivedate"
+        ],
+        "date_columns": [
+          "accountingeffectivedate"
+        ],
+        "reason": "has continuous measures alongside a key or a date",
         "name_hint": false,
         "role": "FACT"
       },
       {
-        "sheet": "Producer",
+        "table": "Producer",
         "rows": 5,
-        "fact_signal_fields": [],
-        "reason": "small, one unique entity per row, no transactional fields",
+        "measure_columns": [],
+        "key_columns": [
+          "producer",
+          "address",
+          "state",
+          "zip_code"
+        ],
+        "date_columns": [],
+        "reason": "small, one unique entity per row, no continuous measures",
         "name_hint": true,
         "role": "DIMENSION"
       }
     ],
     "relationships": [
       {
-        "sheets": [
+        "tables": [
           "Report",
           "Producer"
         ],
-        "schema_overlap": 0.091,
         "roles": [
           "FACT",
           "DIMENSION"
         ],
+        "name_overlap": 0.0,
         "decision": "JOIN",
         "discovered_key": {
-          "fact_column": "producer_agency_name",
-          "dimension_column": "producer_agency_name",
+          "fact_column": "producer_agencyname",
+          "dimension_column": "producer",
           "exact_overlap": 0.8,
           "fuzzy_overlap": null,
           "method": "exact_value_overlap"
@@ -236,8 +326,8 @@
     ],
     "join": {
       "join_key": {
-        "fact_column": "producer_agency_name",
-        "dimension_column": "producer_agency_name"
+        "fact_column": "producer_agencyname",
+        "dimension_column": "producer"
       },
       "discovery": {
         "exact_overlap": 0.8,
@@ -303,14 +393,14 @@
       ],
       "rows": 10,
       "columns": [
-        "profit_center_name",
-        "profit_center_number",
-        "producer_agency_name",
-        "insurance_company_name",
+        "profitcentername",
+        "profitcenternumber",
+        "producer_agencyname",
+        "insurancecompanyname",
         "premium",
-        "policy_number",
-        "accounting_effective_date",
-        "commission_pct",
+        "policynumber",
+        "accountingeffectivedate",
+        "commission",
         "address",
         "state",
         "zip_code"
@@ -324,7 +414,7 @@
       ],
       "rows": 5,
       "columns": [
-        "producer_agency_name",
+        "producer",
         "address",
         "state",
         "zip_code"
@@ -336,7 +426,10 @@
     "dropped_by_classification": {},
     "coercion_failures": 0,
     "validation_findings": 0,
-    "join_values_needing_review": 0
+    "join_values_needing_review": 0,
+    "tables_found": 2,
+    "headerless_tables": 0,
+    "low_confidence_orientations": 1
   },
   "needs_human_review": []
 }

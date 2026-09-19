@@ -1,4 +1,4 @@
-profit_center_name,profit_center_number,producer_agency_name,insurance_company_name,premium,policy_number,accounting_effective_date,commission_pct
+profitcentername,profitcenternumber,producer_agencyname,insurancecompanyname,premium,policynumber,accountingeffectivedate,commission
 East Zone PC,1079,Metro Agency Group,Heritage Casualty Co,12486.7,POL-600001,2026-01-01,12.3
 South Zone PC,1007,Pinnacle Agency Partners,Zenith Insurance Group,18786.34,POL-600002,2026-01-08,19.63
 North Zone PC,1004,Coastal Risk Advisors,Global Assurance Corp,11624.81,POL-600003,2026-01-15,17.03

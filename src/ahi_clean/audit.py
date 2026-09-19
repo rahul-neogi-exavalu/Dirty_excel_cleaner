@@ -20,7 +20,7 @@ def build_report(source_path, sheet_traces, workbook_report, outputs, image_coun
         "source_file": str(source_path),
         "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "embedded_images": image_count,
-        "sheets": sheet_traces,
+        "tables": sheet_traces,
         "workbook": workbook_report,
         "outputs": [
             {
@@ -38,6 +38,13 @@ def build_report(source_path, sheet_traces, workbook_report, outputs, image_coun
             "coercion_failures": sum(len(trace.get("coercion_failures", [])) for trace in sheet_traces),
             "validation_findings": sum(len(trace.get("validation", [])) for trace in sheet_traces),
             "join_values_needing_review": len(needs_review),
+            "tables_found": len(sheet_traces),
+            "headerless_tables": sum(
+                1 for trace in sheet_traces if not trace.get("header", {}).get("detected", True)
+            ),
+            "low_confidence_orientations": sum(
+                1 for trace in sheet_traces if not trace.get("orientation", {}).get("confident", True)
+            ),
         },
         "needs_human_review": needs_review,
     }

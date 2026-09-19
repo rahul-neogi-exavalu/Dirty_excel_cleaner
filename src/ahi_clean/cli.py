@@ -16,15 +16,21 @@ def clean_workbook(source: Path, out_dir: Path, audit_dir: Path) -> dict:
     """Clean one workbook: write its CSVs and its audit report."""
     stem = source.stem
     grids = read_workbook(source)
-    results = [extract_sheet(grid) for grid in grids]
+    results = [result for grid in grids for result in extract_sheet(grid)]
 
     outputs, workbook_report = orchestrate.plan_workbook(results, stem)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    written = []
+    written, blocked = [], []
     for output in outputs:
         path = out_dir / f"{output.name}.csv"
-        output.frame.to_csv(path, index=False)
+        try:
+            output.frame.to_csv(path, index=False)
+        except PermissionError:
+            # Almost always the file is open in Excel, which locks it for writing.
+            # Skip it, keep cleaning the rest, and say which files need closing.
+            blocked.append(path)
+            continue
         written.append(path)
 
     report = audit.build_report(
@@ -36,7 +42,13 @@ def clean_workbook(source: Path, out_dir: Path, audit_dir: Path) -> dict:
     )
     report_path = audit.write_report(report, audit_dir, stem)
 
-    return {"source": source, "written": written, "report": report_path, "outputs": outputs}
+    return {
+        "source": source,
+        "written": written,
+        "blocked": blocked,
+        "report": report_path,
+        "outputs": outputs,
+    }
 
 
 def main(argv=None) -> int:
@@ -62,13 +74,25 @@ def main(argv=None) -> int:
         return 1
 
     out_dir, audit_dir = Path(args.out), Path(args.audit)
+    blocked: list[Path] = []
     for source in sorted(paths):
         outcome = clean_workbook(source, out_dir, audit_dir)
+        blocked.extend(outcome["blocked"])
         print(f"{source.name}")
         for output in outcome["outputs"]:
             sheets = ", ".join(output.sheets)
             print(f"  -> {output.name}.csv  [{output.kind}] {len(output.frame)} rows  (from {sheets})")
         print(f"  -> {outcome['report'].name}")
+
+    if blocked:
+        print(file=sys.stderr)
+        print(
+            "could not write these (open in another program? close and re-run):",
+            file=sys.stderr,
+        )
+        for path in blocked:
+            print(f"  {path}", file=sys.stderr)
+        return 2
 
     return 0
 

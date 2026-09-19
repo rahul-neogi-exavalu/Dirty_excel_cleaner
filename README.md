@@ -1,13 +1,15 @@
-# AHI POC — Excel cleaning pipeline
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical design and diagrams.
+# AHI POC — Schema-free Excel cleaning pipeline
 
 Turns report-shaped Excel exports (logos, banners, footers, blank gutters, subtotals,
 transposed layouts, multi-sheet workbooks) into flat, table-ready CSVs — with an audit
 report explaining every structural decision.
 
-No per-file configuration. Every choice is made from cell content, so the pipeline
-works on files it has not seen.
+**No schema, no aliases, no keyword lists.** The pipeline has no idea what a "premium" is.
+Every decision comes from the data's own shape, types, distinctness, density and
+arithmetic, so a file with column names it has never seen is handled by the same code path
+as a known one. Output columns are the file's own labels, normalized.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical design and diagrams.
 
 ## Run
 
@@ -23,7 +25,7 @@ python clean.py
 ```
 
 With no arguments it cleans the bundled samples into `cleaned/` and `audit/`. To point it
-at other files, or elsewhere:
+at other files:
 
 ```bash
 python clean.py "some_folder/*.xlsx" --out cleaned --audit audit
@@ -45,59 +47,72 @@ python -m pytest
 | `File6_Scenarios_MultipleSheetJoin.csv` | Report joined to the Producer lookup | 10 |
 | `File6_Scenarios_MultipleSheetJoin_Producer.csv` | the lookup, on its own | 5 |
 
-## How it decides
+## How it decides, in one line each
 
-**Orientation.** The canonical schema is known ahead of time, so the axis whose leading
-lines read as field names is the field axis. File4's column 1 matches 8/8; its row 1
-matches 1/11. Type homogeneity, computed on a fine lattice that separates `POL-1000001`
-from `Metro Agency Group`, only breaks near-ties.
+**Regions.** A sheet may hold several tables. Blank rows are grouped by whether the column
+*type profile* matches across the gap; blank columns by whether the two sides span the same
+*rows*. **Gap size is never an input** — one blank row and twelve behave identically.
 
-**Header band.** The row with the highest alias match rate, scanning a band — not the
-first populated row (File2's banner would win) and not the first gapless row (File1's
-header has an empty gutter at F2). Empty cells are excluded from the match denominator
-so a header with a hole is not penalised.
+**Orientation.** Each column of an upright table holds one type and its header labels are
+distinct; a transposed table reverses both. File4's column 1 is fully distinct (1.00) while
+its row 1 repeats `South Zone PC` four times (0.45).
 
-**Junk rows.** Classified by content across the whole body, because File3's subtotals sit
-mid-table. A total row must both name itself in its first cell *and* leave the
-record-identifying columns empty, so a profit centre legitimately called "Total Risk PC"
-survives. A single blank row is a cosmetic separator (File1 row 8), not a terminator.
+**Header.** Scored on type contrast with the columns below, textness, uniqueness, fill and
+brevity — plus bold/fill/border as a bonus. Below 0.55 the pipeline **refuses to pick one**
+and names columns positionally, because naming a data row as the header is the worse
+failure.
 
-**Join keys.** Found from values, never header names — `producer_agency_name` and
-`producer` do not string-match. A cheap normalized exact-overlap pass settles most cases;
-fuzzy scoring, which is quadratic, only runs on what is left.
+**Junk rows.** Sparsity finds candidates; **arithmetic confirms them** — a total is a row
+whose number equals the sum of the rows above it. A profit centre named `Total Risk PC`
+survives because it is not sparse and its numbers do not sum.
 
-**Fuzzy resolution has a margin rule.** `token_set_ratio` returns 100 whenever one side's
-tokens are a subset of the other's, so a generic value clears any absolute threshold
-against several candidates at once — `Agency Group` scores 100 against both
-`Metro Agency Group` and `MJC Agency Group`. A match auto-resolves only if it clears 90
-**and** beats the runner-up by 10. `MJC ` passes (100 vs 10); `Agency Group` is flagged
-for a human instead of silently guessed.
+**Join keys.** Found from values, never names — without a schema the two columns are
+literally called `producer_agencyname` and `producer`, and no name matching would pair them.
+Fuzzy matches auto-resolve only if they clear 90 **and** beat the runner-up by 10.
 
-**Joins are always left.** A fact row never disappears because its lookup missed; the
-dimension columns come back null and the value is listed for review.
-
-**Types are decided, not inherited.** `profit_center_number` is always a string (it
-arrives as `1005` in one file and `PC0001` in another). Dates normalise to ISO from both
-text and real datetimes. `commission_pct` stays a whole-number percent. ZIP codes are
-zero-padded to five, restoring the leading zero Excel dropped from `08085`.
+**Types.** Inferred per column. Leading zeros, and near-unique integers of constant width,
+are kept as text — which recovers structurally that `1005` and `PC0001` are both identifiers.
 
 ## Verification
 
-The junk the pipeline strips is the oracle for the data it keeps. File2's discarded grand
-total (`230,712.19`) and File3's three discarded subtotals must equal the sums of the
-cleaned rows — asserted in `tests/test_extract.py`, and all four reconcile exactly.
+**Reconciliation.** The junk the pipeline strips is the oracle for the data it keeps.
+File2's discarded grand total (`230,712.19`) and File3's three subtotals equal the sums of
+the cleaned rows exactly — and they now pass via arithmetic detection, so the check tests
+the real mechanism rather than restating a regex.
+
+**Ablation.** Disabling every text pattern in the codebase changes no output. Disabling
+sparsity, arithmetic or orientation breaks specific files. That is the measured proof the
+hardcoding is gone — full table in [ARCHITECTURE.md §12](ARCHITECTURE.md#12-ablation-what-is-actually-load-bearing).
+
+**Unseen schema.** A file with entirely different column names, a 3-row mid-table gap, a
+gutter column, nested totals and a German footer cleans correctly and reconciles.
+
+118 tests.
 
 ## Layout
 
 ```
 clean.py            entry point (no PYTHONPATH needed)
 src/ahi_clean/
-  schema.py         canonical fields, aliases, target dtypes
+  signals.py        scoring primitives (fill, uniqueness, type profile, contrast)
   typing_utils.py   fine-grained type inference
-  reader.py         workbook -> cell grid (nulls Excel error cells)
-  extract.py        one sheet -> tidy DataFrame + trace
-  orchestrate.py    sheet roles, stack/join decisions
-  join.py           key discovery + fuzzy resolution with the margin rule
+  reader.py         workbook -> cell grid + formatting; nulls error cells
+  geometry.py       sheet -> table regions; all blank-gap handling
+  header.py         header scoring, the no-header path, column naming
+  rowclass.py       sparsity + arithmetic row classification
+  extract.py        per region: orient -> header -> classify -> type -> validate
+  orchestrate.py    table roles, stack/join decisions
+  join.py           value-based key discovery with the margin rule
   audit.py          trace -> JSON report
-  cli.py            python -m ahi_clean
 ```
+
+## Known limits
+
+- **Semantic mapping is out of scope by construction.** Deciding that `Producer` in one file
+  and `Agent Name` in another belong in the same target column needs a schema, a config, an
+  LLM or a human. The pipeline stops at per-file-correct structure and records every
+  inferred type.
+- `08085` stored in Excel as the number `8085` is unrecoverable — the zero was gone before
+  the pipeline saw the file.
+- Orientation needs ≥2 data rows; near-square tables fall back to a shape tiebreak and are
+  flagged `confident: false`.

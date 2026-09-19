@@ -1,4 +1,4 @@
-profit_center_name,profit_center_number,producer_agency_name,insurance_company_name,premium,policy_number,accounting_effective_date,commission_pct
+profitcentername,profitcenternumber,producer_agencyname,insurancecompanyname,premium,policynumber,accountingeffectivedate,commission
 East Zone PC,1023,Metro Agency Group,Heritage Casualty Co,19559.67,POL-1000001,2026-01-01,16.93
 East Zone PC,1023,Apex Insurance Brokers,Global Assurance Corp,18149.08,POL-1000002,2026-01-08,18.04
 East Zone PC,1023,Metro Agency Group,Global Assurance Corp,25043.47,POL-1000003,2026-01-15,10.25

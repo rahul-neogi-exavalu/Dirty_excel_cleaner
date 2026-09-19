@@ -18,6 +18,7 @@ class SheetGrid:
 
     name: str
     rows: list[list]
+    styles: list[list] = field(default_factory=list)
     error_cells: list[str] = field(default_factory=list)
     merged_ranges: list[str] = field(default_factory=list)
     image_count: int = 0
@@ -54,6 +55,7 @@ def _read_sheet(worksheet) -> SheetGrid:
     height = worksheet.max_row or 0
     width = worksheet.max_column or 0
     rows: list[list] = [[None] * width for _ in range(height)]
+    styles: list[list] = [[None] * width for _ in range(height)]
     error_cells: list[str] = []
 
     for row_index in range(1, height + 1):
@@ -70,16 +72,43 @@ def _read_sheet(worksheet) -> SheetGrid:
             if isinstance(value, str):
                 value = value.strip() or None
             rows[row_index - 1][column_index - 1] = value
+            if value is not None:
+                styles[row_index - 1][column_index - 1] = _style_of(cell)
 
     _propagate_merged_values(worksheet, rows)
 
     return SheetGrid(
         name=worksheet.title,
         rows=rows,
+        styles=styles,
         error_cells=error_cells,
         merged_ranges=[str(merged) for merged in worksheet.merged_cells.ranges],
         image_count=len(getattr(worksheet, "_images", [])),
     )
+
+
+def _style_of(cell) -> dict:
+    """Visual emphasis on a cell, used as one header-detection signal.
+
+    Report writers style header rows and leave data rows plain, so this is free
+    evidence already sitting in the file. It is only ever additive: a workbook with no
+    formatting scores zero here and is decided by the content signals alone.
+    """
+    font = cell.font
+    fill = cell.fill
+    filled = bool(
+        fill is not None
+        and fill.fill_type not in (None, "none")
+        and getattr(fill.fgColor, "rgb", None) not in (None, "00000000")
+    )
+    bordered = bool(cell.border is not None and cell.border.bottom is not None
+                    and cell.border.bottom.style)
+    return {
+        "bold": bool(font is not None and font.bold),
+        "filled": filled,
+        "bordered": bordered,
+        "emphasised": bool((font is not None and font.bold) or filled or bordered),
+    }
 
 
 def _propagate_merged_values(worksheet, rows: list[list]) -> None:

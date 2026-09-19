@@ -1,8 +1,8 @@
-"""Turn one report-shaped sheet into a tidy DataFrame, recording every decision.
+"""Turn one sheet into tidy DataFrames -- one per table region -- with a full trace.
 
-The pipeline is deliberately generic: nothing here is keyed to a particular file.
-Each structural choice is made from the cell content and written into a trace so
-that a reviewer can see, afterwards, why a row was dropped or a sheet transposed.
+Nothing in this module knows a field name. Structure is decided by `geometry`,
+`header` and `rowclass`; this file sequences them, applies types, validates, and
+records why every decision went the way it did.
 """
 
 from __future__ import annotations
@@ -13,371 +13,267 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from . import schema, typing_utils
+from . import geometry, header as header_mod, rowclass, signals, typing_utils
 from .typing_utils import is_blank
 
-HEADER_SEARCH_DEPTH = 20
-ORIENTATION_TIEBREAK_MARGIN = 0.2
-
-BANNER = "BANNER"
-BLANK = "BLANK"
-SEPARATOR = "SEPARATOR"
-SUBTOTAL = "SUBTOTAL"
-FOOTER = "FOOTER"
-DATA = "DATA"
-
-_SUBTOTAL_PATTERN = re.compile(r"^\s*(sub\s*-?\s*total|grand\s+total|total)\b", re.IGNORECASE)
-_FOOTER_PATTERN = re.compile(
-    r"^\s*(\*+\s*end of report|end of report|for queries|confidential|report generated on|"
-    r"prepared by|page \d+|source:)",
-    re.IGNORECASE,
-)
+ORIENTATION_MARGIN = 0.3
 
 
 @dataclass
 class SheetResult:
-    """A cleaned sheet plus the trace explaining how it was cleaned."""
+    """One cleaned table region, plus the trace explaining how it was cleaned."""
 
     sheet_name: str
     frame: pd.DataFrame
     trace: dict = field(default_factory=dict)
+    region_index: int = 0
+
+    @property
+    def label(self) -> str:
+        return self.sheet_name if self.region_index == 0 else f"{self.sheet_name}_r{self.region_index + 1}"
 
 
-def extract_sheet(grid) -> SheetResult:
-    """Run the full extraction pipeline over one SheetGrid."""
+def extract_sheet(grid) -> list[SheetResult]:
+    """Extract every table region on a sheet. Returns one result per region."""
+    regions = geometry.find_regions(grid.rows)
+    if not regions:
+        return [
+            SheetResult(
+                grid.name,
+                pd.DataFrame(),
+                {
+                    "sheet": grid.name,
+                    "notes": ["no table-shaped region found on this sheet"],
+                    "dropped_rows": [],
+                },
+            )
+        ]
+
+    return [
+        _extract_region(grid, region, index, len(regions))
+        for index, region in enumerate(regions)
+    ]
+
+
+def _extract_region(grid, region, index, total) -> SheetResult:
     trace: dict = {
         "sheet": grid.name,
-        "raw_shape": [grid.height, grid.width],
+        "region": index + 1,
+        "regions_on_sheet": total,
+        "region_shape": [region.height, region.width],
+        "region_origin": {
+            "row": region.row_offset,
+            "column": region.column_offset,
+            "how": region.origin,
+        },
         "error_cells_nulled": grid.error_cells,
         "merged_ranges": grid.merged_ranges,
         "dropped_rows": [],
         "notes": [],
     }
 
-    rows = _bound_block(grid.rows, trace)
-    if not rows:
-        trace["notes"].append("sheet is empty after bounding; nothing extracted")
-        return SheetResult(grid.name, pd.DataFrame(), trace)
+    rows, styles = _orient(region, grid, trace)
+    width = max((len(row) for row in rows), default=0)
 
-    rows = _orient(rows, trace)
-    header_index = _find_header_row(rows, trace)
-    header = rows[header_index]
-    body = rows[header_index + 1 :]
+    found = header_mod.find_header(rows, width, styles)
+    trace["header"] = {
+        "row_index": found.row_index,
+        "detected": found.detected,
+        "score": found.score,
+        "multi_row": found.multi_row,
+        "scores": found.scores[:10],
+    }
+    trace["notes"].extend(found.notes)
 
-    # Banner rows sit above the header: titles, timestamps, confidentiality notices.
-    for offset, banner_row in enumerate(rows[:header_index]):
-        if not _is_blank_row(banner_row):
-            _record_drop(trace, offset, BANNER, banner_row)
+    body_start = 0 if not found.detected else found.row_index + (2 if found.multi_row else 1)
+    header_row = rows[found.row_index] if found.detected else None
 
-    header, body = _drop_gutter_columns(header, body, trace)
-    column_names, mapping = _name_columns(header, trace)
-    body = _classify_and_strip(body, column_names, header_index, trace)
+    # Rows above the header are decoration by position, whatever they say.
+    for offset in range(0, body_start - (2 if found.multi_row else 1) if found.detected else 0):
+        if not all(is_blank(cell) for cell in rows[offset]):
+            _record_drop(trace, region, offset, rowclass.BANNER, rows[offset], "sits above the header")
 
-    frame = pd.DataFrame(body, columns=column_names)
-    frame = _coerce_dtypes(frame, trace)
+    body = rows[body_start:]
+    names = _fit_names(found.names, width)
+
+    verdicts = rowclass.classify_rows(body, header_names=names, header_row=header_row)
+    kept = []
+    for verdict in verdicts:
+        if verdict.dropped:
+            _record_drop(
+                trace, region, body_start + verdict.index,
+                verdict.classification, body[verdict.index], verdict.reason,
+            )
+        else:
+            kept.append(body[verdict.index])
+            if verdict.confidence < 1.0:
+                trace["notes"].append(
+                    f"row {region.row_offset + body_start + verdict.index} kept with low "
+                    f"confidence: {verdict.reason}"
+                )
+
+    frame = pd.DataFrame([_fit_row(row, width) for row in kept], columns=names)
+    frame = _coerce_types(frame, trace)
     _validate(frame, trace)
 
+    trace["column_names"] = names
     trace["clean_shape"] = list(frame.shape)
-    trace["canonical_fields"] = sorted(set(mapping.values()))
-    return SheetResult(grid.name, frame, trace)
+    return SheetResult(grid.name, frame, trace, region_index=index)
 
 
 # --------------------------------------------------------------------------- #
-# Step 2: bound the populated block
+# Orientation
 # --------------------------------------------------------------------------- #
 
 
-def _is_blank_row(row) -> bool:
-    return all(is_blank(value) for value in row)
+def _orient(region, grid, trace):
+    """Flip the region if its fields run down the first column.
 
+    Two schema-free signals, summed. Each column of an upright table holds one type
+    while each row is mixed, and a header line's labels are distinct while a line of
+    records repeats values.
+    """
+    rows = region.rows
+    columns = [list(column) for column in zip(*rows)] if rows else []
+    if not columns:
+        return rows, None
 
-def _bound_block(rows, trace) -> list[list]:
-    """Trim fully-empty rows and columns from the outside of the sheet."""
-    kept = [index for index, row in enumerate(rows) if not _is_blank_row(row)]
-    if not kept:
-        return []
-    first_row, last_row = kept[0], kept[-1]
+    row_score = typing_utils.mean_homogeneity(columns[1:] or columns) + signals.uniqueness(rows[0])
+    column_score = typing_utils.mean_homogeneity(rows[1:] or rows) + signals.uniqueness(columns[0])
+    margin = abs(row_score - column_score)
+    transposed = column_score > row_score
 
-    width = max((len(row) for row in rows), default=0)
-    populated_columns = {
-        index
-        for row in rows[first_row : last_row + 1]
-        for index in range(min(len(row), width))
-        if not is_blank(row[index])
-    }
-    if not populated_columns:
-        return []
-    first_column, last_column = min(populated_columns), max(populated_columns)
-
-    if first_row or first_column:
+    if margin < ORIENTATION_MARGIN:
+        # Too close to call on content alone. Tables are far more often taller than
+        # wide, so prefer the reading that yields more records than fields.
+        upright_records, upright_fields = len(rows) - 1, len(columns)
+        transposed = upright_records < upright_fields
         trace["notes"].append(
-            f"leading empty gutter trimmed: {first_row} row(s), {first_column} column(s)"
+            f"orientation margin {margin:.2f} is narrow; decided by shape "
+            f"({upright_records} records vs {upright_fields} fields)"
         )
 
-    block = []
-    for row in rows[first_row : last_row + 1]:
-        padded = list(row) + [None] * (last_column + 1 - len(row))
-        block.append(padded[first_column : last_column + 1])
-    trace["block_origin"] = {"row": first_row, "column": first_column}
-    return block
-
-
-# --------------------------------------------------------------------------- #
-# Step 3: orientation
-# --------------------------------------------------------------------------- #
-
-
-def _best_alias_rate(lines) -> float:
-    """Highest alias match rate among the leading lines of one axis."""
-    return max(
-        (schema.match_aliases(line)[0] for line in lines[:HEADER_SEARCH_DEPTH]),
-        default=0.0,
-    )
-
-
-def _orient(rows, trace) -> list[list]:
-    """Transpose the block if the fields run down column 1 instead of across row 1.
-
-    The primary vote is the alias match rate: because the target schema is known
-    ahead of time, the axis whose first line reads as a list of field names is the
-    field axis. Type homogeneity only breaks near-ties, where it is least likely
-    to be fooled by a schema that is mostly strings.
-    """
-    columns = [list(column) for column in zip(*rows)]
-    # Score a band of leading lines on each axis, not just line 1: a banner can sit
-    # above the header (File2's title block), so the field names are not guaranteed
-    # to be the first thing on their own axis.
-    row_rate = _best_alias_rate(rows)
-    column_rate = _best_alias_rate(columns)
-
-    vote = {"row_alias_rate": round(row_rate, 3), "column_alias_rate": round(column_rate, 3)}
-    decided_by = "alias_match"
-
-    if abs(row_rate - column_rate) < ORIENTATION_TIEBREAK_MARGIN:
-        # Ambiguous on names alone -- fall back to which axis is type-homogeneous.
-        # In a normal table each column holds one type; in a transposed one each row does.
-        column_homogeneity = typing_utils.mean_homogeneity(columns[1:] or columns)
-        row_homogeneity = typing_utils.mean_homogeneity(rows[1:] or rows)
-        vote["column_homogeneity"] = round(column_homogeneity, 3)
-        vote["row_homogeneity"] = round(row_homogeneity, 3)
-        decided_by = "type_homogeneity"
-        transposed = row_homogeneity > column_homogeneity
-    else:
-        transposed = column_rate > row_rate
-
-    vote["decided_by"] = decided_by
-    vote["orientation"] = "transposed" if transposed else "normal"
-    trace["orientation"] = vote
-
-    return columns if transposed else rows
-
-
-# --------------------------------------------------------------------------- #
-# Steps 4-6: header band, gutter columns, column names
-# --------------------------------------------------------------------------- #
-
-
-def _find_header_row(rows, trace) -> int:
-    """Pick the row that reads most like a list of field names.
-
-    Not "the first populated row" -- File2's title banner would win. Not "the first
-    row with no gaps" -- File1's header spans B2:J2 with an empty gutter at F2.
-    """
-    best_index, best_rate = 0, -1.0
-    scores = []
-    for index, row in enumerate(rows[:HEADER_SEARCH_DEPTH]):
-        rate, mapping = schema.match_aliases(row)
-        scores.append({"row": index, "alias_rate": round(rate, 3), "matched": len(mapping)})
-        # Strictly greater keeps the topmost row on a tie, which is where a real
-        # header sits when data rows happen to echo field names.
-        if rate > best_rate:
-            best_index, best_rate = index, rate
-
-    trace["header"] = {"row_index": best_index, "alias_rate": round(best_rate, 3), "scores": scores}
-    if best_rate == 0.0:
-        trace["notes"].append(
-            "no row matched the canonical schema; falling back to the first row as header"
-        )
-    return best_index
-
-
-def _drop_gutter_columns(header, body, trace):
-    """Drop columns that are empty in the header *and* in every data row.
-
-    This has to run after the header is located, not before: File1's separator
-    column F is empty top to bottom but sits between two real header cells.
-    """
-    keep = []
-    for index in range(len(header)):
-        column_values = [row[index] if index < len(row) else None for row in body]
-        if is_blank(header[index]) and all(is_blank(value) for value in column_values):
-            continue
-        keep.append(index)
-
-    dropped = len(header) - len(keep)
-    if dropped:
-        trace["notes"].append(f"{dropped} empty gutter column(s) dropped")
-
-    new_header = [header[index] for index in keep]
-    new_body = [[row[index] if index < len(row) else None for index in keep] for row in body]
-    return new_header, new_body
-
-
-def _name_columns(header, trace):
-    """Map header labels to canonical names, keeping unrecognised ones as-is."""
-    _, mapping = schema.match_aliases(header)
-    names, used = [], set()
-    for index, label in enumerate(header):
-        if index in mapping:
-            name = mapping[index]
-        elif is_blank(label):
-            name = f"unnamed_{index}"
-        else:
-            # Unmapped columns are kept, not dropped -- losing a column silently is
-            # worse than carrying one with an ugly name.
-            name = re.sub(r"[^a-z0-9]+", "_", str(label).casefold()).strip("_") or f"unnamed_{index}"
-        while name in used:
-            name = f"{name}_dup"
-        used.add(name)
-        names.append(name)
-
-    trace["column_mapping"] = {
-        str(header[index]): names[index]
-        for index in range(len(header))
-        if not is_blank(header[index])
+    trace["orientation"] = {
+        "row_score": round(row_score, 3),
+        "column_score": round(column_score, 3),
+        "margin": round(margin, 3),
+        "confident": margin >= ORIENTATION_MARGIN,
+        "orientation": "transposed" if transposed else "normal",
     }
-    trace["unmapped_columns"] = [
-        names[index]
-        for index in range(len(header))
-        if index not in mapping and not is_blank(header[index])
-    ]
-    return names, mapping
+
+    if not transposed:
+        styles = _region_styles(region, grid)
+        return rows, styles
+    # Formatting cannot be mapped through a transpose meaningfully, so the emphasis
+    # signal is simply unavailable for flipped regions.
+    return columns, None
+
+
+def _region_styles(region, grid):
+    """Style rows aligned to the region's own coordinates."""
+    if not getattr(grid, "styles", None):
+        return None
+    styles = []
+    for source in region.source_rows:
+        if source >= len(grid.styles):
+            styles.append([])
+            continue
+        row = grid.styles[source]
+        styles.append(row[region.column_offset : region.column_offset + region.width])
+    return styles
 
 
 # --------------------------------------------------------------------------- #
-# Step 7: strip non-data rows
+# Shaping
 # --------------------------------------------------------------------------- #
 
 
-def _first_populated(row):
-    for value in row:
-        if not is_blank(value):
-            return str(value)
-    return ""
+def _fit_names(names, width):
+    names = list(names[:width])
+    while len(names) < width:
+        names.append(f"column_{len(names) + 1}")
+    return names
 
 
-def _classify_row(row, column_names) -> str:
-    if _is_blank_row(row):
-        return BLANK
-
-    lead = _first_populated(row)
-    identifying = [
-        row[index]
-        for index, name in enumerate(column_names)
-        if name in schema.RECORD_IDENTIFYING_FIELDS and index < len(row)
-    ]
-    # A total row names itself in its first cell and leaves the record-identifying
-    # columns empty. Requiring both keeps a legitimate profit centre called
-    # "Total Risk PC" from being mistaken for a subtotal.
-    identifiers_empty = bool(identifying) and all(is_blank(value) for value in identifying)
-
-    if _SUBTOTAL_PATTERN.match(lead) and (identifiers_empty or not identifying):
-        return SUBTOTAL
-    if _FOOTER_PATTERN.match(lead):
-        return FOOTER
-    return DATA
+def _fit_row(row, width):
+    row = list(row[:width])
+    return row + [None] * (width - len(row))
 
 
-def _classify_and_strip(body, column_names, header_index, trace):
-    """Drop banner, blank, subtotal and footer rows; keep genuine records.
+# --------------------------------------------------------------------------- #
+# Types
+# --------------------------------------------------------------------------- #
 
-    Scans the whole body rather than trimming the tail, because File3's subtotals
-    sit between the groups they summarise. A single blank row is treated as a
-    cosmetic separator -- File1 row 8 splits two halves of one table -- so only a
-    run of two or more blanks with nothing table-shaped after it ends the table.
+
+def _coerce_types(frame: pd.DataFrame, trace) -> pd.DataFrame:
+    """Infer each column's type from its own values.
+
+    Without a target schema there is no authority to appeal to, so a column becomes
+    whatever the majority of its values already are. Two safeguards stop identifiers
+    being silently damaged: a numeric column whose values carry leading zeros or share
+    one width is kept as text, and a column mixing identifiers with integers is kept as
+    text as well.
     """
-    classifications = [_classify_row(row, column_names) for row in body]
-
-    end = len(body)
-    index = 0
-    while index < len(body):
-        if classifications[index] != BLANK:
-            index += 1
-            continue
-        run_end = index
-        while run_end < len(body) and classifications[run_end] == BLANK:
-            run_end += 1
-        remaining_data = any(kind == DATA for kind in classifications[run_end:])
-        if run_end - index >= 2 and not remaining_data:
-            end = index
-            break
-        if remaining_data:
-            for blank_index in range(index, run_end):
-                classifications[blank_index] = SEPARATOR
-        index = run_end
-
-    kept = []
-    for offset, row in enumerate(body):
-        # +1 converts a body offset into a header-relative sheet row index.
-        sheet_row = header_index + 1 + offset
-        if offset >= end:
-            _record_drop(trace, sheet_row, "TRAILING", row)
-            continue
-        kind = classifications[offset]
-        if kind == DATA:
-            kept.append(row)
-        elif kind != BLANK:
-            _record_drop(trace, sheet_row, kind, row)
-
-    return kept
-
-
-def _record_drop(trace, row_index, kind, row) -> None:
-    content = " | ".join("" if is_blank(value) else str(value) for value in row).strip(" |")
-    trace["dropped_rows"].append(
-        {"row_index": row_index, "classification": kind, "content": content[:200]}
-    )
-
-
-# --------------------------------------------------------------------------- #
-# Step 8: dtypes
-# --------------------------------------------------------------------------- #
-
-
-def _coerce_dtypes(frame: pd.DataFrame, trace) -> pd.DataFrame:
-    """Apply the schema's target dtypes, reporting every value that fails."""
     failures: list[dict] = []
+    inferred: dict[str, str] = {}
+
     for column in frame.columns:
-        dtype = schema.dtype_of(column)
-        if dtype == "float":
+        values = [value for value in frame[column] if not is_blank(value)]
+        kind = signals.modal_type(values) if values else typing_utils.EMPTY
+        types = {typing_utils.infer_type(value) for value in values}
+
+        if kind in (typing_utils.INT, typing_utils.FLOAT) and _looks_like_a_code(values):
+            kind = typing_utils.ID_STRING
+            trace["notes"].append(f"column '{column}' kept as text: values look like codes")
+        elif typing_utils.ID_STRING in types and types & {typing_utils.INT, typing_utils.FLOAT}:
+            kind = typing_utils.ID_STRING
+            trace["notes"].append(f"column '{column}' mixes identifiers and numbers; kept as text")
+
+        inferred[column] = kind
+        if kind == typing_utils.FLOAT or kind == typing_utils.INT:
             frame[column] = _to_float(frame[column], column, failures)
-        elif dtype == "date":
+        elif kind in (typing_utils.DATE, typing_utils.DATETIME, typing_utils.DATE_STRING):
             frame[column] = _to_date(frame[column], column, failures)
-        elif dtype == "zip":
-            frame[column] = frame[column].map(_to_zip)
         else:
             frame[column] = frame[column].map(_to_string)
+
+    trace["inferred_types"] = inferred
     trace["coercion_failures"] = failures
     return frame
+
+
+def _looks_like_a_code(values) -> bool:
+    """Whether a numeric column is really an identifier that must stay text.
+
+    Two structural tells, neither of which needs to know the field's name:
+
+    * a leading zero, which is meaningless in a quantity and is only preserved at all
+      when the cell was already text;
+    * near-unique integers that all share one digit width -- account numbers, centre
+      codes, branch ids. A genuine measure varies in magnitude; a code does not.
+
+    This is what recovers, from the data alone, the decision a schema used to declare:
+    ``1005`` is an identifier, not a quantity, and must not be arithmetic.
+    """
+    texts = [str(value).strip() for value in values]
+    digits = [text for text in texts if text.isdigit()]
+    if len(digits) < len(texts) or len(digits) < 3:
+        return False
+    if any(text.startswith("0") for text in digits):
+        return True
+    widths = {len(text) for text in digits}
+    distinct_ratio = len(set(digits)) / len(digits)
+    return len(widths) == 1 and next(iter(widths)) >= 3 and distinct_ratio >= 0.9
 
 
 def _to_string(value):
     if is_blank(value):
         return None
     if isinstance(value, float) and value.is_integer():
-        # 1005.0 must not become the identifier "1005.0".
         return str(int(value))
     if isinstance(value, (_dt.datetime, _dt.date)):
         return value.isoformat()[:10]
     return str(value).strip()
-
-
-def _to_zip(value):
-    """US ZIP as a 5-wide string, restoring a leading zero Excel dropped."""
-    text = _to_string(value)
-    if text is None:
-        return None
-    return text.zfill(5) if text.isdigit() and len(text) <= 5 else text
 
 
 def _to_float(series: pd.Series, column: str, failures: list[dict]) -> pd.Series:
@@ -390,11 +286,17 @@ def _to_float(series: pd.Series, column: str, failures: list[dict]) -> pd.Series
         try:
             return float(text)
         except ValueError:
-            # Never coerce silently: a value we cannot parse is a reviewable event.
             failures.append({"column": column, "value": str(value)[:80], "reason": "not numeric"})
             return None
 
-    return series.map(convert).astype("float64")
+    converted = series.map(convert).astype("float64")
+    # A column whose every value is whole is written as an integer. Without this a ZIP
+    # code or a centre number that escaped the code heuristic lands in the CSV as
+    # "75202.0", which is wrong for a downstream load and merely noise to a reader.
+    present = converted.dropna()
+    if len(present) and (present % 1 == 0).all():
+        return converted.astype("Int64")
+    return converted
 
 
 def _to_date(series: pd.Series, column: str, failures: list[dict]) -> pd.Series:
@@ -408,16 +310,14 @@ def _to_date(series: pd.Series, column: str, failures: list[dict]) -> pd.Series:
         try:
             return pd.to_datetime(str(value).strip()).date().isoformat()
         except (ValueError, TypeError):
-            failures.append(
-                {"column": column, "value": str(value)[:80], "reason": "unparseable date"}
-            )
+            failures.append({"column": column, "value": str(value)[:80], "reason": "unparseable date"})
             return None
 
     return series.map(convert)
 
 
 # --------------------------------------------------------------------------- #
-# Step 9: validation
+# Validation
 # --------------------------------------------------------------------------- #
 
 
@@ -429,31 +329,51 @@ def _validate(frame: pd.DataFrame, trace) -> None:
         return
 
     for column in frame.columns:
-        null_count = int(frame[column].isna().sum())
-        if null_count:
+        nulls = int(frame[column].isna().sum())
+        if nulls:
             findings.append(
-                {
-                    "check": "null_values",
-                    "column": column,
-                    "count": null_count,
-                    "rate": round(null_count / len(frame), 3),
-                }
+                {"check": "null_values", "column": column, "count": nulls,
+                 "rate": round(nulls / len(frame), 3)}
             )
 
-    # Uniqueness is scoped to this sheet on purpose. File5's Jan and Feb sheets
-    # reuse the same policy numbers; checking across the stacked result would
-    # flag every row as a duplicate.
-    if "policy_number" in frame.columns:
-        values = frame["policy_number"].dropna()
+    # Uniqueness is scoped to this region. Stacked periods legitimately reuse keys, so
+    # checking across a concatenation would flag every row as a duplicate.
+    for column in _key_like_columns(frame):
+        values = frame[column].dropna()
         duplicated = values[values.duplicated()].tolist()
         if duplicated:
             findings.append(
-                {"check": "duplicate_policy_number_within_sheet", "values": duplicated[:20]}
+                {"check": "duplicate_key_within_region", "column": column,
+                 "values": [str(value) for value in duplicated[:20]]}
             )
 
-    if "premium" in frame.columns:
-        negative = int((frame["premium"] < 0).sum())
-        if negative:
-            findings.append({"check": "negative_premium", "count": negative})
-
     trace["validation"] = findings
+
+
+def _key_like_columns(frame: pd.DataFrame) -> list[str]:
+    """Columns distinct enough to be intended as identifiers."""
+    keys = []
+    for column in frame.columns:
+        values = frame[column].dropna()
+        if len(values) < 3:
+            continue
+        if values.nunique() / len(values) >= 0.9 and values.map(_is_identifier).all():
+            keys.append(column)
+    return keys
+
+
+def _is_identifier(value) -> bool:
+    return typing_utils.infer_type(value) == typing_utils.ID_STRING
+
+
+def _record_drop(trace, region, offset, kind, row, reason) -> None:
+    content = " | ".join("" if is_blank(cell) else str(cell) for cell in row).strip(" |")
+    trace["dropped_rows"].append(
+        {
+            "sheet_row": region.source_rows[offset] + 1 if offset < len(region.source_rows) else None,
+            "region_row": offset,
+            "classification": kind,
+            "reason": reason,
+            "content": content[:200],
+        }
+    )

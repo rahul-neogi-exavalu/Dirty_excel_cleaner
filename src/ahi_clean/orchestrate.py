@@ -1,8 +1,8 @@
-"""Workbook-level decisions: what each sheet is, and how sheets relate.
+"""Workbook-level decisions: what each table is, and how tables relate.
 
-Sheet roles and relationships are inferred from column content. Sheet names are a
-supporting signal only -- a sheet called "Producer" that turns out to hold
-transactional rows is a fact table regardless of its tab label.
+Roles and relationships are read off the data's shape and content. No canonical field
+list is consulted, and a sheet's tab name is recorded as a hint but never allowed to
+decide anything.
 """
 
 from __future__ import annotations
@@ -11,8 +11,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from . import join, schema
-from .extract import SheetResult
+from . import join, signals, typing_utils
 
 FACT = "FACT"
 DIMENSION = "DIMENSION"
@@ -22,7 +21,9 @@ STACK = "STACK"
 JOIN = "JOIN"
 NONE = "NONE"
 
-STACK_OVERLAP_THRESHOLD = 0.9
+NAME_OVERLAP_THRESHOLD = 0.9
+PROFILE_OVERLAP_THRESHOLD = 0.9
+KEY_DISTINCT_RATIO = 0.9
 DIMENSION_MAX_ROWS = 200
 SOURCE_SHEET_COLUMN = "source_sheet"
 
@@ -37,139 +38,225 @@ class Output:
     sheets: list[str] = field(default_factory=list)
 
 
-def classify_sheet(result: SheetResult) -> tuple[str, dict]:
-    """Decide whether a cleaned sheet is a fact table or a lookup."""
+# --------------------------------------------------------------------------- #
+# Roles
+# --------------------------------------------------------------------------- #
+
+
+def _numeric_measure_columns(frame: pd.DataFrame) -> list[str]:
+    """Columns of continuous numbers -- amounts, rates -- rather than identifiers.
+
+    Distinctness alone does not separate them: premiums are as unique as ZIP codes.
+    What does is that a measure carries fractional values, or else repeats. A column of
+    whole numbers that never repeats is a code -- a ZIP, a centre number -- and counting
+    it as a measure would make a lookup table look transactional.
+
+    The known limit: an integer measure that happens never to repeat (a quantity column
+    of all-distinct counts) reads as a code here. Rare, and it only affects role
+    classification, never the row data.
+    """
+    measures = []
+    for column in frame.columns:
+        values = frame[column].dropna()
+        if len(values) < 2 or values.dtype.kind not in "fi":
+            continue
+        fractional = any(float(value) % 1 for value in values)
+        repeats = values.nunique() / len(values) < KEY_DISTINCT_RATIO
+        if fractional or repeats:
+            measures.append(column)
+    return measures
+
+
+def _key_columns(frame: pd.DataFrame) -> list[str]:
+    """Near-unique columns that could identify a record."""
+    keys = []
+    for column in frame.columns:
+        values = frame[column].dropna()
+        if len(values) < 2:
+            continue
+        if values.nunique() / len(values) >= KEY_DISTINCT_RATIO:
+            keys.append(column)
+    return keys
+
+
+def _date_columns(frame: pd.DataFrame) -> list[str]:
+    return [
+        column
+        for column in frame.columns
+        if frame[column].dropna().map(_is_date_like).all() and frame[column].notna().any()
+    ]
+
+
+def _is_date_like(value) -> bool:
+    return typing_utils.infer_type(value) in (
+        typing_utils.DATE,
+        typing_utils.DATETIME,
+        typing_utils.DATE_STRING,
+    )
+
+
+def classify_table(result) -> tuple[str, dict]:
+    """Decide whether a cleaned table is transactional or a lookup."""
     frame = result.frame
-    evidence = {
-        "sheet": result.sheet_name,
-        "rows": len(frame),
-        "fact_signal_fields": sorted(set(frame.columns) & schema.FACT_SIGNAL_FIELDS),
-    }
+    evidence = {"table": result.label, "rows": len(frame)}
 
     if frame.empty:
-        evidence["reason"] = "sheet is empty"
+        evidence.update(role=UNKNOWN, reason="table is empty")
         return UNKNOWN, evidence
 
-    has_fact_signals = len(evidence["fact_signal_fields"]) >= 2
-    rows_are_unique_entities = len(frame.drop_duplicates()) == len(frame)
-    small = len(frame) <= DIMENSION_MAX_ROWS
+    measures = _numeric_measure_columns(frame)
+    keys = _key_columns(frame)
+    dates = _date_columns(frame)
+    unique_rows = len(frame.drop_duplicates()) == len(frame)
 
-    if has_fact_signals:
-        evidence["reason"] = "carries transactional fields (premium / policy / date)"
+    evidence.update(
+        measure_columns=measures,
+        key_columns=keys,
+        date_columns=dates,
+    )
+
+    if measures and (keys or dates):
         role = FACT
-    elif small and rows_are_unique_entities:
-        evidence["reason"] = "small, one unique entity per row, no transactional fields"
+        evidence["reason"] = "has continuous measures alongside a key or a date"
+    elif not measures and unique_rows and len(frame) <= DIMENSION_MAX_ROWS and keys:
         role = DIMENSION
+        evidence["reason"] = "small, one unique entity per row, no continuous measures"
     else:
-        evidence["reason"] = "no transactional fields and not entity-shaped"
         role = UNKNOWN
+        evidence["reason"] = "neither transactional nor entity-shaped"
 
-    # Recorded for the audit trail, never used to override the content check above.
+    # Recorded for the report only. The content checks above are what decide.
     evidence["name_hint"] = any(
-        hint in result.sheet_name.casefold() for hint in ("producer", "lookup", "ref", "dim", "master")
+        hint in result.sheet_name.casefold()
+        for hint in ("producer", "lookup", "ref", "dim", "master")
     )
     evidence["role"] = role
     return role, evidence
 
 
-def schema_overlap(left: pd.DataFrame, right: pd.DataFrame) -> float:
-    """Jaccard overlap of the canonical fields present on two sheets."""
-    left_fields = set(left.columns) & set(schema.CANONICAL_FIELDS)
-    right_fields = set(right.columns) & set(schema.CANONICAL_FIELDS)
-    if not left_fields or not right_fields:
+# --------------------------------------------------------------------------- #
+# Relationships
+# --------------------------------------------------------------------------- #
+
+
+def name_overlap(left: pd.DataFrame, right: pd.DataFrame) -> float:
+    """Jaccard overlap of two tables' column names."""
+    left_names, right_names = set(left.columns), set(right.columns)
+    if not left_names or not right_names:
         return 0.0
-    return len(left_fields & right_fields) / len(left_fields | right_fields)
+    return len(left_names & right_names) / len(left_names | right_names)
 
 
-def plan_workbook(results: list[SheetResult], stem: str) -> tuple[list[Output], dict]:
-    """Classify sheets, decide their relationships, and produce the outputs."""
+def profile_overlap(left: pd.DataFrame, right: pd.DataFrame) -> float:
+    """Similarity of two tables' per-column type profiles.
+
+    The fallback for sheets that hold the same data under different labels -- a
+    January export headed differently from February's.
+    """
+    if len(left.columns) != len(right.columns):
+        return 0.0
+    left_profile = tuple(signals.modal_type(left[column].tolist()) for column in left.columns)
+    right_profile = tuple(signals.modal_type(right[column].tolist()) for column in right.columns)
+    return signals.profile_similarity(left_profile, right_profile)
+
+
+def _stack_decision(left, right) -> tuple[bool, dict]:
+    names = name_overlap(left.frame, right.frame)
+    profile = profile_overlap(left.frame, right.frame)
+    by_name = names >= NAME_OVERLAP_THRESHOLD
+    by_profile = profile >= PROFILE_OVERLAP_THRESHOLD and len(left.frame.columns) == len(
+        right.frame.columns
+    )
+    detail = {
+        "tables": [left.label, right.label],
+        "name_overlap": round(names, 3),
+        "profile_overlap": round(profile, 3),
+        "decision": STACK if (by_name or by_profile) else NONE,
+        "decided_by": "column_names" if by_name else ("type_profile" if by_profile else None),
+    }
+    if by_profile and not by_name:
+        detail["confidence"] = "low"
+    return by_name or by_profile, detail
+
+
+# --------------------------------------------------------------------------- #
+# Planning
+# --------------------------------------------------------------------------- #
+
+
+def plan_workbook(results, stem: str) -> tuple[list[Output], dict]:
+    """Classify tables, decide their relationships, and produce the outputs."""
+    live = [result for result in results if not result.frame.empty]
     roles: dict[str, str] = {}
     evidence: list[dict] = []
-    for result in results:
-        role, why = classify_sheet(result)
-        roles[result.sheet_name] = role
+    for result in live:
+        role, why = classify_table(result)
+        roles[result.label] = role
         evidence.append(why)
 
-    report: dict = {"sheet_roles": evidence, "relationships": [], "join": None}
-    by_name = {result.sheet_name: result for result in results}
+    report: dict = {"table_roles": evidence, "relationships": [], "join": None}
+    facts = [result for result in live if roles[result.label] == FACT]
+    dimensions = [result for result in live if roles[result.label] == DIMENSION]
 
-    facts = [result for result in results if roles[result.sheet_name] == FACT and not result.frame.empty]
-    dimensions = [
-        result for result in results if roles[result.sheet_name] == DIMENSION and not result.frame.empty
-    ]
-
-    # --- stack: several fact sheets sharing one schema (File5's Jan / Feb) ---------
-    stack_group: list[SheetResult] = []
+    # --- stack: several fact tables with the same shape -------------------------
+    stack_group: list = []
     if len(facts) > 1:
-        overlaps = []
+        decisions = []
         for index in range(len(facts) - 1):
-            overlap = schema_overlap(facts[index].frame, facts[index + 1].frame)
-            overlaps.append(overlap)
-            report["relationships"].append(
-                {
-                    "sheets": [facts[index].sheet_name, facts[index + 1].sheet_name],
-                    "schema_overlap": round(overlap, 3),
-                    "decision": STACK if overlap >= STACK_OVERLAP_THRESHOLD else NONE,
-                }
-            )
-        if overlaps and min(overlaps) >= STACK_OVERLAP_THRESHOLD:
+            stackable, detail = _stack_decision(facts[index], facts[index + 1])
+            decisions.append(stackable)
+            report["relationships"].append(detail)
+        if all(decisions):
             stack_group = facts
 
     outputs: list[Output] = []
-
     if stack_group:
         frames = []
         for result in stack_group:
             frame = result.frame.copy()
-            # Nothing in the rows themselves says which period they belong to, and
-            # Jan and Feb reuse the same policy numbers. Without this column the
-            # stacked rows are indistinguishable and read as duplicates.
+            # Nothing in the rows identifies which sheet they came from, and periods
+            # commonly reuse the same keys. Without this the stacked rows are
+            # indistinguishable and read as duplicates.
             frame.insert(0, SOURCE_SHEET_COLUMN, result.sheet_name)
             frames.append(frame)
-        stacked = pd.concat(frames, ignore_index=True)
         outputs.append(
-            Output(stem, stacked, "stacked", [result.sheet_name for result in stack_group])
+            Output(stem, pd.concat(frames, ignore_index=True), "stacked",
+                   [result.label for result in stack_group])
         )
         remaining_facts = []
     else:
         remaining_facts = facts
 
-    # --- join: one fact sheet enriched by a lookup sheet (File6) -------------------
-    joined_facts: set[str] = set()
+    # --- join: one fact table enriched by one lookup ----------------------------
     if len(remaining_facts) == 1 and len(dimensions) == 1:
-        fact_result, dimension_result = remaining_facts[0], dimensions[0]
-        overlap = schema_overlap(fact_result.frame, dimension_result.frame)
-        key = join.discover_key(fact_result.frame, dimension_result.frame)
-        decision = JOIN if key else NONE
+        fact, dimension = remaining_facts[0], dimensions[0]
+        key = join.discover_key(fact.frame, dimension.frame)
         report["relationships"].append(
             {
-                "sheets": [fact_result.sheet_name, dimension_result.sheet_name],
-                "schema_overlap": round(overlap, 3),
+                "tables": [fact.label, dimension.label],
                 "roles": [FACT, DIMENSION],
-                "decision": decision,
+                "name_overlap": round(name_overlap(fact.frame, dimension.frame), 3),
+                "decision": JOIN if key else NONE,
                 "discovered_key": key,
             }
         )
         if key:
-            merged, join_report = join.join_frames(fact_result.frame, dimension_result.frame, key)
+            merged, join_report = join.join_frames(fact.frame, dimension.frame, key)
             report["join"] = join_report
+            outputs.append(Output(stem, merged, "joined", [fact.label, dimension.label]))
+            # The lookup still ships separately: it is reference data in its own right.
             outputs.append(
-                Output(stem, merged, "joined", [fact_result.sheet_name, dimension_result.sheet_name])
-            )
-            joined_facts.add(fact_result.sheet_name)
-            # The lookup still ships on its own: it is reference data in its own right.
-            outputs.append(
-                Output(f"{stem}_{_slug(dimension_result.sheet_name)}", dimension_result.frame, "dimension",
-                       [dimension_result.sheet_name])
+                Output(f"{stem}_{_slug(dimension.label)}", dimension.frame, "dimension",
+                       [dimension.label])
             )
 
-    # --- anything left over ships standalone (Files 1-4) ---------------------------
+    # --- everything else ships standalone ---------------------------------------
     emitted = {sheet for output in outputs for sheet in output.sheets}
-    for result in results:
-        if result.sheet_name in emitted or result.frame.empty:
+    for result in live:
+        if result.label in emitted:
             continue
-        name = stem if len(results) == 1 else f"{stem}_{_slug(result.sheet_name)}"
-        outputs.append(Output(name, result.frame, "standalone", [result.sheet_name]))
+        name = stem if len(live) == 1 else f"{stem}_{_slug(result.label)}"
+        outputs.append(Output(name, result.frame, "standalone", [result.label]))
 
     return outputs, report
 

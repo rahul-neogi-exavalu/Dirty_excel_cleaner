@@ -1,4 +1,4 @@
-profit_center_name,profit_center_number,producer_agency_name,insurance_company_name,premium,policy_number,accounting_effective_date,commission_pct
+profitcentername,profitcenternumber,producer_agencyname,insurancecompanyname,premium,policynumber,accountingeffectivedate,commission
 South Zone PC,1005,Pinnacle Agency Partners,National Indemnity Co,15109.2,POL-200001,2026-01-01,11.06
 West Zone PC,1012,Apex Insurance Brokers,Heritage Casualty Co,35586.47,POL-200002,2026-01-08,17.96
 South Zone PC,1093,Metro Agency Group,Global Assurance Corp,37066.89,POL-200003,2026-01-15,5.98

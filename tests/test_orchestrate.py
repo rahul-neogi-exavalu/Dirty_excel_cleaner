@@ -1,4 +1,4 @@
-"""Workbook-level behaviour: sheet roles, stacking, joining, and the CLI."""
+"""Workbook behaviour: roles, stacking, joining, the CLI, and the audit report."""
 
 import json
 
@@ -9,70 +9,95 @@ from ahi_clean import orchestrate
 from ahi_clean.cli import clean_workbook
 from ahi_clean.orchestrate import DIMENSION, FACT, plan_workbook
 
-from conftest import SAMPLES
+from conftest import SAMPLES, tables
 
 
-def test_sheet_roles_are_decided_on_content(file6):
-    fact_role, fact_why = orchestrate.classify_sheet(file6[0])
-    dimension_role, dimension_why = orchestrate.classify_sheet(file6[1])
+def test_roles_are_decided_on_column_content(file6):
+    fact_role, fact_why = orchestrate.classify_table(file6[0][0])
+    dimension_role, dimension_why = orchestrate.classify_table(file6[1][0])
 
     assert fact_role == FACT
-    assert set(fact_why["fact_signal_fields"]) >= {"premium", "policy_number"}
+    assert "premium" in fact_why["measure_columns"]
     assert dimension_role == DIMENSION
-    assert dimension_why["fact_signal_fields"] == []
+    # A ZIP code is a whole number that never repeats -- a code, not a measure.
+    assert dimension_why["measure_columns"] == []
 
 
 def test_a_lookup_named_sheet_holding_transactions_is_still_a_fact(file6):
     """The tab label is a hint in the report, never the deciding vote."""
-    disguised = file6[0]
+    disguised = file6[0][0]
     disguised.sheet_name = "Producer Lookup"
-    role, why = orchestrate.classify_sheet(disguised)
+    role, why = orchestrate.classify_table(disguised)
     assert role == FACT
     assert why["name_hint"] is True
 
 
 def test_matching_sheets_are_stacked_with_provenance(file5):
-    outputs, report = plan_workbook(file5, "File5")
+    outputs, report = plan_workbook(tables("File5_Scenario_MultiSheet.xlsx"), "File5")
     [output] = outputs
 
     assert output.kind == "stacked"
     assert len(output.frame) == 20
     assert output.frame[orchestrate.SOURCE_SHEET_COLUMN].tolist() == ["Jan"] * 10 + ["Feb"] * 10
-    assert report["relationships"][0]["schema_overlap"] == 1.0
-    assert report["relationships"][0]["decision"] == "STACK"
+    assert report["relationships"][0]["name_overlap"] == 1.0
+    assert report["relationships"][0]["decided_by"] == "column_names"
 
 
-def test_stacked_periods_are_not_deduplicated(file5):
+def test_stacked_periods_are_not_deduplicated():
     """Jan and Feb reuse the same policy numbers; both periods must survive."""
-    [output] = plan_workbook(file5, "File5")[0]
-    assert output.frame["policy_number"].nunique() == 10
+    [output] = plan_workbook(tables("File5_Scenario_MultiSheet.xlsx"), "File5")[0]
+    assert output.frame["policynumber"].nunique() == 10
     assert len(output.frame) == 20
-    grouped = output.frame.groupby(orchestrate.SOURCE_SHEET_COLUMN)["policy_number"].nunique()
+    grouped = output.frame.groupby(orchestrate.SOURCE_SHEET_COLUMN)["policynumber"].nunique()
     assert grouped.to_dict() == {"Jan": 10, "Feb": 10}
 
 
+def test_sheets_can_stack_on_type_profile_when_headers_differ():
+    """A January export headed differently from February still stacks, flagged low."""
+    january = tables("File5_Scenario_MultiSheet.xlsx")[0]
+    february = tables("File5_Scenario_MultiSheet.xlsx")[1]
+    february.frame = february.frame.rename(
+        columns={name: f"{name}_feb" for name in february.frame.columns}
+    )
+    stackable, detail = orchestrate._stack_decision(january, february)
+    assert stackable is True
+    assert detail["decided_by"] == "type_profile"
+    assert detail["confidence"] == "low"
+
+
 def test_fact_and_dimension_are_joined_and_the_lookup_also_ships(file6):
-    outputs, report = plan_workbook(file6, "File6")
+    outputs, report = plan_workbook(tables("File6_Scenarios_MultipleSheetJoin.xlsx"), "File6")
     kinds = {output.kind: output for output in outputs}
 
     assert set(kinds) == {"joined", "dimension"}
     assert len(kinds["joined"].frame) == 10
     assert {"address", "state", "zip_code"} <= set(kinds["joined"].frame.columns)
     assert len(kinds["dimension"].frame) == 5
-    assert report["join"]["join_key"]["fact_column"] == "producer_agency_name"
+    assert report["join"]["join_key"]["fact_column"] == "producer_agencyname"
 
 
-def test_single_sheet_workbooks_ship_standalone(file1, file3):
-    for results, stem in ((file1, "File1"), (file3, "File3")):
-        [output] = plan_workbook(results, stem)[0]
+def test_single_sheet_workbooks_ship_standalone():
+    for filename, stem in (
+        ("File1_Scenarios1-4_Combined.xlsx", "File1"),
+        ("File3_Scenario_subtotals_in_middle.xlsx", "File3"),
+    ):
+        [output] = plan_workbook(tables(filename), stem)[0]
         assert output.kind == "standalone"
         assert output.name == stem
         assert orchestrate.SOURCE_SHEET_COLUMN not in output.frame.columns
 
 
-def test_unrelated_sheets_are_not_stacked(file1, file6):
-    """Different schemas must not be concatenated just because both are facts."""
-    assert orchestrate.schema_overlap(file1[0].frame, file6[1].frame) < orchestrate.STACK_OVERLAP_THRESHOLD
+def test_unrelated_sheets_are_not_stacked():
+    """Different schemas must not be concatenated just because both look tabular."""
+    left = tables("File1_Scenarios1-4_Combined.xlsx")[0].frame
+    right = tables("File6_Scenarios_MultipleSheetJoin.xlsx")[1].frame
+    assert orchestrate.name_overlap(left, right) < orchestrate.NAME_OVERLAP_THRESHOLD
+    assert orchestrate.profile_overlap(left, right) < orchestrate.PROFILE_OVERLAP_THRESHOLD
+
+
+# --------------------------------------------------------------------------- #
+# End to end
+# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
@@ -105,8 +130,22 @@ def test_audit_report_explains_what_was_dropped(tmp_path):
     report = json.loads(outcome["report"].read_text(encoding="utf-8"))
 
     assert report["embedded_images"] == 1
-    assert report["summary"]["dropped_by_classification"] == {"BANNER": 3, "FOOTER": 2, "SUBTOTAL": 1}
-    assert report["sheets"][0]["error_cells_nulled"] == ["A1=#VALUE!"]
+    assert report["summary"]["dropped_by_classification"] == {
+        "BANNER": 2,
+        "FOOTER": 2,
+        "GRAND_TOTAL": 1,
+    }
+    assert report["tables"][0]["error_cells_nulled"] == ["A1=#VALUE!"]
+
+
+def test_audit_report_gives_a_reason_for_every_dropped_row(tmp_path):
+    for filename in sorted(path.name for path in SAMPLES.glob("*.xlsx")):
+        outcome = clean_workbook(SAMPLES / filename, tmp_path / "cleaned", tmp_path / "audit")
+        report = json.loads(outcome["report"].read_text(encoding="utf-8"))
+        for table in report["tables"]:
+            for dropped in table["dropped_rows"]:
+                assert dropped["reason"], f"{filename}: {dropped}"
+                assert dropped["sheet_row"] is not None
 
 
 def test_audit_report_records_the_fuzzy_join(tmp_path):
@@ -124,11 +163,21 @@ def test_audit_report_records_the_fuzzy_join(tmp_path):
     assert report["summary"]["join_values_needing_review"] == 0
 
 
-def test_cleaned_csv_has_no_nulls_in_the_record_key(tmp_path):
+def test_audit_report_flags_low_confidence_structure(tmp_path):
+    """The Producer lookup is near-square, so its orientation is reported as uncertain."""
+    outcome = clean_workbook(
+        SAMPLES / "File6_Scenarios_MultipleSheetJoin.xlsx", tmp_path / "cleaned", tmp_path / "audit"
+    )
+    report = json.loads(outcome["report"].read_text(encoding="utf-8"))
+    assert report["summary"]["low_confidence_orientations"] == 1
+    assert report["summary"]["headerless_tables"] == 0
+
+
+def test_no_cleaned_csv_loses_its_key_column(tmp_path):
     for filename in sorted(path.name for path in SAMPLES.glob("*.xlsx")):
         outcome = clean_workbook(SAMPLES / filename, tmp_path / "cleaned", tmp_path / "audit")
         for path in outcome["written"]:
             frame = pd.read_csv(path)
-            if "policy_number" in frame.columns:
-                assert frame["policy_number"].notna().all(), path.name
+            if "policynumber" in frame.columns:
+                assert frame["policynumber"].notna().all(), path.name
                 assert frame["premium"].dtype.kind == "f", path.name

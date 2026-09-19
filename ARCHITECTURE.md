@@ -1,11 +1,14 @@
-# Architecture — AHI Excel Cleaning Pipeline
+# Architecture — AHI Schema-Free Cleaning Pipeline
 
 Technical reference for the pipeline that converts report-shaped Excel exports into
 table-ready CSVs.
 
-**Design principle:** no per-file configuration. Every structural decision is derived from
-cell content at runtime, so an unseen file is handled by the same code path as a known
-one. Every decision is written to an audit trail.
+**Design principle: no schema, no aliases, no keyword lists.** Every structural decision
+is derived from the data's own shape, types, distinctness, density and arithmetic. The
+pipeline has no idea what a "premium" is and does not need one. Column names in the output
+are the file's own labels, normalized.
+
+This is verified, not asserted — see [§12 Ablation](#12-ablation-what-is-actually-load-bearing).
 
 ---
 
@@ -13,15 +16,17 @@ one. Every decision is written to an audit trail.
 
 ```mermaid
 flowchart LR
-    XLSX[".xlsx workbook"] --> R["reader.py<br/>cells → grid"]
-    R --> E["extract.py<br/>sheet → tidy frame"]
-    E --> O["orchestrate.py<br/>sheet roles + relationships"]
-    O --> J["join.py<br/>key discovery + fuzzy resolution"]
+    XLSX[".xlsx workbook"] --> R["reader.py<br/>cells + formatting"]
+    R --> G["geometry.py<br/>sheet → table regions"]
+    G --> E["extract.py<br/>region → tidy frame"]
+    E --> H["header.py"]
+    E --> RC["rowclass.py"]
+    E --> O["orchestrate.py<br/>roles + relationships"]
+    O --> J["join.py<br/>value-based keys"]
     O --> CSV["cleaned/*.csv"]
     J --> CSV
     E -. trace .-> A["audit.py"]
     O -. decisions .-> A
-    J -. resolutions .-> A
     A --> JSON["audit/*.audit.json"]
 
     style XLSX fill:#e8e8e8,stroke:#666
@@ -29,427 +34,413 @@ flowchart LR
     style JSON fill:#fff3cd,stroke:#d39e00
 ```
 
-Two layers do the work:
+`signals.py` sits underneath all of it: the scoring primitives every detector is built
+from. Nothing in the tree consults a field name.
 
-| Layer | Scope | Question it answers |
-|---|---|---|
-| **Extraction** (`extract.py`) | one sheet | Where is the table, which way up is it, which rows are real? |
-| **Orchestration** (`orchestrate.py`, `join.py`) | whole workbook | What is each sheet, and how do they relate? |
-
-`schema.py` is the shared reference both layers consult — the canonical field names, their
-aliases, and their target dtypes. It is the single source of truth and the only file that
-changes when the target schema changes.
-
----
-
-## 2. Module responsibilities
-
-| Module | Responsibility | Key exports |
-|---|---|---|
-| `schema.py` | Canonical fields, alias dictionary, target dtypes | `match_aliases()`, `dtype_of()` |
-| `typing_utils.py` | Fine-grained cell type inference, homogeneity scoring | `infer_type()`, `mean_homogeneity()` |
-| `reader.py` | Workbook → dense cell grid; nulls Excel error cells | `read_workbook()`, `SheetGrid` |
-| `extract.py` | The 9-step extraction pipeline for one sheet | `extract_sheet()` → `SheetResult` |
-| `orchestrate.py` | Sheet role classification, stack/join decisions | `plan_workbook()` → `[Output]` |
-| `join.py` | Value-based key discovery, fuzzy resolution | `discover_key()`, `join_frames()` |
-| `audit.py` | Assemble and write the JSON report | `build_report()`, `write_report()` |
-| `cli.py` | Argument parsing, file I/O orchestration | `clean_workbook()`, `main()` |
-
----
-
-## 3. Extraction pipeline (one sheet)
-
-```mermaid
-flowchart TD
-    S["SheetGrid"] --> N1["1 · Null-normalise<br/>errors → null, trim strings"]
-    N1 --> N2["2 · Bound block<br/>drop outer empty rows/cols"]
-    N2 --> N3{"3 · Orientation vote"}
-    N3 -->|column axis wins| T["transpose"]
-    N3 -->|row axis wins| N4
-    T --> N4["4 · Locate header band"]
-    N4 --> N5["5 · Drop gutter columns"]
-    N5 --> N6["6 · Map headers → canonical names"]
-    N6 --> N7["7 · Classify & strip non-data rows"]
-    N7 --> N8["8 · Coerce dtypes"]
-    N8 --> N9["9 · Validate"]
-    N9 --> OUT["DataFrame + trace"]
-
-    style N3 fill:#cfe2ff,stroke:#0d6efd
-    style N7 fill:#cfe2ff,stroke:#0d6efd
-    style OUT fill:#d4edda,stroke:#28a745
-```
-
-Order is load-bearing in two places:
-
-- **Step 3 before step 4.** The header hunt only makes sense once the sheet is the right
-  way up.
-- **Step 5 after step 4.** Gutter columns can only be identified as "empty in the header
-  *and* in every data row" once the header is known. File1's column F is empty top to
-  bottom but sits *between* two real header cells — dropping empty columns before finding
-  the header would work here, but would break on a file where a column is empty only in
-  the banner region.
-
-### Step 1 — null normalisation
-
-`reader.py` coerces any cell with `data_type == 'e'` to null. Excel error values come back
-from openpyxl as ordinary strings (`'#VALUE!'`), so left alone they read as *populated*
-and defeat blank-row detection.
-
-> File2!A1 holds `#VALUE!`, merged across A1:D2, sitting under the embedded logo. Without
-> this step the header hunt anchors to row 1.
-
-Strings are also trimmed here, which is what turns File6's `'MJC '` into `'MJC'` before
-anything tries to join on it.
-
-Embedded images are counted from the `.xlsx` zip for the audit report only. They are
-anchored to the drawing layer, not to cells, so they are invisible to any value-based
-scan — the report records them so a reviewer understands why the top of a sheet looked
-empty.
-
----
-
-## 4. Orientation detection (step 3)
-
-```mermaid
-flowchart TD
-    B["bounded block"] --> RS["score leading 20 rows<br/>against alias dictionary"]
-    B --> CS["score leading 20 columns<br/>against alias dictionary"]
-    RS --> D{"gap between the two rates<br/>≥ 0.2 ?"}
-    CS --> D
-    D -->|yes| P["PRIMARY VOTE<br/>higher rate wins"]
-    D -->|no· ambiguous| H["TIEBREAK<br/>type homogeneity per axis"]
-    P --> R{"which axis?"}
-    H --> R
-    R -->|row| NORM["normal — use as-is"]
-    R -->|column| TR["transposed — flip"]
-
-    style P fill:#cfe2ff,stroke:#0d6efd
-    style H fill:#fff3cd,stroke:#d39e00
-```
-
-**Primary vote — alias match rate.** The target schema is known ahead of time, so the axis
-whose leading lines read as a list of *field names* is the field axis. Empty cells are
-excluded from the denominator, so a header with a gap is not penalised.
-
-A **band** of leading lines is scored, not just line 1: a banner can sit above the header.
-Scoring only row 1 made File2 fall through to the tiebreaker, because that sheet's first
-row is the `Exavalu` title.
-
-**Tiebreaker — type homogeneity.** In a normal table each *column* holds one type while
-each row is mixed. In a transposed table this is reversed. Only consulted when the alias
-vote is within 0.2, where it is least likely to mislead.
-
-This requires a **fine-grained type lattice**. Five of the eight canonical fields are
-strings, so under a coarse `{str, num, date}` classification rows and columns both look
-string-homogeneous and the signal collapses. `typing_utils.infer_type` therefore separates
-strings by shape:
-
-```
-empty · bool · int · float · date · datetime · date_string · id_string · text
-```
-
-`POL-1000001` is `id_string`, `2026-01-01` is `date_string`, `Metro Agency Group` is
-`text` — three distinct types where a coarse lattice sees one.
-
-### Measured on the samples
-
-| Sheet | row rate | col rate | decided by | result |
-|---|---|---|---|---|
-| File1 Data | 1.00 | 0.09 | alias_match | normal |
-| File2 Data | 1.00 | 0.09 | alias_match | normal |
-| File3 Sheet | 1.00 | 0.07 | alias_match | normal |
-| **File4 Sheet** | **0.09** | **1.00** | **alias_match** | **transposed** |
-| File5 Jan/Feb | 1.00 | 0.09 | alias_match | normal |
-| File6 Report | 1.00 | 0.09 | alias_match | normal |
-| File6 Producer | 1.00 | 0.17 | alias_match | normal |
-
-Every sheet is decided by the primary vote with a ≥0.8 margin. The tiebreaker is
-implemented and tested but does not fire on this corpus.
-
----
-
-## 5. Header location (step 4)
-
-Each of the first 20 rows is scored by alias match rate; the highest wins, ties resolving
-to the topmost row.
-
-Two naive rules that **do not** work:
-
-| Naive rule | Breaks on |
+| Module | Responsibility |
 |---|---|
-| "first populated row" | File2 — the `Exavalu` banner wins |
-| "first row with no blanks" | File1 — the header spans B2:J2 with F2 empty |
-
-If no row scores above zero the first row is used as a fallback and a note is written to
-the trace, so a schema the dictionary does not know still produces output rather than an
-exception.
+| `signals.py` | Scoring primitives: fill density, uniqueness, type profile, contrast, emphasis |
+| `typing_utils.py` | Fine-grained type inference and homogeneity |
+| `reader.py` | Workbook → cell grid; nulls error cells; captures bold/fill/border |
+| `geometry.py` | Sheet → table **regions**; all blank-gap handling |
+| `header.py` | Composite header scoring, the no-header path, column naming |
+| `rowclass.py` | Sparsity + arithmetic row classification |
+| `extract.py` | Sequences the above per region; types; validates |
+| `orchestrate.py` | Table roles, stack/join relationships |
+| `join.py` | Value-based key discovery, fuzzy resolution with a margin rule |
+| `audit.py` | Every decision, with its score and its reason |
 
 ---
 
-## 6. Row classification (step 7)
+## 2. Regions: a sheet is not one table
 
 ```mermaid
 flowchart TD
-    ROW["body row"] --> BL{"all cells empty?"}
-    BL -->|yes| BLANK["BLANK — see run analysis"]
-    BL -->|no| ST{"first cell matches<br/>total / subtotal / grand total?"}
-    ST -->|yes| STK{"PolicyNumber and<br/>Date both empty?"}
-    STK -->|yes| SUB["SUBTOTAL — drop"]
-    STK -->|no| DATA["DATA — keep"]
-    ST -->|no| FT{"first cell matches<br/>End of Report / Confidential /<br/>For queries / Page n …?"}
-    FT -->|yes| FOOT["FOOTER — drop"]
-    FT -->|no| DATA
+    S["sheet grid"] --> RR["runs of populated rows"]
+    RR --> PM{"does the run continue<br/>the previous region?"}
+    PM -->|"modal fill = 1"| ATT["banner/footer — attach, judge later"]
+    PM -->|"type profile ≥ 70% match"| SAME["same region"]
+    PM -->|else| NEW["new region"]
+    SAME --> CS["column runs, per region"]
+    NEW --> CS
+    ATT --> CS
+    CS --> EX{"do adjacent column runs<br/>span the same rows?"}
+    EX -->|yes| GUT["gutter — drop the empty columns"]
+    EX -->|no| SPLIT["side-by-side tables — split"]
+    GUT --> F{"modal fill ≥ 2<br/>and ≥ 2 rows?"}
+    SPLIT --> F
+    F -->|yes| REG["table region"]
+    F -->|no| REJ["not a table — discarded"]
+
+    style REG fill:#d4edda,stroke:#28a745
+    style REJ fill:#f8d7da,stroke:#dc3545
+```
+
+**The governing rule: gap size is never an input to any decision.** One blank row and
+twelve blank rows are treated identically. What decides is whether what sits on the other
+side of the gap looks like the same table.
+
+| Direction | Question | Signal |
+|---|---|---|
+| Rows | same table across the gap? | column **type profile** match ≥ 70% |
+| Columns | gutter, or two tables? | **row extent** overlap ≥ 75% |
+
+Interior blank rows are removed from the region; each surviving row keeps its original
+sheet index in `source_rows`, so the audit report still points at the right line.
+
+Two guards stop decoration becoming a table: a run whose modal fill is 1 is attached to
+the preceding region rather than promoted, and any region whose modal fill stays below 2
+is discarded outright — a stack of single-cell title lines has no second column, so there
+is nothing to tabulate.
+
+---
+
+## 3. Orientation
+
+```
+score(upright)    = mean type-homogeneity of columns + uniqueness of row 1
+score(transposed) = mean type-homogeneity of rows    + uniqueness of column 1
+```
+
+In an upright table each *column* holds one type while each row is mixed; a transposed
+table reverses this. And a header line's labels are distinct, while a line of records
+repeats values — File4's row 1 says `South Zone PC` four times (0.45) while its column 1
+is fully distinct (1.00).
+
+Homogeneity is computed on the **fine type lattice** — `empty · bool · int · float · date ·
+datetime · date_string · id_string · text`. This matters: under a coarse `{str, num, date}`
+classification, business data is mostly strings and both axes look homogeneous. Separating
+`POL-1000001` (`id_string`) from `Rotterdam` (`text`) from `2026-07-01` (`date_string`)
+restores the contrast the score depends on.
+
+**When the margin is under 0.3** the content signals are too close to call, and the shape
+decides: tables are far more often taller than wide, so the reading that yields more
+records than fields wins. The region is flagged `confident: false`.
+
+Measured floor: an 8-column table reads upright confidently from **2 data rows onward**
+(margin 0.31 at n=2, rising to 0.44 at n=8). Below that the shape is genuinely ambiguous.
+
+---
+
+## 4. Header detection
+
+Five content signals, weighted to sum to 1.0, plus formatting as a bonus:
+
+| Signal | Weight | What it captures |
+|---|---|---|
+| contrast | 0.30 | header cell type ≠ the modal type of the column below |
+| textness | 0.25 | labels are text even above numeric columns |
+| uniqueness | 0.20 | labels do not repeat |
+| fill ratio | 0.15 | populated cells vs. the block's modal fill |
+| brevity | 0.10 | labels are short |
+| *emphasis* | *+0.15 bonus* | bold, fill or border the data rows lack |
+
+Emphasis is a **bonus, never a component**, because the AHI sample files carry no
+formatting at all — their header rows are not bold. A file with no styling is still fully
+scored by the five content signals.
+
+Blank cells are excluded from every denominator, which is why a header with a hole in it
+(File1's spans B2:J2 with F2 empty) is not penalised for the gap.
+
+### Refusing to invent a header
+
+Below a score of **0.55** the region is declared headerless: columns become
+`column_1..column_n` and `header_detected: false` goes into the report. Naming a data row
+as the header is a worse failure than admitting none was found.
+
+```
+clean header                 0.93  detected
+header with blank cells      0.78  detected
+header with "" cells         0.78  detected
+header with duplicate labels 0.88  detected
+header row entirely blank    0.51  REFUSED
+no header at all             0.51  REFUSED
+```
+
+> The 0.51 vs 0.55 margin is thin — 0.04. Emphasis widens it when a file has styling;
+> these files do not. Treat a borderline score as needing review.
+
+### Naming
+
+| Case | Result |
+|---|---|
+| normal label | casefold, non-alphanumerics → `_`, trimmed |
+| `None` / `""` / whitespace, column has data | `column_<n>` — **column kept** |
+| `None`, column also entirely empty | dropped as a gutter |
+| duplicate after normalizing | `name`, `name_2`, `name_3` |
+| numeric label (`2024`) | `col_2024` — never a bare-digit name |
+| label normalizing to nothing (`"---"`) | `column_<n>` |
+
+A blank header over a populated column **never** drops the column. Gutter removal requires
+the header *and* every data cell to be empty, checked together after the header is known.
+
+**Two-row headers** are merged when the second row also scores ≥0.55 **and** contrasts
+≥0.5 with the data below it. The contrast gate is essential: in a mostly-text table an
+ordinary data row scores ~0.55 on uniqueness and fill alone, and without it the pipeline
+swallows the first record of every such file.
+
+---
+
+## 5. Row classification
+
+```mermaid
+flowchart TD
+    ROW["body row"] --> RH{"values equal<br/>the header's?"}
+    RH -->|yes| REP["REPEATED_HEADER — drop"]
+    RH -->|no| SP{"fill ≥ 60% of<br/>the region's modal fill?"}
+    SP -->|yes| DATA["DATA — keep"]
+    SP -->|no| NUM{"has a number?"}
+    NUM -->|no| FOOT["FOOTER — drop"]
+    NUM -->|yes| AR{"does it equal the sum<br/>of the rows above?"}
+    AR -->|"a contiguous run"| SUB["SUBTOTAL — drop"]
+    AR -->|"every data row"| GT["GRAND_TOTAL — drop"]
+    AR -->|no| KEPT["SPARSE_KEPT — keep, flagged"]
 
     style DATA fill:#d4edda,stroke:#28a745
+    style KEPT fill:#fff3cd,stroke:#d39e00
     style SUB fill:#f8d7da,stroke:#dc3545
-    style FOOT fill:#f8d7da,stroke:#dc3545
+    style GT fill:#f8d7da,stroke:#dc3545
 ```
 
-**The whole body is scanned**, not just the tail. File3's subtotals sit *between* the
-groups they summarise, so a trim-from-the-bottom approach misses them entirely.
+**Sparsity finds candidates; arithmetic confirms them.** A total row is one whose number
+equals the sum of the rows above it — language-independent, and immune to a profit centre
+legitimately named `Total Risk PC` (that row is not sparse and its numbers do not sum).
 
-**A total row must satisfy two conditions**: name itself in its first cell *and* leave the
-record-identifying columns (`policy_number`, `accounting_effective_date`) empty. The
-second condition is what lets a profit centre legitimately named `Total Risk PC` survive —
-it carries a policy number, so it is data. Covered by
-`test_a_total_row_that_carries_a_policy_number_is_kept`.
+Totals resolve in two passes so nesting works. Subtotals settle first against the
+contiguous data run directly above; only then are survivors tested as grand totals, against
+every data row above *and* against the confirmed subtotals. Scope separates the two labels:
+a run covering every data row is a grand total, a proper subset is a subtotal.
 
-### Blank-run analysis
+**Text patterns exist only as corroboration.** They add a clause to the audit reason and
+never decide anything — proven in §12, where deleting every regex changes no output.
 
-A blank row is ambiguous: it can be a cosmetic separator or the end of the table.
-
-```mermaid
-flowchart TD
-    BR["blank run detected"] --> Q{"data rows<br/>remaining below?"}
-    Q -->|yes| SEP["SEPARATOR<br/>skip the blanks, keep reading"]
-    Q -->|no| L{"run length ≥ 2?"}
-    L -->|yes| END["END OF TABLE<br/>stop here"]
-    L -->|no| SEP
-
-    style SEP fill:#d1ecf1,stroke:#0c5460
-    style END fill:#f8d7da,stroke:#dc3545
-```
-
-File1 row 8 is a single blank with five more records below it. Treating it as a terminator
-would silently discard half the file.
-
-### What the samples produce
-
-| File | Dropped | Classifications |
-|---|---|---|
-| File1 | 1 | `SEPARATOR ×1` |
-| File2 | 6 | `BANNER ×3`, `FOOTER ×2`, `SUBTOTAL ×1` |
-| File3 | 3 | `SUBTOTAL ×3` |
-| File4–6 | 0 | — |
+**The conflict rule: a sparse row that fails the arithmetic check is kept, flagged with
+confidence 0.5, never dropped.** A record with several empty fields is ordinary in real
+data, and silently losing one is the worst failure this module could have.
 
 ---
 
-## 7. Type coercion (step 8)
+## 6. Types, without a schema to declare them
 
-Dtypes are **decided by the schema, not inherited from the source**, because the same
-field is stored differently in different files.
+Each column becomes whatever the majority of its own values already are. Two structural
+safeguards stop identifiers being damaged:
 
-| Field | Source variation | Output | Why |
-|---|---|---|---|
-| `profit_center_number` | `1005` (numeric) / `'PC0001'` (text) | **string** | An identifier, not a quantity. Only a string survives both forms. |
-| `accounting_effective_date` | `'2026-01-01'` (text) / real `datetime` | **ISO date string** | One representation for a single downstream table. |
-| `commission_pct` | `11.06` | **float, unchanged** | Already a whole-number percent. No silent ÷100. |
-| `zip_code` | `8085` (numeric) | **5-wide string** | Excel already dropped the leading zero of `08085`; restored by width. |
-| `premium` | numeric | **float64** | — |
+- **leading zero** → keep as text. Meaningless in a quantity; only survives if already text.
+- **near-unique integers all of one digit width** → keep as text. Account numbers, centre
+  codes, branch ids. A measure varies in magnitude; a code does not.
 
-Nothing is coerced with `errors='coerce'`. Every value that fails to parse is recorded in
-`coercion_failures` with the column, the value and the reason, then nulled — a failure is
-a reviewable event, not a silent one.
+The second rule recovers, from the data alone, what the old schema declared: `1005` in
+File1 and `PC0001` in File5 both land as `id_string`, so the same field is text in both
+files with nothing telling the pipeline they are the same field.
 
----
+A float column whose every value is whole is written as `Int64`, so a ZIP does not land in
+the CSV as `75202.0`.
 
-## 8. Workbook orchestration
+### What is genuinely lost
 
-```mermaid
-flowchart TD
-    SHEETS["cleaned sheets"] --> ROLE{"classify each sheet<br/>by column content"}
-    ROLE -->|≥2 transactional fields| FACT["FACT"]
-    ROLE -->|small · unique rows ·<br/>no transactional fields| DIM["DIMENSION"]
-    ROLE -->|neither| UNK["UNKNOWN"]
+`08085` cannot be recovered. The source cell holds the *number* 8085 — Excel destroyed the
+leading zero before the pipeline ever saw it, and the column's widths are mixed so the
+code heuristic correctly declines to fire. The old schema knew this column was a ZIP; no
+algorithm can.
 
-    FACT --> MULTI{"more than<br/>one fact?"}
-    MULTI -->|yes| OV{"schema overlap<br/>≥ 0.9?"}
-    OV -->|yes| STACK["STACK<br/>concat + source_sheet column"]
-    OV -->|no| STAND1["standalone"]
-    MULTI -->|no| PAIR{"exactly one fact<br/>+ one dimension?"}
-    DIM --> PAIR
-    PAIR -->|yes| JOIN["JOIN<br/>via join.py"]
-    PAIR -->|no| STAND2["standalone"]
-
-    STACK --> CSV["CSV outputs"]
-    JOIN --> CSV
-    STAND1 --> CSV
-    STAND2 --> CSV
-    JOIN -.dimension also ships separately.-> CSV
-
-    style STACK fill:#cfe2ff,stroke:#0d6efd
-    style JOIN fill:#cfe2ff,stroke:#0d6efd
-```
-
-### Sheet roles
-
-| Role | Test | Example |
-|---|---|---|
-| `FACT` | ≥2 of `premium`, `policy_number`, `accounting_effective_date`, `commission_pct` | File6 `Report` |
-| `DIMENSION` | ≤200 rows, every row a unique entity, no transactional fields | File6 `Producer` |
-| `UNKNOWN` | neither | — |
-
-**Sheet names are recorded as a hint, never used to decide.** A sheet tabbed `Producer
-Lookup` that holds transactional rows is classified `FACT`. Covered by
-`test_a_lookup_named_sheet_holding_transactions_is_still_a_fact`.
-
-### Stacking
-
-Schema overlap is the Jaccard index of the canonical fields present on each sheet. File5's
-Jan and Feb score 1.0.
-
-A `source_sheet` column is inserted during the concat. This is not cosmetic: **nothing in
-the row data identifies the period**, and Jan and Feb reuse the same policy numbers
-(`POL-200001`…`POL-200010`). Without it the stacked rows are indistinguishable and read as
-duplicates.
-
-For the same reason, **uniqueness checks are scoped within a sheet**, before stacking. A
-global check would flag all 20 rows and a naive dedupe would destroy half the dataset.
+More broadly: **semantic unification across sources is out of scope by construction.**
+Deciding that `Producer` in one file and `Agent Name` in another belong in one target
+column requires a schema, a config, an LLM or a human. The pipeline emits per-file-correct
+structure and records every inferred type; mapping is a deliberate downstream step.
 
 ---
 
-## 9. Join key discovery and resolution
+## 7. Table roles and relationships
 
-```mermaid
-flowchart TD
-    P["fact × dimension<br/>column pairs"] --> F{"dimension column<br/>distinct ratio ≥ 0.9?"}
-    F -->|no| SKIP["not a key candidate"]
-    F -->|yes| C1["PASS 1 — cheap<br/>normalised exact set overlap"]
-    C1 --> T1{"best ≥ 0.6?"}
-    T1 -->|yes| KEY["key found"]
-    T1 -->|no| C2["PASS 2 — expensive<br/>fuzzy overlap, sampled"]
-    C2 --> T2{"best ≥ 0.6?"}
-    T2 -->|yes| KEY
-    T2 -->|no| NONE["no join"]
+| Decision | Signal |
+|---|---|
+| **FACT** | has continuous measures alongside a key or a date column |
+| **DIMENSION** | small, one unique entity per row, no continuous measures |
+| **STACK** | ≥90% matching column names, **or** identical width with ≥90% matching type profile |
+| **JOIN** | one FACT + one DIMENSION with a discoverable value-based key |
 
-    style C1 fill:#d4edda,stroke:#28a745
-    style C2 fill:#fff3cd,stroke:#d39e00
-```
+A **measure** is a numeric column that is fractional or that repeats. Distinctness alone
+cannot separate a premium from a ZIP — both are unique. Fractionality can. (Limit: an
+integer measure that never repeats reads as a code; this affects role classification only,
+never the row data.)
 
-**Keys are found from values, never from header names.** `producer_agency_name` and
-`producer` do not string-match, and on a wider schema name-matching cheerfully picks the
-wrong column.
+Sheet names are recorded as `name_hint` and never decide. A tab called `Producer Lookup`
+holding transactional rows is a FACT.
 
-**Two passes, for cost.** All-pairs fuzzy comparison is
-`O(cols_A × cols_B × |values_A| × |values_B|)` and would be the pipeline's bottleneck at
-scale. The cheap normalised-exact pass settles File6 outright at 0.8 overlap — fuzzy
-scoring never runs.
+Stacking by **type profile** is the fallback for sheets holding the same data under
+different labels; it is flagged `confidence: low` so a reviewer knows names did not agree.
 
-### Value resolution — the margin rule
+`source_sheet` is inserted on stacked output because nothing in the rows identifies the
+period — File5's Jan and Feb reuse the same policy numbers, and without it the stacked rows
+are indistinguishable and read as duplicates. For the same reason uniqueness checks are
+scoped **within a region**, before stacking.
+
+---
+
+## 8. Join key discovery and the margin rule
+
+Keys are found from **values, never header names** — and this is now load-bearing rather
+than merely principled: without a schema the two columns are literally called
+`producer_agencyname` and `producer`, and no name matching would pair them.
+
+Two passes, for cost. Normalized exact set-overlap across all column pairs first (settles
+File6 at 0.8 outright); fuzzy scoring, which is quadratic, only runs on what is left, and
+only against dimension columns distinct enough to be a key.
 
 ```mermaid
 flowchart TD
     V["fact value"] --> EX{"exact match after<br/>trim + casefold?"}
     EX -->|yes| AUTO["auto_resolved"]
-    EX -->|no| SC["token_set_ratio against<br/>every dimension key"]
+    EX -->|no| SC["token_set_ratio vs<br/>every dimension key"]
     SC --> B{"best ≥ 90?"}
     B -->|no| L{"best ≥ 60?"}
-    L -->|yes| LOW["low_confidence<br/>flag · do not merge"]
-    L -->|no| UNR["unresolved<br/>flag · do not merge"]
+    L -->|yes| LOW["low_confidence — flag"]
+    L -->|no| UNR["unresolved — flag"]
     B -->|yes| M{"best − runner-up ≥ 10?"}
     M -->|yes| AUTO
-    M -->|no| AMB["ambiguous<br/>flag · do not merge"]
+    M -->|no| AMB["ambiguous — flag"]
 
     style AUTO fill:#d4edda,stroke:#28a745
     style AMB fill:#f8d7da,stroke:#dc3545
-    style LOW fill:#fff3cd,stroke:#d39e00
-    style UNR fill:#fff3cd,stroke:#d39e00
 ```
 
-**Why an absolute threshold is not enough.** `token_set_ratio` returns 100 whenever one
-side's token set is a subset of the other's. A truncated or generic value therefore clears
-any absolute threshold against *several* dimension entries at once, and `max()` silently
-picks whichever it saw first:
+`token_set_ratio` returns 100 whenever one side's tokens are a subset of the other's, so a
+generic value clears any absolute threshold against several candidates at once:
 
 ```
-'MJC '         → MJC Agency Group = 100 , Metro Agency Group =  10   margin 90  ✓ resolve
-'Agency Group' → Metro Agency Group = 100 , MJC Agency Group = 100   margin  0  ✗ flag
-'Brown & Brown'→ Apex Insurance Brokers = 34                          below 60  ✗ flag
+'MJC '         → MJC Agency Group=100 , Metro Agency Group= 10   margin 90  ✓ resolve
+'Agency Group' → Metro Agency Group=100, MJC Agency Group=100    margin  0  ✗ flag
+'Brown & Brown'→ Apex Insurance Brokers=34                       below 60  ✗ flag
 ```
 
-The margin rule is the difference between a join you can trust and one you cannot. Covered
-by `test_a_value_that_ties_two_candidates_is_flagged_not_guessed`.
-
-**Joins are always `how='left'`.** A fact row never disappears because its lookup missed;
-the dimension columns come back null and the value is listed under `needs_human_review`.
+**Joins are always `how='left'`.** A fact row never disappears because its lookup missed.
 
 ---
 
-## 10. Audit trail
+## 9. Audit trail
 
-One JSON per workbook in `audit/`. This is what makes the cleaning reviewable rather than
-a black box.
+One JSON per workbook, keyed by table region rather than by sheet:
 
 ```
 {
   "source_file", "generated_at", "embedded_images",
-  "sheets": [ {
-      "orientation":  { row_alias_rate, column_alias_rate, decided_by, orientation },
-      "header":       { row_index, alias_rate, scores[] },
-      "error_cells_nulled", "merged_ranges", "column_mapping", "unmapped_columns",
-      "dropped_rows": [ { row_index, classification, content } ],
-      "coercion_failures", "validation"
+  "tables": [ {
+      "region", "regions_on_sheet", "region_origin": {row, column, how},
+      "orientation": { row_score, column_score, margin, confident, orientation },
+      "header":      { row_index, detected, score, multi_row, scores[] },
+      "column_names", "inferred_types",
+      "dropped_rows": [ { sheet_row, classification, reason, content } ],
+      "coercion_failures", "validation", "notes"
   } ],
-  "workbook": {
-      "sheet_roles":   [ { sheet, role, reason, fact_signal_fields, name_hint } ],
-      "relationships": [ { sheets, schema_overlap, decision, discovered_key } ],
-      "join":          { join_key, discovery, resolutions[], needs_review[] }
-  },
-  "outputs": [ { file, kind, source_sheets, rows, columns } ],
-  "summary": { rows_dropped, dropped_by_classification, coercion_failures,
-               validation_findings, join_values_needing_review },
-  "needs_human_review": [ ... ]
+  "workbook": { "table_roles", "relationships", "join" },
+  "outputs", "summary", "needs_human_review"
 }
 ```
 
-`needs_human_review` is the field to check after a run. It is empty for all six samples.
+`summary` carries the three fields a reviewer should check first:
+`headerless_tables`, `low_confidence_orientations`, `join_values_needing_review`.
+
+**Every dropped row carries a `reason` naming the evidence** — `"column 2 equals the sum of
+the 3 data rows above"`, not `"matched subtotal pattern"`.
 
 ---
 
-## 11. Verification strategy
+## 10. Scenario coverage
 
-**The junk the pipeline strips is the oracle for the data it keeps.** Subtotal and total
-rows are discarded *and* retained in the trace, so their declared figures can be checked
-against the sums of the cleaned rows — an end-to-end correctness check that needs no
-hand-built expected output.
+| # | Scenario | Handled by | Verified |
+|---|---|---|---|
+| 1–2 | 1 / n blank rows mid-table (1,2,3,5,12) | §2 profile match | `test_geometry` |
+| 3 | Blank rows then a different table | §2 profile mismatch | `test_geometry` |
+| 4 | Blank rows then a footer | §2 modal-fill-1 rule | `test_geometry` |
+| 5 | Leading / trailing blank rows | §2 | `test_geometry` |
+| 6–7 | 1 / n empty columns mid-table (1,2,3,4,7) | §2 row extent | `test_geometry` |
+| 8 | Empty columns splitting two tables | §2 extent mismatch | `test_geometry` |
+| 9 | Leading / trailing empty columns | §2 | `test_geometry` |
+| 10 | Multi-line banner block fenced by blanks | §2 modal fill < 2 | `test_geometry` |
+| 11 | Column with data, **blank header** | §4 → `column_n`, kept | `test_header` |
+| 12 | Header with `None` cells | §4 blanks excluded | `test_header` |
+| 13 | Header with `""` cells | reader trims → as 12 | `test_header` |
+| 14 | Header with duplicate labels | §4 suffixing | `test_header` |
+| 15 | Header row entirely blank | §4 → headerless | `test_header` |
+| 16 | No header at all | §4 → headerless | `test_header` |
+| 17 | Header below banners | §4 band scan | `test_header`, File2 |
+| 18 | Two-row header | §4 + contrast gate | `test_header` |
+| 19 | Repeated header mid-body | §5 | `test_rowclass` |
+| 20 | Numeric headers (`2024`) | §4 → `col_2024` | `test_header` |
+| 21 | Merged cells in header | reader forward-fill | File2 |
+| 22 | Transposed layout | §3 | File4 |
+| 23 | Subtotals mid-table | §5 arithmetic | File3 |
+| 24 | Grand total at bottom | §5 arithmetic | File2 |
+| 25 | Nested subtotals + grand total | §5 two-pass | `test_rowclass` |
+| 26 | Banner / logo / footer lines | §5 sparsity | File2 |
+| 27 | Non-English footers and totals | §5 — no keywords | `test_rowclass`, §11 |
+| 28 | Sparse but genuine record | §5 conflict rule | `test_rowclass` |
+| 29 | Excel error cells | reader nulls `data_type=='e'` | File2 |
+| 30 | Dates as text vs datetime | §6 per-column inference | File1/File5 |
+| 31 | Identifier vs quantity | §6 code heuristic | File1/File5 |
+| 32 | Two tables side by side | §2 | `test_geometry` |
+| 33 | Dirty join keys | §8 margin rule | File6 |
+
+118 tests. `python -m pytest`.
+
+---
+
+## 11. Acceptance: an unseen schema
+
+The six sample files cannot demonstrate schema-independence — the pipeline was built while
+looking at them. The real check is a file it has never seen, combining every structural
+nasty at once: unknown column names, a title banner, a gutter column, a 3-row gap
+mid-table, a subtotal, a grand total, and a **German** footer.
 
 ```
-File2 grand total   declared 230,712.19   cleaned 230,712.19   ✓
-File3 East Zone PC  declared  70,464.59   cleaned  70,464.59   ✓
-File3 West Zone PC  declared 107,164.96   cleaned 107,164.96   ✓
-File3 North Zone PC declared 102,102.74   cleaned 102,102.74   ✓
+columns : consignment_ref, origin_depot, gross_weight_kg, despatch_date, handling_fee
+rows    : 5            header: row 0, detected, 0.94      orientation: normal, confident
+types   : id_string, text, float, date_string, float
+dropped : SUBTOTAL     Subtotal | 3723.25       <- column 2 equals the sum of the 3 rows above
+          GRAND_TOTAL  Grand Total | 6493.5     <- column 2 equals the sum of all 5 rows above
+          FOOTER       *** Ende des Berichts *** <- single populated cell, no numbers
+reconciles: True
 ```
 
-50 tests across three files:
+The German footer was dropped on structure alone, with no text match. That is the whole
+design working.
 
-| File | Covers |
+---
+
+## 12. Ablation: what is actually load-bearing
+
+Each signal disabled in turn, against the six files' known row counts:
+
+| Ablation | Result |
 |---|---|
-| `test_extract.py` | orientation, header hunt, row classification, dtypes, reconciliation |
-| `test_join.py` | key discovery, the margin rule, left-join safety |
-| `test_orchestrate.py` | sheet roles, stacking, joining, CLI end-to-end, audit content |
+| baseline | PASS |
+| no type-contrast in header scoring | PASS |
+| no uniqueness in header scoring | PASS |
+| **no text patterns at all** | **PASS** |
+| no arithmetic total check | BREAKS — File2 11≠10, File3 13≠10 |
+| no sparsity check | BREAKS — File2 11≠10, File3 13≠10 |
+| no orientation detection | BREAKS — File4 3≠10 |
 
-```bash
-python -m pytest
-```
+Two conclusions:
+
+1. **Deleting every regex in the codebase changes no output.** The keyword patterns are
+   genuinely corroboration, not mechanism. This is the claim that matters, and it is
+   measured rather than argued.
+2. Header scoring is *redundant* — knock out contrast or uniqueness individually and the
+   remaining signals still carry it. Sparsity, arithmetic and orientation are the three
+   things that actually do work.
 
 ---
 
-## 12. Known limits
+## 13. Known limits
 
 | Limit | Consequence |
 |---|---|
-| Alias dictionary drives orientation and header detection | A workbook with a schema absent from `schema.py` falls back to type homogeneity alone, then to "first row is the header". Output is still produced; confidence is lower. |
-| Stacking compares adjacent fact sheets pairwise | A workbook mixing two *different* stackable groups ships them standalone rather than forming two stacks. |
-| Join handles one fact + one dimension | Multiple lookups on one fact table are not chained. Deliberate — a transitive join planner is beyond POC scope. |
-| Subtotal and footer patterns are English | Localised reports need additional patterns in `extract.py`. |
-| Single header row assumed | Multi-row / hierarchical headers are not merged. |
+| Semantic mapping is out of scope | Unifying `Producer` and `Agent Name` into one target column needs a schema, config, LLM or human. The pipeline stops at per-file-correct structure. |
+| Leading zeros already lost in the source | `08085` stored as the number 8085 is unrecoverable. |
+| Orientation needs ≥2 data rows | A 1-row table is genuinely ambiguous and is flagged `confident: false`. |
+| Near-square tables are the weak case | File6's 5×4 lookup decides on the shape tiebreak, not content. Flagged. |
+| Integer measures that never repeat read as codes | Affects role classification only, never row data. |
+| Headers beyond two rows | Merged to two; deeper hierarchies are flagged, not guessed. |
+| Stacking compares adjacent fact tables pairwise | A workbook mixing two different stackable groups ships them standalone. |
+| One fact + one dimension per workbook | Multiple lookups are not chained — deliberate, beyond POC scope. |

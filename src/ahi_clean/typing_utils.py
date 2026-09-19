@@ -1,10 +1,10 @@
 """Fine-grained cell type inference.
 
 A coarse ``{str, num, date}`` lattice is nearly useless for deciding table
-orientation on this schema: five of the eight canonical fields hold strings, so
-rows and columns both look string-homogeneous and the signal collapses. Splitting
-strings by *shape* -- POL-1000001 and PC0001 are ``id_string``, '2026-01-01' is
-``date_string`` -- restores the contrast homogeneity scoring depends on.
+orientation: business data is mostly strings, so rows and columns both look
+string-homogeneous and the signal collapses. Splitting strings by *shape* --
+POL-1000001 and PC0001 are ``id_string``, '2026-01-01' is ``date_string`` --
+restores the contrast that homogeneity scoring depends on.
 """
 
 from __future__ import annotations
