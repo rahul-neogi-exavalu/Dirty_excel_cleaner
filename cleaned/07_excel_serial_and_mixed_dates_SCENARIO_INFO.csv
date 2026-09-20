@@ -1,2 +1,0 @@
-scenario,purpose
-"Date column mixes raw Excel serial integers, real datetimes, ISO text, DD/MM text, and one invalid value","46023 is a raw Excel date serial number stored as a plain integer (no date format applied) — must be recognized and converted via the 1899-12-30 epoch, not treated as a numeric Premium-like value."

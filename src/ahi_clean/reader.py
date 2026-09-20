@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import zipfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import openpyxl
+
+from . import delimited
 
 
 @dataclass
@@ -24,6 +27,7 @@ class SheetGrid:
     uncached_formula_cells: list[str] = field(default_factory=list)
     merged_ranges: list[str] = field(default_factory=list)
     image_count: int = 0
+    source_format: str = "xlsx"
 
     @property
     def height(self) -> int:
@@ -43,8 +47,19 @@ class SheetTooLarge(Exception):
     """A sheet exceeds the configured cell ceiling."""
 
 
+DELIMITED_SUFFIXES = {".csv", ".tsv", ".txt"}
+
+
 def read_workbook(path, max_cells: int = DEFAULT_MAX_CELLS) -> list[SheetGrid]:
-    """Load every sheet of ``path`` into a :class:`SheetGrid`."""
+    """Load every sheet of ``path`` into a :class:`SheetGrid`.
+
+    A delimited file is one sheet by definition and takes a different reader, but yields
+    the same grid -- which is the point of the grid being a list of lists. Nothing
+    downstream needs to know where the cells came from.
+    """
+    if Path(path).suffix.lower() in DELIMITED_SUFFIXES:
+        return delimited.read_delimited(path, max_cells, SheetTooLarge)
+
     # data_only=True gives us cached formula results rather than formula text.
     workbook = openpyxl.load_workbook(path, data_only=True)
     # A second, cheap pass over the formula text. data_only gives the value Excel
@@ -106,6 +121,9 @@ def count_embedded_images(path) -> int:
     They never affect extraction; this is recorded for the audit log so a reviewer
     can see why the top of that sheet looked blank.
     """
+    # A delimited file is not a zip and cannot carry a drawing layer at all.
+    if Path(path).suffix.lower() in DELIMITED_SUFFIXES:
+        return 0
     with zipfile.ZipFile(path) as archive:
         return sum(1 for name in archive.namelist() if name.startswith("xl/media/"))
 

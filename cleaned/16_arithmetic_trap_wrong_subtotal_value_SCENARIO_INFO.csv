@@ -1,2 +1,0 @@
-scenario,purpose
-A row labeled 'Subtotal' whose numeric value does not actually match the sum of the preceding rows (data-entry error in the source report),"If subtotal detection relies only on 'does this value equal the sum of preceding rows', this row is missed entirely. Keyword-based detection (the word 'Subtotal' plus null key columns) must take priority over — or run independently of — the arithmetic check."

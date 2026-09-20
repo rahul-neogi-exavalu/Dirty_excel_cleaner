@@ -48,7 +48,7 @@ htmlcov/
 .DS_Store
 Thumbs.db
 desktop.ini
-
+sample_files_uncleaned/
 # --- Local scratch ---------------------------------------------------------
 scratch/
 tmp/

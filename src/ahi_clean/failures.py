@@ -26,8 +26,6 @@ _FOREIGN_SUFFIXES = {
     ".xls": "legacy Excel 97-2003",
     ".xlsb": "binary Excel",
     ".ods": "OpenDocument",
-    ".csv": "plain CSV",
-    ".txt": "plain text",
 }
 
 _ADVICE = {

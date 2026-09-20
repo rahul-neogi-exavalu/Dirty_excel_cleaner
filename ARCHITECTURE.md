@@ -55,6 +55,7 @@ from. Nothing in the tree consults a field name.
 | `signals.py` | Fill density, uniqueness, type profile, coverage, contrast, emphasis, merged-banner |
 | `typing_utils.py` | Fine-grained type inference and homogeneity |
 | `reader.py` | Workbook → cell grid; nulls error cells; captures formatting and formulas |
+| `delimited.py` | CSV/TSV → the same grid; sniffs delimiter and encoding |
 | `geometry.py` | Sheet → table **regions**; all blank-gap handling |
 | `header.py` | Composite header scoring, the no-header path, column naming |
 | `rowclass.py` | Sparsity + arithmetic row classification |
@@ -685,6 +686,8 @@ cannot be driven from a REPL or `python -c`. Threads work everywhere.
 | Headers beyond two rows | Merged to two; deeper hierarchies flagged, not guessed. |
 | Wide gutters inside one table | A gap ≥2 columns is read as a table boundary unless both sides span exactly the same rows. |
 | One fact + one dimension per workbook | Multiple lookups are not chained — deliberate, beyond POC scope. |
+| A CSV carries no cell types, formatting, merges or formulas | The shape-based lattice and the additive emphasis signal absorb this; a leading zero actually survives better than in .xlsx. |
+| Thousands/decimal separators are not locale-aware | `1,234.56` is read correctly; `1234,56` (European decimal comma) is not. |
 | The reader stays on openpyxl | calamine/fastexcel are faster but expose only values, not error cells, formulas, merged ranges or styling, all load-bearing signals here. A hybrid read is possible and out of scope. |
 | Process pools need an importable entry point | A consequence of Windows spawn, not of this design. Threads are the default and are unaffected. |
 | Pivot detection needs ≥3 value columns | A two-month matrix is indistinguishable from an ordinary table with two numeric columns. |

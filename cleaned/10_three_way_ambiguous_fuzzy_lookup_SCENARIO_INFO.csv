@@ -1,2 +1,0 @@
-scenario,purpose
-Fact-side 'MJC' is equidistant from three plausible lookup candidates (MJC Agency Group / MJC Insurance Co / MJC Risk Partners),A pure best-match fuzzy join would pick one arbitrarily. Correct behavior is to detect the near-tie (small margin between best and second-best score) and flag it for manual review instead of silently auto-resolving.

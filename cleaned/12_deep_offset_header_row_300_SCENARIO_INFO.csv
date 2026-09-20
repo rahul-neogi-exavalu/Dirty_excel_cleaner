@@ -1,2 +1,0 @@
-scenario,purpose
-"Real header/table doesn't start until row 300, preceded by ~300 mostly-blank rows with scattered junk notes",Stress-tests both correctness (don't stop scanning after the first few dozen rows / don't assume the header is within some small row window) and performance (scanning must scale to sheets with large empty preambles).

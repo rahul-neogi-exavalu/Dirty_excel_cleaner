@@ -1,2 +1,0 @@
-scenario,purpose
-"'Premium' and 'PREMIUM ' (trailing space, different case) appear as two distinct columns with different values","A case-insensitive/whitespace-trimmed alias matcher would wrongly collapse these into one field and silently overwrite or drop one column's data — collision must be detected and both columns preserved or flagged, not merged."

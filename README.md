@@ -1,6 +1,6 @@
 # AHI POC — Schema-free Excel cleaning pipeline
 
-Turns report-shaped Excel exports — banners, merged titles, footers, page breaks, blank
+Turns report-shaped Excel exports and delimited text files — banners, merged titles, footers, page breaks, blank
 gutters, subtotals, repeated headers, transposed layouts, side-by-side tables — into flat,
 table-ready CSVs, with an audit report explaining every structural decision.
 
@@ -65,6 +65,24 @@ python tools/benchmark.py
 ```bash
 python tools/ablation.py
 ```
+
+## Delimited files
+
+`.csv`, `.tsv` and `.txt` go through the same pipeline. A delimited file is one sheet by
+definition, and it produces the same grid of cells, so every structural rule below applies
+unchanged — banners, footers, subtotals, transposed layouts and all.
+
+The delimiter is **detected, not assumed**: whichever of comma, semicolon, tab or pipe
+yields the most *consistent* column count across the opening lines. Frequency alone picks
+the comma out of a semicolon-delimited file full of prose. Encoding is tried in order
+(UTF-8 with or without a BOM, then cp1252, then latin-1), so a file always opens rather
+than failing on a bad guess.
+
+What a CSV cannot carry: cell types, formatting, merged ranges, formulas. That costs less
+than it sounds — the type lattice already classifies by *shape*, the emphasis signal is
+additive, and a merged title arrives as one value followed by empties, which is exactly
+what the banner rule looks for. One thing a CSV does **better**: a leading zero survives,
+where Excel had already destroyed it before the pipeline saw the file.
 
 ## Exit codes
 
@@ -197,6 +215,7 @@ src/ahi_clean/
   signals.py        scoring primitives (fill, uniqueness, type profile, coverage, contrast)
   typing_utils.py   fine-grained type inference
   reader.py         workbook -> cell grid + formatting + formulas; nulls error cells
+  delimited.py      csv/tsv -> the same grid; sniffs delimiter and encoding
   geometry.py       sheet -> table regions; all blank-gap handling
   header.py         header scoring, the no-header path, column naming
   rowclass.py       sparsity + arithmetic row classification

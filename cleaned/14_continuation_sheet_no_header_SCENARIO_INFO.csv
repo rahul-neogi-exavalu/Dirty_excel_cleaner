@@ -1,2 +1,0 @@
-scenario,purpose
-Sheet 1 has header+data; Sheet 2 ('Continued') has the remaining rows with NO header at all — same column order,The per-sheet pipeline will fail to find any header-like row on sheet 2 (every row looks like data). Workbook orchestration must recognize this as a continuation of sheet 1's schema (matching column count/type signature) rather than treating sheet 2 as headerless garbage or its own broken table.

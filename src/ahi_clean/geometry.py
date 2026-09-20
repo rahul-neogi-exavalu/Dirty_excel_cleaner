@@ -38,6 +38,7 @@ class Region:
     source_rows: list[int] = field(default_factory=list)
     column_offset: int = 0
     origin: str = "row_segmentation"
+    _width: int | None = field(default=None, repr=False, compare=False)
 
     @property
     def row_offset(self) -> int:
@@ -49,7 +50,16 @@ class Region:
 
     @property
     def width(self) -> int:
-        return max((len(row) for row in self.rows), default=0)
+        """The widest row, measured once.
+
+        Cached because it is O(rows) and callers treat it as a cheap attribute. Left as a
+        live property it turned a single loop over the rows into a quadratic one: on a
+        50,000-row file that is two and a half billion comparisons to answer a question
+        whose answer never changes.
+        """
+        if self._width is None:
+            self._width = max((len(row) for row in self.rows), default=0)
+        return self._width
 
 
 def find_regions(grid: list[list]) -> list[Region]:

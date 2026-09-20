@@ -1,2 +1,0 @@
-scenario,purpose
-"Final-boss case: merged banner title, table offset to column D, subtotal row mid-table, scientific-notation ID, a hidden row, a non-numeric 'Grand Total' value, and a fuzzy-match lookup block below it all in one sheet","Exercises boundary detection, offset detection, subtotal detection, type normalization, hidden-row policy, malformed-total handling, and fuzzy join resolution simultaneously — a true end-to-end regression case."

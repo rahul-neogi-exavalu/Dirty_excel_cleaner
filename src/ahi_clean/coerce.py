@@ -53,7 +53,16 @@ PERIOD_FORMATS = ["%b-%Y", "%b %Y", "%B-%Y", "%B %Y", "%Y-%m", "%m/%Y", "%Y/%m"]
 AMBIGUOUS_FORMATS = [("%m/%d/%Y", "month-first"), ("%d/%m/%Y", "day-first")]
 AMBIGUOUS_DASHED = [("%m-%d-%Y", "month-first"), ("%d-%m-%Y", "day-first")]
 
-_CURRENCY = re.compile(r"[^\d.\-+eE]")
+# Only genuine *presentation* is stripped: currency marks, thousands separators, percent
+# signs and spacing. Deliberately an allowlist of what may be removed, not a blacklist of
+# what may stay.
+#
+# The earlier form deleted everything that was not a digit, which silently turned
+# identifiers into numbers: 'POL-1' lost its letters and became -1, and a column of them
+# became a column of small negatives. Nothing reported it, because the result was a
+# perfectly valid number. Letters now always survive, so a value that is not really
+# numeric fails the cast and the column stays text -- which is the correct outcome.
+_PRESENTATION = re.compile(r"[\s,_ $£€¥₹%]")
 _PARENTHESISED = re.compile(r"^\((.*)\)$")
 _EXCEL_EPOCH = _dt.date(1899, 12, 30)
 
@@ -206,7 +215,7 @@ def _clean_numeric(series: pl.Series) -> pl.Series:
     return (
         series.str.strip_chars()
         .str.replace_all(r"^\((.*)\)$", r"-${1}")
-        .str.replace_all(_CURRENCY.pattern, "")
+        .str.replace_all(_PRESENTATION.pattern, "")
     )
 
 

@@ -420,6 +420,22 @@ If all three are zero, the file went through cleanly.
 
 ---
 
+## CSV files
+
+A `.csv` or `.tsv` goes through exactly the same reasoning. A delimited file is a single
+sheet by definition — there is no second tab to look for — and once its cells are read it
+is indistinguishable from a worksheet as far as every rule above is concerned.
+
+Two things are worked out rather than assumed: **which character separates the fields**
+(comma, semicolon, tab or pipe — European exports commonly use semicolons because the
+comma is their decimal separator) and **which text encoding the file uses**, so an
+accented name does not stop the file opening.
+
+A CSV cannot carry cell formatting or formulas, so those clues are simply unavailable —
+the tool copes, because none of them were ever the deciding vote. One thing a CSV does
+better than Excel: an identifier like `08085` keeps its leading zero, which Excel would
+have thrown away before the tool ever saw the file.
+
 ## What happens when a file cannot be read at all
 
 A folder of five hundred files will contain a few that are not really spreadsheets: a

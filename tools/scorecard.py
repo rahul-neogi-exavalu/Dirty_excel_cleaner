@@ -219,6 +219,10 @@ def main() -> int:
     if args.filter:
         paths = [path for path in paths if args.filter in path.name]
 
+    if not paths:
+        print("no scenario workbooks matched", file=sys.stderr)
+        return 1
+
     rows, failures = [], 0
     for path in paths:
         try:

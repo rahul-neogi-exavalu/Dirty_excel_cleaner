@@ -296,13 +296,17 @@ def _region_styles(region, grid):
     """Style rows aligned to the region's own coordinates."""
     if not getattr(grid, "styles", None):
         return None
+    # Bounds hoisted out of the loop: they do not change per row, and reading them
+    # inside it is what made this quadratic.
+    start = region.column_offset
+    stop = start + region.width
+
     styles = []
     for source in region.source_rows:
         if source >= len(grid.styles):
             styles.append([])
             continue
-        row = grid.styles[source]
-        styles.append(row[region.column_offset : region.column_offset + region.width])
+        styles.append(grid.styles[source][start:stop])
     return styles
 
 

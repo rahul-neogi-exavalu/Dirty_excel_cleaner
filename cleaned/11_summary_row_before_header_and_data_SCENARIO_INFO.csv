@@ -1,2 +1,0 @@
-scenario,purpose
-"A totals/summary block appears at the very top of the sheet, above the header and data","Every subtotal-detection heuristic in a typical design assumes totals trail the data they summarize. Here the aggregate row(s) come first, so position-based 'totals are near the end' assumptions fail; detection must be purely content-based (label keyword + null key columns), not positional."

@@ -313,3 +313,23 @@ def test_every_dropped_row_carries_a_reason_and_a_sheet_row():
     for dropped in result.trace["dropped_rows"]:
         assert dropped["reason"]
         assert dropped["sheet_row"] is not None
+
+
+def test_identifiers_are_never_stripped_into_numbers():
+    """'POL-1' once became -1: the numeric cleaner deleted the letters.
+
+    The result was a perfectly valid number, so nothing reported it. Only a corpus whose
+    policy numbers were all six digits long kept it hidden.
+    """
+    from ahi_clean import coerce
+
+    for values in (["POL-1", "POL-2", "POL-3"], ["INV-7", "INV-8", "INV-9"]):
+        result = coerce.coerce_column("reference", values)
+        assert result.series.to_list() == values, result.series.to_list()
+
+
+def test_presentation_is_still_stripped_from_genuine_numbers():
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("amount", ["$1,234.56", "(1,000.00)", "2 500", "99%"])
+    assert result.series.to_list() == [1234.56, -1000.0, 2500.0, 99.0]

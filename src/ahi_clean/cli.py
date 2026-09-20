@@ -211,8 +211,12 @@ def main(argv=None) -> int:
     parser.add_argument(
         "inputs",
         nargs="*",
-        default=["sample_files_uncleaned/*.xlsx"],
-        help="Workbook paths or glob patterns (default: the bundled samples).",
+        default=[
+            "sample_files_uncleaned/*.xlsx",
+            "sample_files_uncleaned/*.csv",
+            "sample_files_uncleaned/*.tsv",
+        ],
+        help="Workbook or delimited-file paths, or glob patterns (default: the samples).",
     )
     parser.add_argument("--out", default="cleaned", help="Directory for cleaned CSVs.")
     parser.add_argument("--audit", default="audit", help="Directory for audit reports.")

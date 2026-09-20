@@ -1,2 +1,0 @@
-scenario,purpose
-"Mixed currency symbols, thousands separators, negatives-in-parens, stray text","Premium column mixes $, EUR, bare numbers, parenthesis-negatives, trailing currency codes, and a non-numeric 'N/A' — a single blanket regex strip will fail on at least one of these."
