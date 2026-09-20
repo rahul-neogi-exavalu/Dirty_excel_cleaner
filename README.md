@@ -12,6 +12,9 @@ as a known one. Output columns are the file's own labels, normalized.
 **Every scenario workbook produces the correct records.** A few carry an advisory — the
 pipeline reporting honest uncertainty, not an error.
 
+Built on **polars**. **1,000,000 rows in 93 seconds** on one sheet. A bad workbook costs
+you that workbook and nothing else.
+
 - [BUSINESS_GUIDE.md](BUSINESS_GUIDE.md) — how it decides, in plain language, no code
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the full design, diagrams and the ablation study
 
@@ -35,6 +38,12 @@ at other files:
 python clean.py "some_folder/*.xlsx" --out cleaned --audit audit
 ```
 
+Process several workbooks at once:
+
+```bash
+python clean.py "inbox/*.xlsx" --workers 8
+```
+
 Score the cleaner against every scenario workbook:
 
 ```bash
@@ -46,6 +55,25 @@ Run the tests:
 ```bash
 python -m pytest
 ```
+
+Measure it, and check which signals the current corpus actually exercises:
+
+```bash
+python tools/benchmark.py
+```
+
+```bash
+python tools/ablation.py
+```
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | every workbook cleaned, no contract violated |
+| 1 | no input matched |
+| 2 | some workbooks could not be read, or an output file was locked |
+| 3 | an output contract was violated — the data may be wrong |
 
 ## How it decides, in one line each
 
@@ -85,6 +113,27 @@ looks; formula cells with no cached value are reported rather than shipped as nu
 **Continuation sheets.** A sheet with no header at all adopts the column names of a sibling
 with the same width and the same per-column types — matched on shape, not on sheet order.
 
+## Robustness
+
+**A bad file costs you that file.** Every workbook is processed inside its own error
+boundary, so one corrupt workbook in a folder of five hundred no longer takes the run
+down and skips everything after it. Failures are classified into things you can act on —
+corrupt, password-protected, unsupported format, missing, too large — each with advice,
+and an unexpected error keeps its traceback in a file rather than spilling into the
+console.
+
+**Output contracts.** The pipeline refuses to look trustworthy when it is not. Before
+anything is written it checks that every row is accounted for as kept or
+dropped-with-a-reason, that no key column came out empty, that no column emptied without
+a stated cause, and that a removed grand total still reconciles with the rows that were
+kept. A violation writes the CSV — withholding it would hide the evidence — and fails the
+run with its own exit code.
+
+**A documented ceiling.** `--max-cells` refuses a sheet too large to attempt rather than
+hanging. The reader also trims the sheet to its genuinely populated rectangle first, so a
+stray styled cell at row 100,000 does not make a ten-row report allocate a dense grid of
+a hundred thousand.
+
 ## Two rules that keep it safe
 
 **A sparse row that fails the arithmetic and carries no total-ish wording is kept**, flagged
@@ -121,7 +170,19 @@ become load-bearing without showing up. The harness has itself been wrong three 
 each time an ablation "passed" because the scorecard could not see the damage, and each gap
 is now closed with a direct check. A benchmark that cannot fail is not measuring anything.
 
-**169 tests, in two suites.** `tests/test_scenarios.py` runs against whatever workbooks are
+**Performance, measured not claimed.** 1,000,000 rows in 93 seconds, from ~34 minutes
+before the polars migration — 22x. The win came from deciding a column's type once and
+applying it vectorised, rather than calling a scalar parser per cell: profiling showed 51%
+of the old runtime inside pandas' date parser, more than half of that re-guessing the
+format on every single call.
+
+**Parallelism, defaulted on measurement.** Threads, not processes. Over 24 workbooks, four
+threads ran 1.4x faster than sequential while four processes ran **3.6x slower** — on
+Windows each process is a fresh interpreter that must re-import polars before doing any
+work, and for report-sized files that startup dwarfs the job. `--executor process` remains
+available for batches of genuinely large files.
+
+**156 tests, in two suites.** `tests/test_scenarios.py` runs against whatever workbooks are
 in `sample_files_uncleaned/` and adapts automatically. Everything else builds its sheets in
 memory and never names a file, so swapping the corpus cannot break what they pin.
 
@@ -130,6 +191,8 @@ memory and never names a file, so swapping the corpus cannot break what they pin
 ```
 clean.py            entry point (no PYTHONPATH needed)
 tools/scorecard.py  scores the cleaner against every scenario workbook
+tools/benchmark.py  single-sheet throughput and executor comparison
+tools/ablation.py   disables each signal in turn to show what is load-bearing
 src/ahi_clean/
   signals.py        scoring primitives (fill, uniqueness, type profile, coverage, contrast)
   typing_utils.py   fine-grained type inference
@@ -138,10 +201,14 @@ src/ahi_clean/
   header.py         header scoring, the no-header path, column naming
   rowclass.py       sparsity + arithmetic row classification
   pivot.py          wide-matrix detection and the melt to long form
+  coerce.py         vectorised type decisions: one strategy per column, not per cell
+  contracts.py      checks that refuse, rather than merely report
+  failures.py       why a workbook could not be read, in actionable terms
   extract.py        orientation, regions, realignment, types, validation
   orchestrate.py    table roles, stack/join decisions
   join.py           value-based key discovery with the margin rule
   audit.py          trace -> JSON report
+  cli.py            batch isolation, parallel workers, CSV writing
 ```
 
 ## Known limits

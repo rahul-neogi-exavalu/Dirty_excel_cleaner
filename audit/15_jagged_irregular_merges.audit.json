@@ -1,6 +1,6 @@
 {
   "source_file": "sample_files_uncleaned\\15_jagged_irregular_merges.xlsx",
-  "generated_at": "2026-09-20T04:06:50",
+  "generated_at": "2026-09-20T07:56:18",
   "embedded_images": 0,
   "tables": [
     {
@@ -35,8 +35,7 @@
         }
       ],
       "notes": [
-        "column 'profitcenternumber' kept as text: values look like codes",
-        "column 'accountingeffectivedate' holds mixed date formats; parsed as dates"
+        "column 'profitcenternumber' kept as text: values look like codes"
       ],
       "orientation": {
         "row_score": 1.559,
@@ -282,7 +281,8 @@
     ],
     "relationships": [],
     "join": null,
-    "header_adoptions": []
+    "header_adoptions": [],
+    "contract_violations": []
   },
   "outputs": [
     {
@@ -324,6 +324,7 @@
     "coercion_failures": 1,
     "validation_findings": 1,
     "join_values_needing_review": 0,
+    "contract_violations": 0,
     "tables_found": 2,
     "headerless_tables": 0,
     "low_confidence_orientations": 1

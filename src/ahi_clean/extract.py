@@ -11,9 +11,17 @@ import datetime as _dt
 import re
 from dataclasses import dataclass, field
 
-import pandas as pd
+import polars as pl
 
-from . import geometry, header as header_mod, pivot as pivot_mod, rowclass, signals, typing_utils
+from . import (
+    coerce,
+    geometry,
+    header as header_mod,
+    pivot as pivot_mod,
+    rowclass,
+    signals,
+    typing_utils,
+)
 from .typing_utils import is_blank
 
 ORIENTATION_MARGIN = 0.3
@@ -24,7 +32,7 @@ class SheetResult:
     """One cleaned table region, plus the trace explaining how it was cleaned."""
 
     sheet_name: str
-    frame: pd.DataFrame
+    frame: pl.DataFrame
     trace: dict = field(default_factory=dict)
     region_index: int = 0
 
@@ -41,7 +49,7 @@ def extract_sheet(grid) -> list[SheetResult]:
         return [
             SheetResult(
                 grid.name,
-                pd.DataFrame(),
+                pl.DataFrame(),
                 {
                     "sheet": grid.name,
                     "notes": ["no table-shaped region found on this sheet"],
@@ -117,9 +125,17 @@ def _orientation_scores(rows, columns):
 
     Each column of an upright table holds one type while each row is mixed, and a
     header line's labels are distinct while a line of records repeats values.
+
+    Measured on a sample. Which way up a block is, is a property of its whole shape,
+    and scanning a million rows to decide it costs as much as everything else put
+    together while changing no answer.
     """
-    row_score = typing_utils.mean_homogeneity(columns[1:] or columns) + signals.uniqueness(rows[0])
-    column_score = typing_utils.mean_homogeneity(rows[1:] or rows) + signals.uniqueness(columns[0])
+    sampled_rows = signals.sampled(rows[1:] or rows)
+    sampled_columns = [signals.sampled(column) for column in (columns[1:] or columns)]
+    row_score = typing_utils.mean_homogeneity(sampled_columns) + signals.uniqueness(rows[0])
+    column_score = typing_utils.mean_homogeneity(sampled_rows) + signals.uniqueness(
+        signals.sampled(columns[0])
+    )
     return row_score, column_score
 
 
@@ -195,8 +211,7 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
                     f"confidence: {verdict.reason}"
                 )
 
-    frame = pd.DataFrame([_fit_row(row, width) for row in kept], columns=names)
-    frame = _coerce_types(frame, trace)
+    frame = _typed_frame([_fit_row(row, width) for row in kept], names, trace)
     _validate(frame, trace)
 
     frame = _unpivot(frame, rows, found, names, trace)
@@ -314,7 +329,7 @@ def _unpivot(frame, rows, found, names, trace):
     Left wide, a month-per-column matrix produces a column per month, which no
     downstream table can take. Melted, it produces one row per cell.
     """
-    if frame.empty or not found.detected:
+    if frame.is_empty() or not found.detected:
         return frame
     detected = pivot_mod.detect(rows, found.row_index)
     if detected is None:
@@ -374,149 +389,29 @@ def _realign_gutters(names, found, rows, body, width, trace):
 # --------------------------------------------------------------------------- #
 
 
-def _coerce_types(frame: pd.DataFrame, trace) -> pd.DataFrame:
-    """Infer each column's type from its own values.
+def _typed_frame(rows, names, trace) -> pl.DataFrame:
+    """Build the frame column-by-column, typing each one as it is built.
 
-    Without a target schema there is no authority to appeal to, so a column becomes
-    whatever the majority of its values already are. Two safeguards stop identifiers
-    being silently damaged: a numeric column whose values carry leading zeros or share
-    one width is kept as text, and a column mixing identifiers with integers is kept as
-    text as well.
+    Columns rather than rows because that is the shape every type decision is made in:
+    a whole column is tried against one strategy at a time, vectorised, instead of each
+    cell being tried against every strategy in Python. There is deliberately no
+    intermediate untyped frame -- it would cost a full copy and answer nothing.
     """
     failures: list[dict] = []
     inferred: dict[str, str] = {}
+    series: list[pl.Series] = []
 
-    for column in frame.columns:
-        values = [value for value in frame[column] if not is_blank(value)]
-        kind = signals.modal_type(values) if values else typing_utils.EMPTY
-        types = {typing_utils.infer_type(value) for value in values}
-
-        if kind in (typing_utils.INT, typing_utils.FLOAT) and _looks_like_a_code(values):
-            kind = typing_utils.ID_STRING
-            trace["notes"].append(f"column '{column}' kept as text: values look like codes")
-        elif typing_utils.ID_STRING in types and types & {typing_utils.INT, typing_utils.FLOAT}:
-            kind = typing_utils.ID_STRING
-            trace["notes"].append(f"column '{column}' mixes identifiers and numbers; kept as text")
-
-        # A column written in four different date formats has no single lexical
-        # signature, so the type lattice sees only "text". Parseability is the honest
-        # test: if most values resolve to a date, it is a date column and the stragglers
-        # are reportable failures rather than the column's true nature.
-        if kind in (typing_utils.TEXT, typing_utils.DATE_STRING) and _mostly_dates(values):
-            kind = typing_utils.DATE
-            trace["notes"].append(
-                f"column '{column}' holds mixed date formats; parsed as dates"
-            )
-
-        inferred[column] = kind
-        if kind == typing_utils.FLOAT or kind == typing_utils.INT:
-            frame[column] = _to_float(frame[column], column, failures)
-        elif kind in (typing_utils.DATE, typing_utils.DATETIME, typing_utils.DATE_STRING):
-            frame[column] = _to_date(frame[column], column, failures)
-        else:
-            frame[column] = frame[column].map(_to_string)
+    for index, name in enumerate(names):
+        values = [row[index] if index < len(row) else None for row in rows]
+        result = coerce.coerce_column(name, values)
+        inferred[name] = result.kind
+        failures.extend(result.failures)
+        trace["notes"].extend(result.notes)
+        series.append(result.series)
 
     trace["inferred_types"] = inferred
     trace["coercion_failures"] = failures
-    return frame
-
-
-DATE_SHARE_THRESHOLD = 0.6
-
-
-def _mostly_dates(values) -> bool:
-    """Whether most of a column's values resolve to a real date."""
-    if len(values) < 3:
-        return False
-    parsed = sum(1 for value in values if _parse_date(value) is not None)
-    return parsed / len(values) >= DATE_SHARE_THRESHOLD
-
-
-def _parse_date(value):
-    if isinstance(value, (_dt.datetime, _dt.date)):
-        return value
-    text = str(value).strip()
-    # A bare number is a quantity, not a date; pandas would happily read it as one.
-    if not text or text.replace(".", "").replace("-", "").isdigit() and len(text) < 8:
-        return None
-    try:
-        return pd.to_datetime(text, errors="raise")
-    except (ValueError, TypeError, OverflowError):
-        return None
-
-
-def _looks_like_a_code(values) -> bool:
-    """Whether a numeric column is really an identifier that must stay text.
-
-    Two structural tells, neither of which needs to know the field's name:
-
-    * a leading zero, which is meaningless in a quantity and is only preserved at all
-      when the cell was already text;
-    * near-unique integers that all share one digit width -- account numbers, centre
-      codes, branch ids. A genuine measure varies in magnitude; a code does not.
-
-    This is what recovers, from the data alone, the decision a schema used to declare:
-    ``1005`` is an identifier, not a quantity, and must not be arithmetic.
-    """
-    texts = [str(value).strip() for value in values]
-    digits = [text for text in texts if text.isdigit()]
-    if len(digits) < len(texts) or len(digits) < 3:
-        return False
-    if any(text.startswith("0") for text in digits):
-        return True
-    widths = {len(text) for text in digits}
-    distinct_ratio = len(set(digits)) / len(digits)
-    return len(widths) == 1 and next(iter(widths)) >= 3 and distinct_ratio >= 0.9
-
-
-def _to_string(value):
-    if is_blank(value):
-        return None
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    if isinstance(value, (_dt.datetime, _dt.date)):
-        return value.isoformat()[:10]
-    return str(value).strip()
-
-
-def _to_float(series: pd.Series, column: str, failures: list[dict]) -> pd.Series:
-    def convert(value):
-        if is_blank(value):
-            return None
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
-        text = str(value).strip().replace(",", "").replace("%", "").replace("$", "")
-        try:
-            return float(text)
-        except ValueError:
-            failures.append({"column": column, "value": str(value)[:80], "reason": "not numeric"})
-            return None
-
-    converted = series.map(convert).astype("float64")
-    # A column whose every value is whole is written as an integer. Without this a ZIP
-    # code or a centre number that escaped the code heuristic lands in the CSV as
-    # "75202.0", which is wrong for a downstream load and merely noise to a reader.
-    present = converted.dropna()
-    if len(present) and (present % 1 == 0).all():
-        return converted.astype("Int64")
-    return converted
-
-
-def _to_date(series: pd.Series, column: str, failures: list[dict]) -> pd.Series:
-    def convert(value):
-        if is_blank(value):
-            return None
-        if isinstance(value, _dt.datetime):
-            return value.date().isoformat()
-        if isinstance(value, _dt.date):
-            return value.isoformat()
-        try:
-            return pd.to_datetime(str(value).strip()).date().isoformat()
-        except (ValueError, TypeError):
-            failures.append({"column": column, "value": str(value)[:80], "reason": "unparseable date"})
-            return None
-
-    return series.map(convert)
+    return pl.DataFrame(series) if series else pl.DataFrame()
 
 
 def _report_empty_columns(frame, grid, trace) -> None:
@@ -527,7 +422,7 @@ def _report_empty_columns(frame, grid, trace) -> None:
     workbook carries no cached results, in which case the values exist in Excel and
     simply were not available to read.
     """
-    empty = [column for column in frame.columns if frame[column].isna().all()]
+    empty = [column for column in frame.columns if frame[column].null_count() == frame.height]
     if not empty:
         return
     uncached = getattr(grid, "uncached_formula_cells", [])
@@ -548,15 +443,15 @@ def _report_empty_columns(frame, grid, trace) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _validate(frame: pd.DataFrame, trace) -> None:
+def _validate(frame: pl.DataFrame, trace) -> None:
     """Report data-quality findings. Nothing is dropped on a failure."""
     findings: list[dict] = []
-    if frame.empty:
+    if frame.is_empty():
         trace["validation"] = findings
         return
 
     for column in frame.columns:
-        nulls = int(frame[column].isna().sum())
+        nulls = int(frame[column].null_count())
         if nulls:
             findings.append(
                 {"check": "null_values", "column": column, "count": nulls,
@@ -566,8 +461,8 @@ def _validate(frame: pd.DataFrame, trace) -> None:
     # Uniqueness is scoped to this region. Stacked periods legitimately reuse keys, so
     # checking across a concatenation would flag every row as a duplicate.
     for column in _key_like_columns(frame):
-        values = frame[column].dropna()
-        duplicated = values[values.duplicated()].tolist()
+        values = frame[column].drop_nulls()
+        duplicated = values.filter(values.is_duplicated()).unique().to_list()
         if duplicated:
             findings.append(
                 {"check": "duplicate_key_within_region", "column": column,
@@ -580,7 +475,7 @@ def _validate(frame: pd.DataFrame, trace) -> None:
 KEY_SHAPE_RATIO = 0.5
 
 
-def _key_like_columns(frame: pd.DataFrame) -> list[str]:
+def _key_like_columns(frame: pl.DataFrame) -> list[str]:
     """Columns whose values are shaped like identifiers.
 
     Distinctness cannot be the test here, because the thing being looked for *is* a
@@ -590,10 +485,13 @@ def _key_like_columns(frame: pd.DataFrame) -> list[str]:
     """
     keys = []
     for column in frame.columns:
-        values = frame[column].dropna()
+        values = frame[column].drop_nulls()
         if len(values) < 3:
             continue
-        if values.map(_is_identifier).mean() >= 1.0 and values.nunique() / len(values) >= KEY_SHAPE_RATIO:
+        sampled = coerce.sample(values.to_list())
+        if not all(_is_identifier(value) for value in sampled):
+            continue
+        if values.n_unique() / len(values) >= KEY_SHAPE_RATIO:
             keys.append(column)
     return keys
 

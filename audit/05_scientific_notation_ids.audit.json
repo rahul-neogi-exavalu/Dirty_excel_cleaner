@@ -1,6 +1,6 @@
 {
   "source_file": "sample_files_uncleaned\\05_scientific_notation_ids.xlsx",
-  "generated_at": "2026-09-20T04:06:47",
+  "generated_at": "2026-09-20T07:56:13",
   "embedded_images": 0,
   "tables": [
     {
@@ -21,9 +21,7 @@
       "uncached_formula_cells": [],
       "merged_ranges": [],
       "dropped_rows": [],
-      "notes": [
-        "column 'accountingeffectivedate' holds mixed date formats; parsed as dates"
-      ],
+      "notes": [],
       "orientation": {
         "row_score": 1.889,
         "column_score": 1.073,
@@ -245,7 +243,8 @@
     ],
     "relationships": [],
     "join": null,
-    "header_adoptions": []
+    "header_adoptions": [],
+    "contract_violations": []
   },
   "outputs": [
     {
@@ -285,6 +284,7 @@
     "coercion_failures": 0,
     "validation_findings": 0,
     "join_values_needing_review": 0,
+    "contract_violations": 0,
     "tables_found": 2,
     "headerless_tables": 0,
     "low_confidence_orientations": 1

@@ -34,7 +34,16 @@ class SheetGrid:
         return max((len(row) for row in self.rows), default=0)
 
 
-def read_workbook(path) -> list[SheetGrid]:
+# A sheet beyond this many cells is refused rather than attempted. A documented
+# ceiling is a feature; an unexplained hang that swaps the machine is not.
+DEFAULT_MAX_CELLS = 20_000_000
+
+
+class SheetTooLarge(Exception):
+    """A sheet exceeds the configured cell ceiling."""
+
+
+def read_workbook(path, max_cells: int = DEFAULT_MAX_CELLS) -> list[SheetGrid]:
     """Load every sheet of ``path`` into a :class:`SheetGrid`."""
     # data_only=True gives us cached formula results rather than formula text.
     workbook = openpyxl.load_workbook(path, data_only=True)
@@ -46,10 +55,36 @@ def read_workbook(path) -> list[SheetGrid]:
     formulas = openpyxl.load_workbook(path, data_only=False)
     grids = []
     for worksheet in workbook.worksheets:
-        grid = _read_sheet(worksheet)
+        grid = _read_sheet(worksheet, max_cells)
         _note_formulas(grid, formulas[worksheet.title])
         grids.append(grid)
     return grids
+
+
+def _populated_extent(worksheet) -> tuple[int, int]:
+    """The genuinely used rectangle, not the one Excel claims.
+
+    openpyxl reports the sheet's declared dimensions, which stray formatting inflates
+    freely -- a single styled cell at row 100,000 makes a ten-row report claim a hundred
+    thousand rows, and materialising that dense grid costs memory the data never needed.
+    Trailing empty rows and columns are walked back before anything is allocated.
+    """
+    height = worksheet.max_row or 0
+    width = worksheet.max_column or 0
+
+    while height > 0 and _row_is_empty(worksheet, height, width):
+        height -= 1
+    while width > 0 and _column_is_empty(worksheet, width, height):
+        width -= 1
+    return height, width
+
+
+def _row_is_empty(worksheet, row, width) -> bool:
+    return all(worksheet.cell(row, column).value is None for column in range(1, width + 1))
+
+
+def _column_is_empty(worksheet, column, height) -> bool:
+    return all(worksheet.cell(row, column).value is None for row in range(1, height + 1))
 
 
 def _note_formulas(grid: SheetGrid, worksheet) -> None:
@@ -75,9 +110,13 @@ def count_embedded_images(path) -> int:
         return sum(1 for name in archive.namelist() if name.startswith("xl/media/"))
 
 
-def _read_sheet(worksheet) -> SheetGrid:
-    height = worksheet.max_row or 0
-    width = worksheet.max_column or 0
+def _read_sheet(worksheet, max_cells: int = DEFAULT_MAX_CELLS) -> SheetGrid:
+    height, width = _populated_extent(worksheet)
+    if height * width > max_cells:
+        raise SheetTooLarge(
+            f"sheet '{worksheet.title}' spans {height} x {width} = {height * width:,} cells, "
+            f"above the {max_cells:,} ceiling"
+        )
     rows: list[list] = [[None] * width for _ in range(height)]
     styles: list[list] = [[None] * width for _ in range(height)]
     error_cells: list[str] = []

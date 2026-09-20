@@ -100,7 +100,12 @@ def evaluate(path: Path) -> dict:
     elif got != expected:
         issues.append(f"records {got} != {expected}")
 
-    headerless = [result for result in results if not result.trace.get("header", {}).get("detected", True)]
+    headerless = [
+        result
+        for result in results
+        if not result.trace.get("header", {}).get("detected", True)
+        and not result.trace.get("header", {}).get("names_adopted")
+    ]
     if headerless:
         issues.append(f"{len(headerless)} headerless region(s)")
 
@@ -135,7 +140,7 @@ def evaluate(path: Path) -> dict:
         name
         for output in record_outputs
         for name in output.frame.columns
-        if output.frame[name].isna().all() and name not in explained
+        if output.frame[name].null_count() == output.frame.height and name not in explained
     ]
     if empties:
         # An empty column is worth surfacing but is not by itself wrong -- a report can
@@ -153,7 +158,7 @@ def evaluate(path: Path) -> dict:
         if result.trace.get("formula_cells"):
             continue  # already accounted for: the values live in Excel, not in the file
         reseated = any("re-seated" in note for note in result.trace.get("notes", []))
-        blanks = [name for name in result.frame.columns if result.frame[name].isna().all()]
+        blanks = [name for name in result.frame.columns if result.frame[name].null_count() == result.frame.height]
         if blanks and not reseated and len(blanks) > 1:
             issues.append(f"{len(blanks)} columns emptied with no realignment reported")
 
@@ -195,11 +200,11 @@ def evaluate(path: Path) -> dict:
 
 
 def _has_policy_column(frame) -> bool:
-    if frame.empty:
+    if frame.is_empty():
         return False
     for name in frame.columns:
-        values = frame[name].dropna().astype(str)
-        if len(values) and values.map(lambda value: bool(POLICY.fullmatch(value))).mean() > 0.5:
+        values = [str(value) for value in frame[name].drop_nulls().to_list()]
+        if values and sum(bool(POLICY.fullmatch(value)) for value in values) / len(values) > 0.5:
             return True
     return False
 

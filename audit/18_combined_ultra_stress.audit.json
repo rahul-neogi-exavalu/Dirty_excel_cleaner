@@ -1,6 +1,6 @@
 {
   "source_file": "sample_files_uncleaned\\18_combined_ultra_stress.xlsx",
-  "generated_at": "2026-09-20T04:06:51",
+  "generated_at": "2026-09-20T07:56:18",
   "embedded_images": 0,
   "tables": [
     {
@@ -38,9 +38,7 @@
           "content": "Grand Total |  |  |  | SEE SUBTOTALS"
         }
       ],
-      "notes": [
-        "column 'accountingeffectivedate' holds mixed date formats; parsed as dates"
-      ],
+      "notes": [],
       "orientation": {
         "row_score": 1.895,
         "column_score": 1.19,
@@ -213,7 +211,8 @@
         }
       ],
       "notes": [
-        "orientation margin 0.10 is narrow; decided by shape (4 records vs 4 fields)"
+        "orientation margin 0.10 is narrow; decided by shape (4 records vs 4 fields)",
+        "column 'address' holds formatted numbers; parsed as numeric"
       ],
       "orientation": {
         "row_score": 1.917,
@@ -273,12 +272,25 @@
       },
       "inferred_types": {
         "producer": "text",
-        "address": "text",
+        "address": "int",
         "state": "text",
         "zip_code": "int"
       },
-      "coercion_failures": [],
-      "validation": [],
+      "coercion_failures": [
+        {
+          "column": "address",
+          "value": "9515 Delegates Row",
+          "reason": "not numeric"
+        }
+      ],
+      "validation": [
+        {
+          "check": "null_values",
+          "column": "address",
+          "count": 1,
+          "rate": 0.333
+        }
+      ],
       "column_names": [
         "producer",
         "address",
@@ -379,6 +391,7 @@
         "table": "Report_r2",
         "rows": 3,
         "measure_columns": [
+          "address",
           "zip_code"
         ],
         "key_columns": [
@@ -413,7 +426,8 @@
       }
     ],
     "join": null,
-    "header_adoptions": []
+    "header_adoptions": [],
+    "contract_violations": []
   },
   "outputs": [
     {
@@ -468,9 +482,10 @@
       "SUBTOTAL": 1,
       "UNVERIFIED_TOTAL": 1
     },
-    "coercion_failures": 0,
-    "validation_findings": 0,
+    "coercion_failures": 1,
+    "validation_findings": 1,
     "join_values_needing_review": 0,
+    "contract_violations": 0,
     "tables_found": 3,
     "headerless_tables": 0,
     "low_confidence_orientations": 2

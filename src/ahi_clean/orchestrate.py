@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import pandas as pd
+import polars as pl
 
 from . import join, signals, typing_utils
 
@@ -33,7 +33,7 @@ class Output:
     """One CSV to write, with the decisions that produced it."""
 
     name: str
-    frame: pd.DataFrame
+    frame: pl.DataFrame
     kind: str
     sheets: list[str] = field(default_factory=list)
 
@@ -43,7 +43,7 @@ class Output:
 # --------------------------------------------------------------------------- #
 
 
-def _numeric_measure_columns(frame: pd.DataFrame) -> list[str]:
+def _numeric_measure_columns(frame: pl.DataFrame) -> list[str]:
     """Columns of continuous numbers -- amounts, rates -- rather than identifiers.
 
     Distinctness alone does not separate them: premiums are as unique as ZIP codes.
@@ -57,39 +57,49 @@ def _numeric_measure_columns(frame: pd.DataFrame) -> list[str]:
     """
     measures = []
     for column in frame.columns:
-        values = frame[column].dropna()
-        if len(values) < 2 or values.dtype.kind not in "fi":
+        values = frame[column].drop_nulls()
+        if len(values) < 2 or not frame[column].dtype.is_numeric():
             continue
-        fractional = any(float(value) % 1 for value in values)
-        repeats = values.nunique() / len(values) < KEY_DISTINCT_RATIO
+        fractional = bool((values % 1 != 0).any())
+        repeats = values.n_unique() / len(values) < KEY_DISTINCT_RATIO
         # A negative value settles it on its own: identifiers, codes and ZIPs are
         # never negative, so a column that goes below zero is a quantity. This is
         # what stops an adjustment table of whole, all-distinct amounts from being
         # mistaken for a lookup.
-        signed = any(float(value) < 0 for value in values)
+        signed = bool((values < 0).any())
         if fractional or repeats or signed:
             measures.append(column)
     return measures
 
 
-def _key_columns(frame: pd.DataFrame) -> list[str]:
+def _key_columns(frame: pl.DataFrame) -> list[str]:
     """Near-unique columns that could identify a record."""
     keys = []
     for column in frame.columns:
-        values = frame[column].dropna()
+        values = frame[column].drop_nulls()
         if len(values) < 2:
             continue
-        if values.nunique() / len(values) >= KEY_DISTINCT_RATIO:
+        if values.n_unique() / len(values) >= KEY_DISTINCT_RATIO:
             keys.append(column)
     return keys
 
 
-def _date_columns(frame: pd.DataFrame) -> list[str]:
+def _date_columns(frame: pl.DataFrame) -> list[str]:
     return [
         column
         for column in frame.columns
-        if frame[column].dropna().map(_is_date_like).all() and frame[column].notna().any()
+        if _all_date_like(frame[column])
     ]
+
+
+def _all_date_like(series: pl.Series) -> bool:
+    """Whether a column holds dates, judged on a sample rather than every value."""
+    from . import coerce
+
+    values = series.drop_nulls()
+    if values.is_empty():
+        return False
+    return all(_is_date_like(value) for value in coerce.sample(values.to_list()))
 
 
 def _is_date_like(value) -> bool:
@@ -105,14 +115,14 @@ def classify_table(result) -> tuple[str, dict]:
     frame = result.frame
     evidence = {"table": result.label, "rows": len(frame)}
 
-    if frame.empty:
+    if frame.is_empty():
         evidence.update(role=UNKNOWN, reason="table is empty")
         return UNKNOWN, evidence
 
     measures = _numeric_measure_columns(frame)
     keys = _key_columns(frame)
     dates = _date_columns(frame)
-    unique_rows = len(frame.drop_duplicates()) == len(frame)
+    unique_rows = frame.n_unique() == len(frame)
 
     evidence.update(
         measure_columns=measures,
@@ -144,7 +154,7 @@ def classify_table(result) -> tuple[str, dict]:
 # --------------------------------------------------------------------------- #
 
 
-def name_overlap(left: pd.DataFrame, right: pd.DataFrame) -> float:
+def name_overlap(left: pl.DataFrame, right: pl.DataFrame) -> float:
     """Jaccard overlap of two tables' column names."""
     left_names, right_names = set(left.columns), set(right.columns)
     if not left_names or not right_names:
@@ -152,7 +162,7 @@ def name_overlap(left: pd.DataFrame, right: pd.DataFrame) -> float:
     return len(left_names & right_names) / len(left_names | right_names)
 
 
-def profile_overlap(left: pd.DataFrame, right: pd.DataFrame) -> float:
+def profile_overlap(left: pl.DataFrame, right: pl.DataFrame) -> float:
     """Similarity of two tables' per-column type profiles.
 
     The fallback for sheets that hold the same data under different labels -- a
@@ -160,8 +170,8 @@ def profile_overlap(left: pd.DataFrame, right: pd.DataFrame) -> float:
     """
     if len(left.columns) != len(right.columns):
         return 0.0
-    left_profile = tuple(signals.modal_type(left[column].tolist()) for column in left.columns)
-    right_profile = tuple(signals.modal_type(right[column].tolist()) for column in right.columns)
+    left_profile = tuple(signals.modal_type(left[column].to_list()) for column in left.columns)
+    right_profile = tuple(signals.modal_type(right[column].to_list()) for column in right.columns)
     return signals.profile_similarity(left_profile, right_profile)
 
 
@@ -205,10 +215,10 @@ def adopt_sibling_headers(results) -> list[dict]:
     donors = [
         result
         for result in results
-        if result.trace.get("header", {}).get("detected") and not result.frame.empty
+        if result.trace.get("header", {}).get("detected") and not result.frame.is_empty()
     ]
     for result in results:
-        if result.frame.empty or result.trace.get("header", {}).get("detected"):
+        if result.frame.is_empty() or result.trace.get("header", {}).get("detected"):
             continue
         for donor in donors:
             if len(donor.frame.columns) != len(result.frame.columns):
@@ -216,8 +226,11 @@ def adopt_sibling_headers(results) -> list[dict]:
             if profile_overlap(donor.frame, result.frame) < PROFILE_OVERLAP_THRESHOLD:
                 continue
             result.frame.columns = list(donor.frame.columns)
+            # `detected` stays False on purpose: this region genuinely has no header
+            # row, it has borrowed names from one. Overloading the flag made every
+            # downstream row count skip a header line that is not there.
             result.trace["header"]["adopted_from"] = donor.label
-            result.trace["header"]["detected"] = True
+            result.trace["header"]["names_adopted"] = True
             result.trace["notes"].append(
                 f"no header on this table; adopted the column names of '{donor.label}', "
                 "which has the same width and the same per-column types"
@@ -230,7 +243,7 @@ def adopt_sibling_headers(results) -> list[dict]:
 def plan_workbook(results, stem: str) -> tuple[list[Output], dict]:
     """Classify tables, decide their relationships, and produce the outputs."""
     adoptions = adopt_sibling_headers(results)
-    live = [result for result in results if not result.frame.empty]
+    live = [result for result in results if not result.frame.is_empty()]
     roles: dict[str, str] = {}
     evidence: list[dict] = []
     for result in live:
@@ -262,14 +275,15 @@ def plan_workbook(results, stem: str) -> tuple[list[Output], dict]:
     if stack_group:
         frames = []
         for result in stack_group:
-            frame = result.frame.copy()
             # Nothing in the rows identifies which sheet they came from, and periods
             # commonly reuse the same keys. Without this the stacked rows are
             # indistinguishable and read as duplicates.
-            frame.insert(0, SOURCE_SHEET_COLUMN, result.sheet_name)
+            frame = result.frame.insert_column(
+                0, pl.Series(SOURCE_SHEET_COLUMN, [result.sheet_name] * len(result.frame))
+            )
             frames.append(frame)
         outputs.append(
-            Output(stem, pd.concat(frames, ignore_index=True), "stacked",
+            Output(stem, pl.concat(frames, how="vertical_relaxed"), "stacked",
                    [result.label for result in stack_group])
         )
         remaining_facts = []

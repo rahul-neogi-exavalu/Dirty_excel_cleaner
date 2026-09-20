@@ -1,6 +1,6 @@
 {
   "source_file": "sample_files_uncleaned\\10_three_way_ambiguous_fuzzy_lookup.xlsx",
-  "generated_at": "2026-09-20T04:06:49",
+  "generated_at": "2026-09-20T07:56:16",
   "embedded_images": 0,
   "tables": [
     {
@@ -22,8 +22,7 @@
       "merged_ranges": [],
       "dropped_rows": [],
       "notes": [
-        "column 'profitcenternumber' kept as text: values look like codes",
-        "column 'accountingeffectivedate' holds mixed date formats; parsed as dates"
+        "column 'profitcenternumber' kept as text: values look like codes"
       ],
       "orientation": {
         "row_score": 1.881,
@@ -146,6 +145,7 @@
       ],
       "notes": [
         "orientation margin 0.15 is narrow; decided by shape (6 records vs 4 fields)",
+        "column 'address' holds formatted numbers; parsed as numeric",
         "column 'zip_code' kept as text: values look like codes"
       ],
       "orientation": {
@@ -226,12 +226,30 @@
       },
       "inferred_types": {
         "producer": "text",
-        "address": "text",
+        "address": "int",
         "state": "text",
         "zip_code": "id_string"
       },
-      "coercion_failures": [],
-      "validation": [],
+      "coercion_failures": [
+        {
+          "column": "address",
+          "value": "9515 Delegates Row",
+          "reason": "not numeric"
+        },
+        {
+          "column": "address",
+          "value": "20 Village Center Dr",
+          "reason": "not numeric"
+        }
+      ],
+      "validation": [
+        {
+          "check": "null_values",
+          "column": "address",
+          "count": 2,
+          "rate": 0.4
+        }
+      ],
       "column_names": [
         "producer",
         "address",
@@ -462,9 +480,10 @@
       ],
       "fact_rows_in": 5,
       "fact_rows_out": 5,
-      "enriched_rows": 2
+      "enriched_rows": 0
     },
-    "header_adoptions": []
+    "header_adoptions": [],
+    "contract_violations": []
   },
   "outputs": [
     {
@@ -521,9 +540,10 @@
     "dropped_by_classification": {
       "BANNER": 1
     },
-    "coercion_failures": 0,
-    "validation_findings": 0,
+    "coercion_failures": 2,
+    "validation_findings": 1,
     "join_values_needing_review": 3,
+    "contract_violations": 0,
     "tables_found": 3,
     "headerless_tables": 0,
     "low_confidence_orientations": 2

@@ -3,6 +3,8 @@
 Technical reference for the pipeline that converts report-shaped Excel exports into
 table-ready CSVs.
 
+Built on **polars**. Measured: **1,000,000 rows in 93 seconds** on a single sheet.
+
 **Design principle: no schema, no aliases, no field names.** Every structural decision is
 derived from the data's own shape, types, distinctness, density and arithmetic. The
 pipeline has no idea what a "premium" is and does not need one. Output columns are the
@@ -57,10 +59,14 @@ from. Nothing in the tree consults a field name.
 | `header.py` | Composite header scoring, the no-header path, column naming |
 | `rowclass.py` | Sparsity + arithmetic row classification |
 | `pivot.py` | Wide-matrix detection and the melt back to long form |
+| `coerce.py` | Vectorised type decisions: one strategy per column, not per cell |
+| `contracts.py` | Checks that refuse, rather than merely report |
+| `failures.py` | Why a workbook could not be read, in terms someone can act on |
 | `extract.py` | Sheet orientation, region sequencing, gutter realignment, types, validation |
 | `orchestrate.py` | Table roles, stack/join relationships |
 | `join.py` | Value-based key discovery, fuzzy resolution with a margin rule |
 | `audit.py` | Every decision, with its score and its reason |
+| `cli.py` | Per-file error boundaries, parallel workers, contract gate, CSV writing |
 
 **Ordering is load-bearing in four places.** A pivot is recognised *before* orientation,
 because a matrix reads consistently both ways and the tiebreak would stand it on its side.
@@ -316,7 +322,10 @@ The cost is measured and stated in §9: text patterns are now load-bearing for t
 
 ---
 
-## 6. Types, without a schema to declare them
+## 6. Types: what is decided, and what is lost
+
+*How* a column is typed -- one vectorised strategy at a time -- is section 11. This is
+what the decisions mean.
 
 Each column becomes whatever the majority of its own values already are, with three
 structural safeguards:
@@ -425,41 +434,71 @@ generic value clears any absolute threshold against several candidates at once:
 
 ## 9. Ablation: what is actually load-bearing
 
-Each signal disabled in turn and the whole corpus re-scored. On the current 18-workbook
-set:
+Every signal is disabled in turn and the whole corpus re-scored, so no assumption can
+quietly become load-bearing without it showing up.
+
+```bash
+python tools/ablation.py
+```
+
+**Run it rather than trusting a number quoted here.** The results depend on the corpus as
+much as on the code, and the sample corpus is expected to be swapped -- it has
+been replaced repeatedly during development -- 6 workbooks, then 16, 42, 26, 1, and now
+60. A table frozen into a document goes stale the moment that happens, and a stale
+measurement is worse than none because it still reads as evidence. That is why this is a
+tool and not a paragraph.
+
+**A PASS means "no workbook in the current corpus depends on this signal", not "this
+signal is unnecessary."** Reading it the other way would justify deleting the only thing
+standing between a past failure and a repeat of it.
+
+Last run over 60 workbooks:
 
 | Ablation | Result |
 |---|---|
 | baseline (all signals) | PASS |
 | no uniqueness in header | PASS |
+| no fill-ratio in header | PASS |
 | no arithmetic total check | PASS |
-| no restated-header detection | PASS |
-| no sheet-level orientation | PASS |
-| no region profile matching | PASS |
-| no header/body realignment | PASS |
-| no type-contrast in header | BREAKS 1 (14) |
-| no merged-banner detection | BREAKS 1 (18) |
-| no pivot detection | BREAKS 1 (01) |
-| no header adoption | BREAKS 1 (14) |
-| no sparsity check | BREAKS 2 (16, 18) |
-| **no text patterns at all** | **BREAKS 2 (16, 18)** |
+| no repeated-header detection | PASS |
+| no column-extent splitting | PASS |
+| no pivot detection | BREAKS 1 |
+| no header/body realignment | BREAKS 1 |
+| no type-contrast in header | BREAKS 1 |
+| no header adoption | BREAKS 1 |
+| no restated-header detection | BREAKS 2 |
+| no sheet-level orientation | BREAKS 2 |
+| no merged-banner detection | BREAKS 3 |
+| **no total/footer text patterns** | **BREAKS 5** |
+| no region profile matching | BREAKS 5 |
+| no sparsity check | BREAKS 6 |
 
-**A PASS here means "no workbook in the current corpus depends on this", not "this signal
-is useless".** An earlier 42-workbook corpus broke on region profile matching (5 files),
-sheet-level orientation (2), header/body realignment (1) and restated-header detection (2).
-Those scenarios are simply absent from the present set. Ablation measures the corpus as
-much as the code, and reading it otherwise would justify deleting signals that are the only
-thing standing between a past failure and a repeat of it.
+Nine of sixteen signals are load-bearing on this corpus. The passes are worth reading
+carefully rather than as dead weight:
 
-Two results worth reading carefully either way:
+* **repeated-header detection** passes only because the other two disguises catch the
+  same rows -- a page-break header is found verbatim, as a fragment, *or* by type
+  contrast, and removing any one of the three leaves the others.
+* **the arithmetic total check** stopped changing any record count once the text path
+  caught the same rows. It still earns its place: it is what separates a *proven* total
+  from an unverified one, and that distinction is the whole value of the audit report.
+* **column-extent splitting** has no side-by-side table in the present corpus to exercise
+  it. An earlier corpus broke without it.
 
-1. **Text patterns are load-bearing.** In an earlier version deleting every regex changed
-   nothing. That is no longer true, and the cause is the `UNVERIFIED_TOTAL` decision in §5
-   — a deliberate trade, not a regression. Wording still cannot drop a row on its own; it
-   only classifies a row that structure already found suspect.
-2. **The arithmetic check no longer changes any record count** — the text path now catches
-   the same rows. It still earns its place: it is what separates a *proven* total from an
-   unverified one, and that distinction is the whole value of the audit report.
+Two results worth reading carefully whatever the corpus:
+
+1. **Text patterns are load-bearing**, breaking five workbooks when removed. In an
+   earlier version deleting every regex changed nothing at all. That is no longer true,
+   and the cause is the `UNVERIFIED_TOTAL` decision in section 5 -- a deliberate trade,
+   not a regression. Wording still cannot drop a row on its own; it only classifies a row
+   that structure already found suspect.
+2. **Sparsity and region profile matching are the backbone.** Between them they account
+   for eleven of the breakages: one finds what is not a record, the other holds a table
+   together across gaps and tells one table from two.
+
+The tool marks a crash distinctly from a wrong answer. They must not read alike: a crash
+almost always means the ablation is broken, not that the signal was load-bearing. Both
+failure modes have happened here.
 
 ### The scorecard has been wrong three times
 
@@ -499,11 +538,142 @@ reporting that it was not certain — an orientation decided by shape, a column 
 positionally because its header cell was blank. Those are a feature, and counting them as
 failures would push the design towards false confidence.
 
-169 tests. `python -m pytest`.
+**Resilience and contracts have their own suite.** `tests/test_resilience.py` covers what
+happens to a batch containing a corrupt, encrypted, legacy and empty workbook, asserts that
+every output contract *fires* on deliberately broken input, and checks that a parallel run
+produces byte-identical output to a sequential one under both executors.
+
+156 tests. `python -m pytest`. Measure with `python tools/benchmark.py`.
 
 ---
 
-## 11. Known limits
+## 11. Types: one decision per column, not per cell
+
+The rule that makes this fast: **the whole column is tried against one strategy at a time,
+vectorised, rather than each value being tried against every strategy in Python.**
+
+That is not a micro-optimisation, it is the entire performance story. Profiling the pandas
+implementation on a 4,000-row sheet:
+
+| Cost | Share | Cause |
+|---|---|---|
+| `pandas.to_datetime`, 20,000 scalar calls | **51%** | called once per cell |
+| of which, format re-guessing | 28% | pandas re-derives the format on *every* scalar call |
+| `_mostly_dates` during header scoring | 28% | scanned all 4,000 values to answer a yes/no question |
+
+The format is a property of the column, so it is decided once. `coerce.py` applies a
+**format ladder**: ISO, then the unambiguous written forms, then the ambiguous pair. What
+counts is the share the ladder resolves *as a whole*, not what its best single rung does.
+A report whose dates arrive in four formats resolves fully while no single format covers a
+quarter of it, and judging on the best single rung would call that column text and lose
+every date in it.
+
+**Date order is resolved per column, from evidence.** `01/02/2026` is either reading. The
+ambiguous pair is ordered by how much of the column each resolves, so a single `25/12/2026`
+settles day-first for every row where both readings would have been legal. The choice is
+recorded in the audit, and a genuine tie is reported as ambiguous rather than silently
+picked.
+
+Two capabilities came free with the vectorised path: **accounting negatives** -- `(1,234.56)`
+is minus one thousand two hundred and thirty four, and reading it as text loses the sign
+entirely -- and **currency-formatted numbers**, both handled by stripping presentation
+before the cast.
+
+### Where the time went afterwards
+
+Removing the date parser exposed the next layer, and the profile was again decisive:
+`infer_type` was being called **3.4 million times for 128,000 cells**, twenty-seven times
+per cell, because the block's type profile was recomputed once per candidate header row.
+Those whole-block scans now run once, on a sample. Orientation scoring is sampled for the
+same reason: which way up a block is, is a property of its whole shape, and scanning a
+million rows to decide it costs more than everything else together while changing no
+answer.
+
+```
+                     us/row      1M rows
+pandas                 2000      ~34 min
+polars, naive           570      ~10 min
++ sampled scans         110       ~2 min
+final, measured          93        93 s
+```
+
+---
+
+## 12. Robustness
+
+### A bad file costs you that file
+
+Confirmed before any of this was written: a corrupt workbook raised `BadZipFile` out of the
+CLI and **every file after it was never processed**. Each workbook now runs inside its own
+error boundary, and failures are classified into something actionable rather than a stack
+trace:
+
+| Kind | How it is told apart |
+|---|---|
+| `corrupt` | not a readable zip |
+| `encrypted` | an OLE container. A password-protected .xlsx raises the *same* error as a corrupt one, so the magic bytes decide -- telling someone their file is corrupt when it is merely locked sends them looking in the wrong place. |
+| `unsupported_format` | .xls, .xlsb, .ods, .csv, named individually so the message can say what to convert from |
+| `too_large` | beyond the configured cell ceiling |
+| `missing` / `unexpected` | gone, or something nobody anticipated; the latter keeps its traceback in a file |
+
+### Output contracts
+
+The rest of the pipeline *reports*. These *refuse*. The dangerous failure of a cleaner is
+not crashing; it is emitting a CSV that looks entirely plausible and is quietly wrong.
+
+| Check | Catches |
+|---|---|
+| row conservation | a record vanishing without a logged reason |
+| key column not empty | the misalignment class: labels present, values one column left |
+| empty column explained | several columns emptying at once, the fingerprint of a structural error |
+| removed total reconciles | kept rows that no longer agree with the total that was discarded |
+| no duplicate column names | defence in depth; polars now makes this unrepresentable |
+
+Every one is derived from evidence the pipeline already keeps, so none of them re-read the
+source. Each was verified to *fire* on deliberately broken input, which exposed two bugs in
+the checks themselves: duplicate names crashed the key lookup, and the key check could
+never fire at all, because it identified key columns from surviving values and an all-null
+column has none left. It now reads the types recorded at coercion time.
+
+### Scale guards
+
+The reader trims the sheet to its genuinely populated rectangle before allocating, because
+openpyxl reports the dimensions Excel *claims* and stray formatting inflates those freely:
+one styled cell at row 100,000 makes a ten-row report claim a hundred thousand. Beyond
+`--max-cells` a sheet is refused with a clear message. A documented ceiling is a feature;
+an unexplained hang is not.
+
+---
+
+## 13. Parallel batches
+
+`--workers N` with `--executor {thread,process}`. Files are independent -- separate inputs,
+outputs and audit reports -- so this needs no locking, and results are re-ordered to match
+input order so runs stay diff-comparable.
+
+**Threads are the default, on measurement rather than theory.** The expectation was that
+processes would win, since reading a workbook is pure-Python and holds the GIL. Over 24
+workbooks:
+
+| mode | seconds | speedup |
+|---|---|---|
+| sequential | 1.58 | 1.00x |
+| 4 threads | 1.12 | **1.40x** |
+| 8 threads | 1.21 | 1.30x |
+| 4 processes | 5.67 | **0.28x** |
+| 8 processes | 10.19 | 0.15x |
+
+Processes are **3.6x slower**: on Windows each worker is a fresh interpreter that must
+re-import polars before doing anything, and for report-sized files that startup dwarfs the
+job. `--executor process` stays available for batches of genuinely large files, where the
+startup is amortised. The prediction was wrong and the measurement stands.
+
+One consequence worth knowing: a process pool requires an importable `__main__`, so it
+cannot be driven from a REPL or `python -c`. Threads work everywhere.
+
+---
+
+## 14. Known limits
 
 | Limit | Consequence |
 |---|---|
@@ -515,5 +685,7 @@ failures would push the design towards false confidence.
 | Headers beyond two rows | Merged to two; deeper hierarchies flagged, not guessed. |
 | Wide gutters inside one table | A gap ≥2 columns is read as a table boundary unless both sides span exactly the same rows. |
 | One fact + one dimension per workbook | Multiple lookups are not chained — deliberate, beyond POC scope. |
+| The reader stays on openpyxl | calamine/fastexcel are faster but expose only values, not error cells, formulas, merged ranges or styling, all load-bearing signals here. A hybrid read is possible and out of scope. |
+| Process pools need an importable entry point | A consequence of Windows spawn, not of this design. Threads are the default and are unaffected. |
 | Pivot detection needs ≥3 value columns | A two-month matrix is indistinguishable from an ordinary table with two numeric columns. |
 | Header adoption needs an exact width match | A continuation sheet missing a column keeps positional names rather than guessing an alignment. |

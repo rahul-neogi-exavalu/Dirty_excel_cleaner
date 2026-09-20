@@ -1,0 +1,55 @@
+# --- Pipeline output -------------------------------------------------------
+# Regenerated from sample_files_uncleaned/ by `python clean.py`, so the source
+# workbooks are the thing worth versioning, not the CSVs derived from them.
+# Keeping them tracked also makes every run show up as a large, noisy diff.
+cleaned/
+audit/
+
+# --- Excel lock files ------------------------------------------------------
+# Excel writes these beside a workbook while it is open. They are transient and
+# machine-specific, and they are what makes a CSV refuse to be overwritten
+# mid-run.
+~$*.xls
+~$*.xlsx
+~$*.xlsm
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Virtual environments --------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# --- Test and tooling caches -----------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- Editors and OS --------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Local scratch ---------------------------------------------------------
+scratch/
+tmp/
+*.log

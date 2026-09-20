@@ -38,6 +38,27 @@ def effective_fill(cells) -> int:
     return 1 if is_merged_banner(cells) else fill_count(cells)
 
 
+# Beyond this many rows, whole-block scans are replaced by a sample. Every question
+# these scans answer -- what type does this column hold, how full is a typical row -- is
+# a property of the column, and a column of a million values does not need its millionth
+# to answer it.
+LARGE_BLOCK = 200
+PROFILE_SAMPLE = 400
+
+
+def sampled(lines):
+    """A bounded, representative slice of a block of rows.
+
+    The head catches the common case; the stride stops a block that changes character
+    part way down from being judged on its opening alone.
+    """
+    if len(lines) <= PROFILE_SAMPLE:
+        return lines
+    head = PROFILE_SAMPLE // 2
+    stride = max(1, (len(lines) - head) // (PROFILE_SAMPLE - head))
+    return list(lines[:head]) + list(lines[head::stride])[: PROFILE_SAMPLE - head]
+
+
 def modal_fill(lines) -> int:
     """The most common populated-cell count across a set of lines.
 

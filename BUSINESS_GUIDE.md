@@ -420,6 +420,50 @@ If all three are zero, the file went through cleanly.
 
 ---
 
+## What happens when a file cannot be read at all
+
+A folder of five hundred files will contain a few that are not really spreadsheets: a
+download that was cut short, a workbook someone password-protected, an old `.xls`, a file
+saved in the wrong format.
+
+**A bad file costs you that file and nothing else.** Each workbook is handled on its own,
+so one unreadable file no longer stops the run and skip everything after it. The report
+names the file and says which of these it was, because each calls for a different response:
+
+| What the report says | What to do about it |
+|---|---|
+| corrupt | ask for the file again; the copy you have is incomplete |
+| password-protected | it must be opened and re-saved without the password |
+| unsupported format | re-save it as `.xlsx` |
+| too large | it exceeds the configured ceiling and was refused rather than attempted |
+
+Telling these apart matters. A password-protected file and a truly corrupt one produce the
+*same* error from the underlying reader, and reporting "corrupt" for a file that is merely
+locked sends someone looking in entirely the wrong place.
+
+## Refusing to look trustworthy when it is wrong
+
+The checks described above decide what the data *is*. A separate set of checks asks whether
+the result can be believed at all, and these do not merely report — they **fail the run**:
+
+- every row is accounted for, either kept or removed with a stated reason
+- no identifying column came out empty
+- no column emptied without a cause being named
+- a total that was removed still agrees with the rows that were kept
+
+The reasoning is that the dangerous failure of a cleaning tool is not crashing. It is
+producing a file that looks entirely reasonable and is quietly wrong, which loads into a
+table without complaint and is discovered months later, if ever.
+
+## Speed, and doing several files at once
+
+One million rows in a single sheet takes **about a minute and a half**. Several workbooks
+can be processed at the same time with `--workers`.
+
+Both numbers come from measurement rather than expectation, and one of them contradicted
+what we predicted: we expected that using separate processes would be faster than using
+threads, and measured the opposite by a wide margin. The default follows the measurement.
+
 ## What this tool does not do
 
 Stated plainly, because it affects what has to happen next.

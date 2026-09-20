@@ -1,6 +1,6 @@
 """Join key discovery and the margin rule that keeps fuzzy resolution honest."""
 
-import pandas as pd
+import polars as pl
 
 from ahi_clean import join
 
@@ -18,7 +18,7 @@ def pair():
     """A fact table and its lookup, named differently on each side."""
     return one([HEADER] + records(8)).frame, one(LOOKUP, name="Lookup").frame
 
-PRODUCERS = pd.Series(
+PRODUCERS = pl.Series(
     [
         "MJC Agency Group",
         "Pinnacle Agency Partners",
@@ -77,11 +77,12 @@ def test_join_is_left_so_fact_rows_never_disappear():
     key = join.discover_key(fact, dimension)
     # A producer the lookup has never heard of, added after the key is known -- as it
     # would be in a later file using the same schema.
-    fact = pd.concat([fact, fact.iloc[[0]].assign(producer_agencyname="Brown & Brown")], ignore_index=True)
+    stray = fact.head(1).with_columns(pl.lit("Brown & Brown").alias("producer_agencyname"))
+    fact = pl.concat([fact, stray], how="vertical_relaxed")
     merged, report = join.join_frames(fact, dimension, key)
 
     assert len(merged) == len(fact)
-    assert pd.isna(merged.iloc[-1]["state"])
+    assert merged["state"][-1] is None
     unresolved = [entry for entry in report["needs_review"] if entry["source_value"] == "Brown & Brown"]
     assert unresolved and unresolved[0]["verdict"] == join.UNRESOLVED
 
@@ -100,11 +101,11 @@ def test_normalisation_collapses_whitespace_and_case():
 def test_low_cardinality_columns_are_never_treated_as_keys():
     fact, _dimension = pair()
     # insurance_company_name repeats heavily, so it cannot be a dimension key.
-    dimension = pd.DataFrame({"carrier": ["Liberty Mutual"] * 5, "rating": list("ABCDE")})
+    dimension = pl.DataFrame({"carrier": ["Liberty Mutual"] * 5, "rating": list("ABCDE")})
     assert join.discover_key(fact, dimension) is None
 
 
 def test_no_plausible_key_returns_none():
-    dimension = pd.DataFrame({"unrelated": ["alpha", "beta", "gamma"]})
+    dimension = pl.DataFrame({"unrelated": ["alpha", "beta", "gamma"]})
     fact, _dimension = pair()
     assert join.discover_key(fact, dimension) is None

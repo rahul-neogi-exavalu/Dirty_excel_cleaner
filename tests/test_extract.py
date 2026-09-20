@@ -4,7 +4,7 @@ These tests never name a corpus file. What the pipeline must do does not change 
 the sample workbooks are swapped, so the tests that pin it should not either.
 """
 
-import pandas as pd
+import polars as pl
 import pytest
 
 from ahi_clean import rowclass
@@ -57,7 +57,7 @@ def test_a_header_cell_with_no_label_keeps_its_column_positionally():
     holed = HEADER[:5] + [None] + HEADER[6:]
     result = one([holed] + records(6))
     assert "column_6" in result.frame.columns
-    assert result.frame["column_6"].iloc[0].startswith("POL-")
+    assert result.frame["column_6"][0].startswith("POL-")
 
 
 def test_a_region_with_no_header_at_all_is_reported_not_invented():
@@ -77,8 +77,8 @@ def test_body_is_reseated_when_it_disagrees_with_the_header_about_gutters():
     body = [row[:3] + [None] + row[3:6] + [None] + row[6:] for row in records(6)]
     result = one([HEADER + [None, None]] + body)
     assert list(result.frame.columns) == NAMES
-    assert result.frame["insurancecompanyname"].notna().all()
-    assert result.frame["policynumber"].iloc[0].startswith("POL-")
+    assert result.frame["insurancecompanyname"].null_count() == 0
+    assert result.frame["policynumber"][0].startswith("POL-")
     assert any("re-seated" in note for note in result.trace["notes"])
 
 
@@ -191,14 +191,14 @@ def test_a_sparse_row_with_no_total_wording_is_kept():
     partial = [None, None, None, None, 55.5, "POL-999999", None, None]
     result = one([HEADER] + records(4) + [partial])
     assert len(result.frame) == 5
-    assert "POL-999999" in result.frame["policynumber"].tolist()
+    assert "POL-999999" in result.frame["policynumber"].to_list()
 
 
 def test_a_full_row_named_total_is_plain_data():
     row = ["Total Risk PC", 1099, "Metro Agency Group", "Liberty", 400.0, "POL-999999", "2026-03-01", 9.0]
     result = one([HEADER] + records(3) + [row])
     assert len(result.frame) == 4
-    assert "Total Risk PC" in result.frame["profitcentername"].tolist()
+    assert "Total Risk PC" in result.frame["profitcentername"].to_list()
 
 
 def test_footers_are_removed_whatever_language_they_are_in():
@@ -259,7 +259,7 @@ def test_mixed_date_formats_are_normalised_and_the_invalid_one_reported():
     formats = ["01/01/2026", "2026-01-08", "Jan 22 2026", "2026/01/29", "not a date", "02-12-2026"]
     rows = [HEADER] + [record(index)[:6] + [formats[index]] + [5.0] for index in range(6)]
     result = one(rows)
-    dates = result.frame["accountingeffectivedate"].tolist()
+    dates = result.frame["accountingeffectivedate"].to_list()
     assert dates[:2] == ["2026-01-01", "2026-01-08"]
     assert dates[4] is None
     assert any(f["reason"] == "unparseable date" for f in result.trace["coercion_failures"])
@@ -270,12 +270,12 @@ def test_leading_zero_identifiers_stay_text():
         record(index)[:1] + [f"{1005 + index:06d}"] + record(index)[2:] for index in range(5)
     ]
     result = one(rows)
-    assert result.frame["profitcenternumber"].iloc[0].startswith("0")
+    assert result.frame["profitcenternumber"][0].startswith("0")
 
 
 def test_constant_width_codes_stay_text_rather_than_becoming_numbers():
     result = one([HEADER] + records(6))
-    assert result.frame["profitcenternumber"].map(type).eq(str).all()
+    assert result.frame["profitcenternumber"].dtype == pl.String
 
 
 def test_duplicate_keys_are_flagged_not_deduplicated():
@@ -297,13 +297,13 @@ def test_unparseable_values_are_reported_and_the_row_survives():
     reasons = {f["reason"] for f in result.trace["coercion_failures"]}
     assert reasons == {"not numeric", "unparseable date"}
     assert len(result.frame) == 6
-    assert pd.isna(result.frame.loc[5, "premium"])
-    assert result.frame.loc[5, "policynumber"] == "POL-999999"
+    assert result.frame["premium"][5] is None
+    assert result.frame["policynumber"][5] == "POL-999999"
 
 
 def test_an_empty_sheet_is_handled():
     result = one([[None, None], [None, None]])
-    assert result.frame.empty
+    assert result.frame.is_empty()
     assert "no table-shaped region" in result.trace["notes"][0]
 
 

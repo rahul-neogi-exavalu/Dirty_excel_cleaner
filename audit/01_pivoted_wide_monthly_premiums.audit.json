@@ -1,6 +1,6 @@
 {
   "source_file": "sample_files_uncleaned\\01_pivoted_wide_monthly_premiums.xlsx",
-  "generated_at": "2026-09-20T04:06:46",
+  "generated_at": "2026-09-20T07:56:12",
   "embedded_images": 0,
   "tables": [
     {
@@ -231,7 +231,8 @@
     ],
     "relationships": [],
     "join": null,
-    "header_adoptions": []
+    "header_adoptions": [],
+    "contract_violations": []
   },
   "outputs": [
     {
@@ -266,6 +267,7 @@
     "coercion_failures": 0,
     "validation_findings": 0,
     "join_values_needing_review": 0,
+    "contract_violations": 0,
     "tables_found": 2,
     "headerless_tables": 0,
     "low_confidence_orientations": 1

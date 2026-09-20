@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-import pandas as pd
+import polars as pl
 from rapidfuzz import fuzz
 
 EXACT_OVERLAP_THRESHOLD = 0.6
@@ -32,23 +32,32 @@ LOW_CONFIDENCE = "low_confidence"
 UNRESOLVED = "unresolved"
 
 
+def _enriched(merged: pl.DataFrame, right: pl.DataFrame, resolved_key: str) -> int:
+    """How many fact rows actually picked up dimension detail."""
+    carried = [column for column in right.columns if column != resolved_key]
+    if not carried or carried[0] not in merged.columns:
+        return 0
+    column = merged[carried[0]]
+    return int(len(column) - column.null_count())
+
+
 def normalize_value(value) -> str:
     """Casefold, trim and collapse internal whitespace for key comparison."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    if value is None or value != value:  # NaN is the only value unequal to itself
         return ""
     return re.sub(r"\s+", " ", str(value)).strip().casefold()
 
 
-def _distinct_ratio(series: pd.Series) -> float:
+def _distinct_ratio(series: pl.Series) -> float:
     values = [normalize_value(value) for value in series if normalize_value(value)]
     return len(set(values)) / len(values) if values else 0.0
 
 
-def _value_set(series: pd.Series) -> set[str]:
+def _value_set(series: pl.Series) -> set[str]:
     return {normalize_value(value) for value in series if normalize_value(value)}
 
 
-def discover_key(fact: pd.DataFrame, dimension: pd.DataFrame) -> dict | None:
+def discover_key(fact: pl.DataFrame, dimension: pl.DataFrame) -> dict | None:
     """Find the (fact column, dimension column) pair that looks like a join key.
 
     Two passes. The cheap one compares normalized value sets exactly and settles
@@ -161,7 +170,7 @@ def resolve_values(fact_values, dimension_values) -> list[dict]:
     return resolutions
 
 
-def join_frames(fact: pd.DataFrame, dimension: pd.DataFrame, key: dict) -> tuple[pd.DataFrame, dict]:
+def join_frames(fact: pl.DataFrame, dimension: pl.DataFrame, key: dict) -> tuple[pl.DataFrame, dict]:
     """Left-join the dimension onto the fact table through a resolved key.
 
     Always a left join: a fact row must never disappear because its lookup missed.
@@ -171,25 +180,30 @@ def join_frames(fact: pd.DataFrame, dimension: pd.DataFrame, key: dict) -> tuple
     fact_column = key["fact_column"]
     dimension_column = key["dimension_column"]
 
-    resolutions = resolve_values(fact[fact_column].dropna().unique(), dimension[dimension_column].dropna())
+    resolutions = resolve_values(
+        fact[fact_column].drop_nulls().unique(maintain_order=True).to_list(),
+        dimension[dimension_column].drop_nulls().to_list(),
+    )
     resolved_map = {
         entry["source_value"]: entry["matched_value"]
         for entry in resolutions
         if entry["verdict"] == AUTO and entry["matched_value"] is not None
     }
 
-    working = fact.copy()
     resolved_key = "_resolved_join_key"
-    working[resolved_key] = working[fact_column].map(lambda value: resolved_map.get(value))
+    working = fact.with_columns(
+        pl.col(fact_column)
+        .replace_strict(resolved_map, default=None, return_dtype=pl.String)
+        .alias(resolved_key)
+    )
 
-    right = dimension.copy()
     # Drop the dimension's own copy of the key column so the join does not emit a
     # near-duplicate of the fact-side value under a suffixed name.
-    right = right.rename(columns={dimension_column: resolved_key})
-    overlapping = [column for column in right.columns if column in working.columns and column != resolved_key]
-    right = right.drop(columns=overlapping)
+    right = dimension.rename({dimension_column: resolved_key})
+    overlapping = [column for column in right.columns if column in fact.columns and column != resolved_key]
+    right = right.drop(overlapping)
 
-    merged = working.merge(right, on=resolved_key, how="left").drop(columns=[resolved_key])
+    merged = working.join(right, on=resolved_key, how="left").drop(resolved_key)
 
     report = {
         "join_key": {"fact_column": fact_column, "dimension_column": dimension_column},
@@ -198,8 +212,6 @@ def join_frames(fact: pd.DataFrame, dimension: pd.DataFrame, key: dict) -> tuple
         "needs_review": [entry for entry in resolutions if entry["verdict"] != AUTO],
         "fact_rows_in": len(fact),
         "fact_rows_out": len(merged),
-        "enriched_rows": int(merged[right.columns.drop(resolved_key)[0]].notna().sum())
-        if len(right.columns) > 1
-        else 0,
+        "enriched_rows": _enriched(merged, right, resolved_key),
     }
     return merged, report

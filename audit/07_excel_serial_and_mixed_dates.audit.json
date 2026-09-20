@@ -1,6 +1,6 @@
 {
   "source_file": "sample_files_uncleaned\\07_excel_serial_and_mixed_dates.xlsx",
-  "generated_at": "2026-09-20T04:06:47",
+  "generated_at": "2026-09-20T07:56:15",
   "embedded_images": 0,
   "tables": [
     {
@@ -133,17 +133,12 @@
       "coercion_failures": [
         {
           "column": "accountingeffectivedate",
-          "value": "2026-01-08 00:00:00",
+          "value": "2026-01-08",
           "reason": "not numeric"
         },
         {
           "column": "accountingeffectivedate",
           "value": "2026-01-15",
-          "reason": "not numeric"
-        },
-        {
-          "column": "accountingeffectivedate",
-          "value": "22/01/2026",
           "reason": "not numeric"
         },
         {
@@ -156,8 +151,8 @@
         {
           "check": "null_values",
           "column": "accountingeffectivedate",
-          "count": 4,
-          "rate": 0.5
+          "count": 3,
+          "rate": 0.375
         }
       ],
       "column_names": [
@@ -271,7 +266,8 @@
     ],
     "relationships": [],
     "join": null,
-    "header_adoptions": []
+    "header_adoptions": [],
+    "contract_violations": []
   },
   "outputs": [
     {
@@ -308,9 +304,10 @@
   "summary": {
     "rows_dropped": 0,
     "dropped_by_classification": {},
-    "coercion_failures": 4,
+    "coercion_failures": 3,
     "validation_findings": 1,
     "join_values_needing_review": 0,
+    "contract_violations": 0,
     "tables_found": 2,
     "headerless_tables": 0,
     "low_confidence_orientations": 1

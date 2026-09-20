@@ -67,24 +67,30 @@ def classify_rows(body, header_names=None, header_row=None) -> list[RowVerdict]:
     if not body:
         return []
 
-    modal = signals.modal_fill(body)
+    reference = signals.sampled(body)
+    modal = signals.modal_fill(reference)
     threshold = max(modal * SPARSE_RATIO, 2) if modal else 0
     width = max((len(row) for row in body), default=0)
-    profile = signals.type_profile(body, width)
+    profile = signals.type_profile(reference, width)
+
+    # Normalised once rather than per row: the header does not change between rows.
+    header_norm = _norm_cells(header_row) if header_row is not None else None
 
     verdicts: list[RowVerdict] = []
     for index, row in enumerate(body):
-        verdicts.append(_initial_verdict(index, row, threshold, header_row, profile))
+        verdicts.append(
+            _initial_verdict(index, row, threshold, header_row, profile, header_norm)
+        )
 
     _confirm_totals(body, verdicts)
     _resolve_unconfirmed(body, verdicts)
     return verdicts
 
 
-def _initial_verdict(index, row, threshold, header_row, profile) -> RowVerdict:
+def _initial_verdict(index, row, threshold, header_row, profile, header_norm=None) -> RowVerdict:
     fill = signals.fill_count(row)
 
-    if header_row is not None and _matches_header(row, header_row):
+    if header_norm is not None and _matches_header(row, header_norm):
         return RowVerdict(index, REPEATED_HEADER, "row repeats the header labels")
 
     if header_row is not None and _repeats_header_labels(row, header_row):
@@ -117,12 +123,13 @@ def _initial_verdict(index, row, threshold, header_row, profile) -> RowVerdict:
     return RowVerdict(index, SPARSE_KEPT, f"sparse (fill {fill}) pending arithmetic check")
 
 
-def _matches_header(row, header_row) -> bool:
-    def norm(cells):
-        return [str(cell).strip().casefold() for cell in cells if not is_blank(cell)]
+def _norm_cells(cells) -> list[str]:
+    return [str(cell).strip().casefold() for cell in cells if not is_blank(cell)]
 
-    values = norm(row)
-    return bool(values) and values == norm(header_row)
+
+def _matches_header(row, header_norm) -> bool:
+    values = _norm_cells(row)
+    return bool(values) and values == header_norm
 
 
 def _repeats_header_labels(row, header_row) -> bool:
@@ -191,6 +198,11 @@ def _confirm_totals(body, verdicts) -> None:
     grand total being missed because its figure double-counts rows a subtotal already
     covered.
     """
+    # Building the numeric view of every column costs a full pass over the sheet, and
+    # it answers a question only sparse rows ask. Most sheets have none.
+    if not any(verdict.classification == SPARSE_KEPT for verdict in verdicts):
+        return
+
     width = max((len(row) for row in body), default=0)
     columns = {
         position: [_as_number(row[position]) if position < len(row) else None for row in body]

@@ -1,6 +1,6 @@
 profitcentername,profitcenternumber,producer_agencyname,insurancecompanyname,premium,policynumber,accountingeffectivedate,commission,address,state,zip_code
 South Zone PC,1005,MJC,National Indemnity Co,15109.2,POL-200001,2026-01-01,11.06,,,
-West Zone PC,1012,Apex Insurance Brokers,Heritage Casualty Co,35586.47,POL-200002,2026-01-08,17.96,20 Village Center Dr,NJ,08085
+West Zone PC,1012,Apex Insurance Brokers,Heritage Casualty Co,35586.47,POL-200002,2026-01-08,17.96,,NJ,08085
 East Zone PC,1093,Metro Agency Group,Global Assurance Corp,37066.89,POL-200003,2026-01-15,5.98,,,
-Central PC,1083,Pinnacle Agency Partners,Zenith Insurance Group,11316.22,POL-200004,2026-01-22,5.14,9515 Delegates Row,IN,46240
+Central PC,1083,Pinnacle Agency Partners,Zenith Insurance Group,11316.22,POL-200004,2026-01-22,5.14,,IN,46240
 North Zone PC,1040,Coastal Risk Advisors,Global Assurance Corp,34420.75,POL-200005,2026-01-29,18.13,,,

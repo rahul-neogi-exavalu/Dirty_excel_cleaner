@@ -45,16 +45,25 @@ class HeaderResult:
     notes: list[str] = field(default_factory=list)
 
 
-def score_row(rows, index: int, width: int, styles=None) -> tuple[float, dict]:
-    """Score how much row ``index`` behaves like a header for the rows beneath it."""
+def score_row(rows, index: int, width: int, styles=None, context=None) -> tuple[float, dict]:
+    """Score how much row ``index`` behaves like a header for the rows beneath it.
+
+    ``context`` supplies the type profile and modal fill of the rows below. Passing it
+    in matters at scale: computing them per candidate meant re-scanning the whole block
+    once for every row in the search band, which on a large sheet called the type
+    classifier some twenty-seven times per cell.
+    """
     row = rows[index]
     below = rows[index + 1 :]
     present = signals.populated(row)
     if not below or not present:
         return 0.0, {}
 
-    profile = signals.type_profile(below, width)
-    modal = signals.modal_fill(below)
+    if context is None:
+        profile = signals.type_profile(below, width)
+        modal = signals.modal_fill(below)
+    else:
+        profile, modal = context
 
     components = {
         "contrast": signals.type_contrast(row, profile),
@@ -77,9 +86,10 @@ def find_header(rows, width: int, styles=None) -> HeaderResult:
     """Locate the header row, or report that the region has none."""
     scores = []
     best_index, best_score, best_parts = None, -1.0, {}
+    context = _below_context(rows, width)
 
     for index in range(min(len(rows) - 1, SEARCH_DEPTH)):
-        score, parts = score_row(rows, index, width, styles)
+        score, parts = score_row(rows, index, width, styles, context)
         scores.append({"row": index, "score": round(score, 3), **parts})
         # Strictly greater keeps the topmost row when two score alike, which is where a
         # real header sits if a data row happens to look label-like.
@@ -107,7 +117,7 @@ def find_header(rows, width: int, styles=None) -> HeaderResult:
     # rather than treated as data. Capped at two: deeper hierarchies are flagged, never
     # guessed at.
     if best_index + 2 < len(rows):
-        second_score, second_parts = score_row(rows, best_index + 1, width, styles)
+        second_score, second_parts = score_row(rows, best_index + 1, width, styles, context)
         # Score alone is not enough to call a row a second header. In a mostly-text
         # table an ordinary record scores around 0.55 on uniqueness and fill alone,
         # which would swallow the first record of every such file. A real second
@@ -130,6 +140,19 @@ def find_header(rows, width: int, styles=None) -> HeaderResult:
         multi_row=multi_row,
         notes=notes,
     )
+
+
+def _below_context(rows, width):
+    """The type profile and modal fill of the body, computed once for the whole search.
+
+    Only used when the block is large enough for the difference between "rows below 3"
+    and "rows below 5" to be immaterial. Small blocks keep the exact per-candidate
+    computation, because there the distinction can genuinely change the answer.
+    """
+    if len(rows) <= signals.LARGE_BLOCK:
+        return None
+    body = signals.sampled(rows[SEARCH_DEPTH:] or rows[1:])
+    return signals.type_profile(body, width), signals.modal_fill(body)
 
 
 def _merge_label_rows(top, bottom) -> list:

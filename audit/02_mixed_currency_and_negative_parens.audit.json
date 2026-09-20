@@ -1,6 +1,6 @@
 {
   "source_file": "sample_files_uncleaned\\02_mixed_currency_and_negative_parens.xlsx",
-  "generated_at": "2026-09-20T04:06:46",
+  "generated_at": "2026-09-20T07:56:12",
   "embedded_images": 0,
   "tables": [
     {
@@ -23,7 +23,7 @@
       "dropped_rows": [],
       "notes": [
         "column 'profitcenternumber' kept as text: values look like codes",
-        "column 'accountingeffectivedate' holds mixed date formats; parsed as dates"
+        "column 'premium' holds formatted numbers; parsed as numeric"
       ],
       "orientation": {
         "row_score": 1.905,
@@ -126,13 +126,26 @@
         "profitcenternumber": "id_string",
         "producer_agencyname": "text",
         "insurancecompanyname": "text",
-        "premium": "text",
+        "premium": "float",
         "policynumber": "id_string",
         "accountingeffectivedate": "date",
         "commission": "float"
       },
-      "coercion_failures": [],
-      "validation": [],
+      "coercion_failures": [
+        {
+          "column": "premium",
+          "value": "N/A",
+          "reason": "not numeric"
+        }
+      ],
+      "validation": [
+        {
+          "check": "null_values",
+          "column": "premium",
+          "count": 1,
+          "rate": 0.125
+        }
+      ],
       "column_names": [
         "profitcentername",
         "profitcenternumber",
@@ -216,6 +229,7 @@
         "table": "Report",
         "rows": 8,
         "measure_columns": [
+          "premium",
           "commission"
         ],
         "key_columns": [
@@ -245,7 +259,8 @@
     ],
     "relationships": [],
     "join": null,
-    "header_adoptions": []
+    "header_adoptions": [],
+    "contract_violations": []
   },
   "outputs": [
     {
@@ -282,9 +297,10 @@
   "summary": {
     "rows_dropped": 0,
     "dropped_by_classification": {},
-    "coercion_failures": 0,
-    "validation_findings": 0,
+    "coercion_failures": 1,
+    "validation_findings": 1,
     "join_values_needing_review": 0,
+    "contract_violations": 0,
     "tables_found": 2,
     "headerless_tables": 0,
     "low_confidence_orientations": 1

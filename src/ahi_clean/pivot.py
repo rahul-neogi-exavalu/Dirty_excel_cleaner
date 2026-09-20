@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import pandas as pd
+import polars as pl
 
 from . import signals, typing_utils
 from .typing_utils import is_blank
@@ -113,12 +113,10 @@ def detect(rows, header_index: int) -> Pivot | None:
 
 
 def _all_parse_as_dates(labels) -> bool:
-    for label in labels:
-        try:
-            pd.to_datetime(label, errors="raise")
-        except (ValueError, TypeError, OverflowError):
-            return False
-    return True
+    """Whether every heading resolves to a point in time -- a date or a month."""
+    from . import coerce
+
+    return coerce.looks_like_periods(labels)
 
 
 def _is_one_measure(body, value_columns) -> bool:
@@ -167,8 +165,8 @@ def looks_pivoted(rows) -> bool:
 
 
 def melt(
-    frame: pd.DataFrame, pivot: Pivot, names: list[str], labels: list | None = None
-) -> tuple[pd.DataFrame, dict]:
+    frame: pl.DataFrame, pivot: Pivot, names: list[str], labels: list | None = None
+) -> tuple[pl.DataFrame, dict]:
     """Unpivot a wide frame into long form.
 
     ``Producer | Jan | Feb`` becomes ``producer | period | value``, one row per cell,
@@ -181,13 +179,12 @@ def melt(
     if not id_names or not value_names:
         return frame, {"unpivoted": False}
 
-    long = frame.melt(
-        id_vars=id_names,
-        value_vars=value_names,
-        var_name=pivot.variable_name,
+    long = frame.unpivot(
+        index=id_names,
+        on=value_names,
+        variable_name=pivot.variable_name,
         value_name="value",
-    )
-    long = long.dropna(subset=["value"]).reset_index(drop=True)
+    ).drop_nulls("value")
 
     # The melted key should carry what the sheet actually said -- 'Jan-2026', not the
     # SQL-safe name the column was given. Those labels are data now, not identifiers.
@@ -197,8 +194,8 @@ def melt(
             for index in pivot.value_columns
             if index < len(names) and index < len(labels) and not is_blank(labels[index])
         }
-        long[pivot.variable_name] = long[pivot.variable_name].map(
-            lambda value: original.get(value, value)
+        long = long.with_columns(
+            pl.col(pivot.variable_name).replace(original).alias(pivot.variable_name)
         )
 
     report = {

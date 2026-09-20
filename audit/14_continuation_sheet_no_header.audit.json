@@ -1,6 +1,6 @@
 {
   "source_file": "sample_files_uncleaned\\14_continuation_sheet_no_header.xlsx",
-  "generated_at": "2026-09-20T04:06:50",
+  "generated_at": "2026-09-20T07:56:17",
   "embedded_images": 0,
   "tables": [
     {
@@ -22,8 +22,7 @@
       "merged_ranges": [],
       "dropped_rows": [],
       "notes": [
-        "column 'profitcenternumber' kept as text: values look like codes",
-        "column 'accountingeffectivedate' holds mixed date formats; parsed as dates"
+        "column 'profitcenternumber' kept as text: values look like codes"
       ],
       "orientation": {
         "row_score": 1.857,
@@ -129,7 +128,6 @@
       "notes": [
         "no row scored above 0.55; columns named positionally",
         "column 'column_2' kept as text: values look like codes",
-        "column 'column_7' holds mixed date formats; parsed as dates",
         "no header on this table; adopted the column names of 'Report', which has the same width and the same per-column types"
       ],
       "orientation": {
@@ -142,7 +140,7 @@
       },
       "header": {
         "row_index": null,
-        "detected": true,
+        "detected": false,
         "score": 0.544,
         "multi_row": false,
         "scores": [
@@ -177,7 +175,8 @@
             "emphasis": 0.0
           }
         ],
-        "adopted_from": "Report"
+        "adopted_from": "Report",
+        "names_adopted": true
       },
       "inferred_types": {
         "column_1": "text",
@@ -346,7 +345,8 @@
         "table": "Continued",
         "adopted_from": "Report"
       }
-    ]
+    ],
+    "contract_violations": []
   },
   "outputs": [
     {
@@ -388,8 +388,9 @@
     "coercion_failures": 0,
     "validation_findings": 0,
     "join_values_needing_review": 0,
+    "contract_violations": 0,
     "tables_found": 3,
-    "headerless_tables": 0,
+    "headerless_tables": 1,
     "low_confidence_orientations": 1
   },
   "needs_human_review": []

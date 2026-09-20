@@ -1,6 +1,6 @@
 {
   "source_file": "sample_files_uncleaned\\08_decoy_bigger_table_above_real_table.xlsx",
-  "generated_at": "2026-09-20T04:06:47",
+  "generated_at": "2026-09-20T07:56:15",
   "embedded_images": 0,
   "tables": [
     {
@@ -196,8 +196,7 @@
       "merged_ranges": [],
       "dropped_rows": [],
       "notes": [
-        "column 'profitcenternumber' kept as text: values look like codes",
-        "column 'accountingeffectivedate' holds mixed date formats; parsed as dates"
+        "column 'profitcenternumber' kept as text: values look like codes"
       ],
       "orientation": {
         "row_score": 1.921,
@@ -458,7 +457,8 @@
       }
     ],
     "join": null,
-    "header_adoptions": []
+    "header_adoptions": [],
+    "contract_violations": []
   },
   "outputs": [
     {
@@ -520,6 +520,7 @@
     "coercion_failures": 0,
     "validation_findings": 0,
     "join_values_needing_review": 0,
+    "contract_violations": 0,
     "tables_found": 3,
     "headerless_tables": 0,
     "low_confidence_orientations": 1

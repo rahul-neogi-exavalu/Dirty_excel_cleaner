@@ -5,7 +5,7 @@ Built in memory, so swapping the sample corpus cannot break what these pin.
 
 import json
 
-import pandas as pd
+import polars as pl
 import pytest
 
 from ahi_clean import orchestrate
@@ -159,7 +159,7 @@ def test_matching_tables_are_stacked_with_provenance():
 
     assert output.kind == "stacked"
     assert len(output.frame) == 12
-    assert output.frame[orchestrate.SOURCE_SHEET_COLUMN].tolist() == ["Jan"] * 6 + ["Feb"] * 6
+    assert output.frame[orchestrate.SOURCE_SHEET_COLUMN].to_list() == ["Jan"] * 6 + ["Feb"] * 6
 
 
 def test_stacked_periods_are_not_deduplicated():
@@ -167,14 +167,14 @@ def test_stacked_periods_are_not_deduplicated():
     [output] = plan_workbook(
         [one([HEADER] + records(6), name="Jan"), one([HEADER] + records(6), name="Feb")], "book"
     )[0]
-    assert output.frame["policynumber"].nunique() == 6
+    assert output.frame["policynumber"].n_unique() == 6
     assert len(output.frame) == 12
 
 
 def test_tables_with_the_same_shape_but_different_labels_stack_at_low_confidence():
     left = one([HEADER] + records(6), name="Jan")
     right = one([HEADER] + records(6), name="Feb")
-    right.frame = right.frame.rename(columns={name: f"{name}_b" for name in right.frame.columns})
+    right.frame = right.frame.rename({name: f"{name}_b" for name in right.frame.columns})
     stackable, detail = orchestrate._stack_decision(left, right)
     assert stackable is True
     assert detail["decided_by"] == "type_profile"
@@ -210,21 +210,24 @@ def test_the_cli_writes_csvs_and_an_audit_report(tmp_path):
     assert outcome["written"]
     assert outcome["report"].exists()
     for path in outcome["written"]:
-        assert len(pd.read_csv(path)) >= 0
+        assert len(pl.read_csv(path)) >= 0
 
 
 def test_a_locked_output_file_does_not_abort_the_run(tmp_path, monkeypatch):
     """Excel holds a lock on an open CSV; the rest of the work must still land."""
-    original = pd.DataFrame.to_csv
+    original = pl.DataFrame.write_csv
     calls = {"n": 0}
 
     def flaky(self, path=None, *args, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise PermissionError("locked by another program")
+            # How polars reports a Windows sharing violation -- a bare OSError, not
+            # the PermissionError pandas used to raise.
+            raise OSError(32, "The process cannot access the file because it is being "
+                              "used by another process.")
         return original(self, path, *args, **kwargs)
 
-    monkeypatch.setattr(pd.DataFrame, "to_csv", flaky)
+    monkeypatch.setattr(pl.DataFrame, "write_csv", flaky)
     outcome = clean_workbook(_a_scenario_file(), tmp_path / "cleaned", tmp_path / "audit")
     assert outcome["blocked"]
     assert outcome["report"].exists()
