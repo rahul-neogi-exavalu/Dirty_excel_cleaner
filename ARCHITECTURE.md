@@ -38,12 +38,15 @@ flowchart LR
     ORC --> J["join.py<br/>value-based keys"]
     ORC --> CSV["cleaned/*.csv"]
     J --> CSV
+    CSV --> META["clean_metadata.py<br/>per-file column summaries"]
+    META --> MCsv["cleaned/*_metadata.csv"]
     E -. trace .-> A["audit.py"]
     ORC -. decisions .-> A
     A --> JSON["audit/*.audit.json"]
 
     style XLSX fill:#e8e8e8,stroke:#666
     style CSV fill:#d4edda,stroke:#28a745
+    style MCsv fill:#d4edda,stroke:#28a745
     style JSON fill:#fff3cd,stroke:#d39e00
 ```
 
@@ -68,6 +71,29 @@ from. Nothing in the tree consults a field name.
 | `join.py` | Value-based key discovery, fuzzy resolution with a margin rule |
 | `audit.py` | Every decision, with its score and its reason |
 | `cli.py` | Per-file error boundaries, parallel workers, contract gate, CSV writing |
+| `clean_metadata.py` | Per-cleaned-file transposed column statistics and sheet information |
+
+### Metadata companion files
+
+After the existing cleaning pipeline writes its normal CSV outputs, `clean.py` invokes
+`clean_metadata.py`. It writes one companion file beside each cleaned CSV, named
+`<cleaned-stem>_metadata.csv`. Metadata files are skipped when the output directory is
+scanned, so rerunning the command does not create metadata files for metadata files.
+
+Each metadata row describes one cleaned column. The fields are written in this order:
+
+| Field | Meaning |
+|---|---|
+| `header_name` | The cleaned CSV column name |
+| `distinct_count` | Number of distinct non-empty values in that column |
+| `count` | Number of non-empty values in that column |
+| `total_row_count` | Number of rows represented for the sheet group |
+| `sheet_info` | Source sheet name or names |
+
+For stacked outputs, rows are grouped by the generated `source_sheet` column, so each
+sheet receives its own counts and total row count. For other outputs, the source sheet
+names are taken from the audit report. The metadata generator also uses the audit's
+recorded output columns if a cleaned CSV does not expose a readable header row.
 
 **Ordering is load-bearing in four places.** A pivot is recognised *before* orientation,
 because a matrix reads consistently both ways and the tiebreak would stand it on its side.
