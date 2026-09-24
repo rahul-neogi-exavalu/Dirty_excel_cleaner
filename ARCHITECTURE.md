@@ -39,7 +39,7 @@ flowchart LR
     ORC --> CSV["cleaned/*.csv"]
     J --> CSV
     CSV --> META["clean_metadata.py<br/>per-file column summaries"]
-    META --> MCsv["cleaned/*_metadata.csv"]
+    META --> MCsv["cleaned/source_metadata_uuid.csv"]
     E -. trace .-> A["audit.py"]
     ORC -. decisions .-> A
     A --> JSON["audit/*.audit.json"]
@@ -76,9 +76,11 @@ from. Nothing in the tree consults a field name.
 ### Metadata companion files
 
 After the existing cleaning pipeline writes its normal CSV outputs, `clean.py` invokes
-`clean_metadata.py`. It writes one companion file beside each cleaned CSV, named
-`<cleaned-stem>_metadata.csv`. Metadata files are skipped when the output directory is
-scanned, so rerunning the command does not create metadata files for metadata files.
+`clean_metadata.py`. It writes one companion file beside each cleaned CSV. Each output
+gets a UUID job identifier, using the names
+`<sourcefilename>_<job_id>.csv` and `<sourcefilename>_metadata_<job_id>.csv`. Metadata
+files are skipped when the output directory is scanned, so rerunning the command does
+not create metadata files for metadata files.
 
 Each metadata row describes one cleaned column. The fields are written in this order:
 
@@ -88,12 +90,16 @@ Each metadata row describes one cleaned column. The fields are written in this o
 | `distinct_count` | Number of distinct non-empty values in that column |
 | `count` | Number of non-empty values in that column |
 | `total_row_count` | Number of rows represented for the sheet group |
-| `sheet_info` | Source sheet name or names |
+| `min` | Minimum date or numeric value; blank for other types |
+| `max` | Maximum date or numeric value; blank for other types |
+| `sum` | Sum of numeric values; blank for other types |
+| `null_percentage` | Percentage of rows with an empty value, regardless of datatype |
+| `sheet_info` | Corresponding cleaned CSV filename |
 
-For stacked outputs, rows are grouped by the generated `source_sheet` column, so each
-sheet receives its own counts and total row count. For other outputs, the source sheet
-names are taken from the audit report. The metadata generator also uses the audit's
-recorded output columns if a cleaned CSV does not expose a readable header row.
+For stacked outputs, rows are still grouped by the generated `source_sheet` column when
+calculating per-sheet statistics, but `sheet_info` consistently records the corresponding
+cleaned CSV filename. The metadata generator uses the audit's recorded output columns if
+a cleaned CSV does not expose a readable header row.
 
 **Ordering is load-bearing in four places.** A pivot is recognised *before* orientation,
 because a matrix reads consistently both ways and the tiebreak would stand it on its side.
