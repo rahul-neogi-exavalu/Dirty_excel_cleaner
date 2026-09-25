@@ -27,16 +27,28 @@ export const PAGE_META: Record<Page, { step: number; label: string; icon: ReactN
   results: { step: 3, label: "Review & Results", icon: <ClipboardCheck /> },
 };
 
+/** The Exavalu mark: a staircase of six squares with a red outline. */
+export function ExavaluMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 32 32" className={className} aria-hidden>
+      <rect x="21" y="1" width="10" height="10" fill="#666666" />
+      <rect x="11" y="11" width="10" height="10" fill="#B3B3B3" />
+      <rect x="21" y="11" width="10" height="10" fill="#D7262E" />
+      <rect x="1" y="21" width="10" height="10" fill="#CCCCCC" />
+      <rect x="11" y="21" width="10" height="10" fill="#F08080" />
+      <rect x="21" y="21" width="10" height="10" fill="#0D0D0D" />
+      <path d="M21 1H31V31H1V21H11V11H21Z" fill="none" stroke="#C8102E" strokeWidth="0.8" strokeLinejoin="miter" />
+    </svg>
+  );
+}
+
 export function Logo({ compact }: { compact?: boolean }) {
   return (
     <div className="flex items-center gap-3">
-      <svg viewBox="0 0 32 32" className="h-8 w-8 shrink-0" aria-hidden>
-        <rect x="11" y="2" width="10" height="10" fill="#C8102E" />
-        <rect x="2" y="11" width="10" height="10" fill="#C8102E" />
-        <rect x="20" y="11" width="10" height="10" fill="#8B0A20" />
-        <rect x="11" y="20" width="10" height="10" fill="#C8102E" />
-        <rect x="12" y="12" width="8" height="8" fill="#E23B53" />
-      </svg>
+      {/* The mark is designed on white; a white tile keeps its greys legible on the dark sidebar. */}
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-white p-1.5 shadow-sm ring-1 ring-black/5">
+        <ExavaluMark className="h-full w-full" />
+      </span>
       {!compact && (
         <div className="leading-none">
           <p className="text-[19px] font-bold tracking-[0.02em] text-white">EXAVALU</p>
@@ -174,7 +186,7 @@ function SidebarContent({ page, compact, onNavigate, onToggle }: { page: Page; c
   const flow = useWorkflow();
   return (
     <nav aria-label="Workflow" className="flex h-full flex-col bg-nav px-3 py-5 text-ink-300">
-      <div className={clsx("mb-8 flex items-center", compact ? "justify-center" : "justify-between px-2")}>
+      <div className={clsx("mb-8 flex items-center", compact ? "justify-center" : "justify-between px-3")}>
         <Logo compact={compact} />
       </div>
       {!compact && <p className="label-caps mb-2 px-3 !text-ink-500">Workflow</p>}
