@@ -279,7 +279,7 @@ def test_constant_width_codes_stay_text_rather_than_becoming_numbers():
     """More than CODE_MIN_VALUES same-width, all-different numbers: a code, flagged."""
     result = one([HEADER] + records(12))
     assert result.frame["profitcenternumber"].dtype == pl.String
-    assert "read as code" in result.trace["type_flags"]["profitcenternumber"]
+    assert "read as code" in " ".join(result.trace["flags"]["profitcenternumber"])
 
 
 def test_a_few_same_width_numbers_are_read_as_numbers_and_flagged():
@@ -289,7 +289,7 @@ def test_a_few_same_width_numbers_are_read_as_numbers_and_flagged():
     for values in ([1500, 2300, 4100, 3700], list(range(1005, 1015))):
         result = coerce.coerce_column("amount", values)
         assert result.series.dtype == pl.Int64, values
-        assert "read as number" in result.flag
+        assert "read as number" in " ".join(result.flags)
 
 
 def test_the_code_threshold_is_more_than_ten_values():
@@ -299,12 +299,13 @@ def test_the_code_threshold_is_more_than_ten_values():
     assert coerce.coerce_column("c", list(range(1005, 1016))).series.dtype == pl.String
 
 
-def test_a_leading_zero_is_a_code_whatever_the_size_and_is_not_flagged():
+def test_a_leading_zero_is_a_code_whatever_the_size_and_only_informs():
+    """Certain, not a guess: an INFO, never a CHECK."""
     from ahi_clean import coerce
 
     result = coerce.coerce_column("zip", ["08085", "75202", "10001"])
     assert result.series.dtype == pl.String
-    assert result.flag is None
+    assert [flag.split(":")[0] for flag in result.flags] == ["INFO"]
 
 
 def test_ordinary_numbers_are_not_flagged():
@@ -312,7 +313,7 @@ def test_ordinary_numbers_are_not_flagged():
 
     result = coerce.coerce_column("qty", [250, 1500, 32000, 7, 1500])
     assert result.series.dtype == pl.Int64
-    assert result.flag is None
+    assert result.flags == []
 
 
 @pytest.mark.parametrize(
@@ -459,4 +460,68 @@ def test_a_column_of_only_five_digit_numbers_is_not_read_as_serial_dates():
     result = coerce.coerce_column("zip", [75202, 46030, 90210, 10001])
     assert result.series.dtype != pl.Date
     assert result.series.cast(pl.String).to_list() == ["75202", "46030", "90210", "10001"]
-    assert result.flag  # a ZIP-or-amount column is left for a person to check
+    assert result.flags  # a ZIP-or-amount column is left for a person to check
+
+
+
+# --------------------------------------------------------------------------- #
+# Every edge case carries a flag
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "values, dtype, expected",
+    [
+        (["2026-01-08 10:30:00", "2026-01-09"], pl.Date, ["INFO: time of day dropped"]),
+        (["2026-02-01", "03/15/2026", "46030"], pl.Date, ["INFO: 1 Excel serial number(s)"]),
+        (["2026-02-01", "03/15/2026", "20260108"], pl.Date, ["INFO: 1 value(s) written as yyyyMMdd"]),
+        (["2026-01-08", "01/09/2026", "Jan 10 2026"], pl.Date, ["INFO: dates written in several formats"]),
+        (["25/12/2026", "01/02/2026", "03/04/2026"], pl.Date, ["INFO: dates read as day-first"]),
+        (["01/02/2026", "03/04/2026", "05/06/2026"], pl.Date, ["CHECK: dates such as 01/02/2026 fit both"]),
+        (["2026-01-08", "2026-01-09", "2026-01-10", "not a date"], pl.Date, ["CHECK: 1 value(s) could not be read as dates"]),
+        ([20260108, 20260109, 20251231], pl.Date, ["CHECK: every value is an 8-digit number"]),
+        (["$1,234", "(500)", "12"], pl.Int64, ["INFO: formatted numbers; removed currency symbols"]),
+        (["10%", "20%", "35%"], pl.Int64, ["CHECK: percent signs removed"]),
+        (["$1,234", "(500)", "N/A", "12"], pl.Int64, ["CHECK: 1 value(s) are not numbers"]),
+        ([75202, 46030, 75202, 10001], pl.Int64, ["CHECK: every value is a 5-digit whole number"]),
+        (["08085", "75202", "10001"], pl.String, ["INFO: numbers with leading zeros"]),
+        (["1234", "5678", "12AB"], pl.String, ["CHECK: mostly numbers, but 1 value(s) mix letters"]),
+        (list(range(1005, 1016)), pl.String, ["CHECK: same-width, all-different whole numbers"]),
+        ([1500, 2300, 4100, 3700], pl.Int64, ["CHECK: same-width, all-different whole numbers"]),
+        ([1.5, 2.5, 3.25], pl.Float64, []),
+        (["South Zone PC", "West Zone PC"], pl.String, []),
+    ],
+)
+def test_each_value_edge_case_is_flagged(values, dtype, expected):
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("c", values)
+    assert result.series.dtype == dtype
+    for start in expected:
+        assert any(flag.startswith(start) for flag in result.flags), (start, result.flags)
+    if not expected:
+        assert result.flags == []
+
+
+def test_a_blank_header_cell_is_flagged():
+    header = list(HEADER)
+    header[3] = None
+    result = one([header] + records(6))
+    assert "CHECK: the header cell was blank" in result.trace["flags"]["column_4"][0]
+
+
+def test_a_duplicate_header_is_flagged_on_the_renamed_copy():
+    header = list(HEADER)
+    header[3] = "Premium"
+    result = one([header] + records(6))
+    renamed = [name for name in result.frame.columns if name.startswith("premium_")]
+    assert renamed
+    assert any("appears more than once" in flag for flag in result.trace["flags"][renamed[0]])
+
+
+def test_a_headerless_table_flags_every_column():
+    result = one(records(8))
+    assert all(
+        any("no header row was found" in flag for flag in result.trace["flags"][name])
+        for name in result.frame.columns
+    )

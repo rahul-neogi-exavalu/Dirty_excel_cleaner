@@ -95,7 +95,6 @@ Built from the typed table at the moment it is written, so it never re-guesses t
 |---|---|
 | `header_name` | the cleaned column name |
 | `datatype` | the type the cleaner decided (`Int64`, `Float64`, `Date`, `String`, ...) |
-| `type_flag` | `CHECK: ...` when the type was a judgement call to verify against the header; `NA` otherwise |
 | `inferred_datatype` | what polars infers from the written CSV's first 1,000 rows (`infer_schema_length=1000`) |
 | `distinct_count` | distinct non-empty values |
 | `count` | non-empty values |
@@ -105,6 +104,7 @@ Built from the typed table at the moment it is written, so it never re-guesses t
 | `null_percentage` | empty cells as a % of rows, any type, 2 decimals |
 | `excel_name` | the source file |
 | `sheet_name` | the sheet the rows came from |
+| `type_flag` | every edge case on the column (below), joined with ` \| `; `NA` when there is none |
 
 A statistic that does not apply is written as `NA`: `min`/`max`/`sum` of a text column,
 `sum` of a date column, or any of them for a column with no values. An appended table gets one
@@ -119,6 +119,50 @@ block of rows per sheet, each labelled with its `sheet_name`.
   values** → read as a code (`String`); **10 or fewer** → read as a number (`Int64`).
   Either way the column is **flagged** in the metadata's `type_flag`, so someone can
   check it against its header.
+
+### `type_flag`: every edge case, flagged
+
+The last metadata column lists everything about a column a reader should know. Each flag
+starts with its kind:
+
+- **`CHECK`**: the cleaner guessed, or had to leave values empty. Look at the column
+  (usually its header) and confirm.
+- **`INFO`**: the cleaner changed something on purpose and was sure. Nothing to decide.
+
+Several flags on one column are joined with ` | `. On an appended table each flag is
+prefixed with its sheet (`Jan: CHECK: ...`), because sheets can differ.
+
+| Flag | Kind | When |
+|---|---|---|
+| same-width, all-different whole numbers; read as code / as number | CHECK | could be ZIPs, account numbers or amounts; more than 10 values → code, 10 or fewer → number |
+| every value is a 5-digit whole number | CHECK | could be ZIP codes, Excel date serials or amounts; read as number |
+| every value is an 8-digit valid yyyyMMdd date | CHECK | read as dates, but could be identifiers |
+| mostly numbers, but N value(s) mix letters and digits | CHECK | whole column kept as text |
+| mixes identifiers (like POL-1) with plain numbers | CHECK | whole column kept as text |
+| N value(s) are not numbers and were left empty | CHECK | e.g. `N/A` in a number column |
+| N value(s) could not be read as dates and were left empty | CHECK | stragglers in a date column |
+| looked like dates, but none could be read | CHECK | kept as text |
+| dates such as 01/02/2026 fit both month-first and day-first | CHECK | nothing in the column decided the order |
+| percent signs removed: 99% is stored as 99 | CHECK | not 0.99 |
+| no header row was found / the header cell was blank | CHECK | column named by position (`column_3`) |
+| the header appears more than once; this copy renamed `x_2` | CHECK | duplicate labels |
+| column names borrowed from another sheet | CHECK | a continuation sheet with no header |
+| which way up this table is was a close call | CHECK | decided by shape; check it is not sideways |
+| entirely empty: formulas with no saved results | CHECK | open and re-save the workbook in Excel |
+| numbers with leading zeros; kept as text | INFO | e.g. `08085` |
+| dates read as day-first / month-first | INFO | only that reading fits every value |
+| dates written in several formats; normalised to YYYY-MM-DD | INFO | |
+| N Excel serial number(s) converted to dates | INFO | e.g. `46030 = 2026-01-08` |
+| N value(s) written as yyyyMMdd read as dates | INFO | inside a date column |
+| time of day dropped from N value(s) | INFO | `2026-01-08 10:30:00` → `2026-01-08` |
+| formatted numbers; removed currency symbols, separators, brackets | INFO | `(500)` = -500 |
+| the header was the number 2024; named `col_2024` | INFO | |
+| the header spanned two rows; the labels were joined | INFO | |
+| values were moved back under their labels | INFO | header and data had different gaps |
+| the table was sideways; it was turned upright | INFO | |
+| created by unpivoting N columns / the cells of the unpivoted columns | INFO | on the new `period`/`category` and `value` columns |
+| added by the cleaner: the sheet each row came from | INFO | `source_sheet` on appended tables |
+| entirely empty in the source | INFO | |
 
 **`datatype` is the schema to load with**, after checking any flagged column.
 `inferred_datatype` shows what a loader that guesses types would get instead. Where the

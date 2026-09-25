@@ -64,7 +64,7 @@ def test_a_judgement_call_is_flagged_beside_the_datatype_and_others_say_na():
     ).to_dicts()
     by_column = {row["header_name"]: row for row in rows}
 
-    assert list(rows[0])[:3] == ["header_name", "datatype", "type_flag"]
+    assert list(rows[0])[-1] == "type_flag"
     flagged = by_column["profitcenternumber"]
     assert flagged["datatype"] == "Int64"
     assert flagged["type_flag"].startswith("CHECK:")
@@ -188,3 +188,24 @@ def test_statistics_that_do_not_apply_are_written_as_na():
     text = metadata.build(frame, "book.xlsx", ["Report"]).write_csv()
     for line in text.splitlines()[1:]:
         assert ",NA,NA,NA," in line, line
+
+
+
+def test_borrowed_names_replace_the_positional_flag():
+    first = one([HEADER] + records(6), name="Report")
+    second = one(records(4, start=6), name="Continued")
+    outputs, _report = plan_workbook([first, second], "book")
+    table = [output for output in outputs if output.sheets == [second.label]][0]
+    flags = table.type_flags["premium"]
+    assert "borrowed from 'Report'" in flags
+    assert "named by position" not in flags
+
+
+def test_appended_tables_flag_the_added_source_sheet_column_and_prefix_sheets():
+    january = one([HEADER] + records(12), name="Jan")
+    february = one([HEADER] + records(4, start=12), name="Feb")
+    [output], _report = plan_workbook([january, february], "book")
+    assert output.type_flags["source_sheet"].startswith("INFO: added by the cleaner")
+    code = output.type_flags["profitcenternumber"]
+    assert "Jan: CHECK" in code and "read as code" in code
+    assert "Feb: CHECK" in code and "read as number" in code

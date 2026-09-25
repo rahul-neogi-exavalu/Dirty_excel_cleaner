@@ -416,9 +416,22 @@ contents, never its name:
   numbers, or it could be amounts that happen never to repeat. With **more than 10
   values** it is treated as a code; with **10 or fewer**, as a number.
 
-Either way, that last kind of column is **flagged** in the summary with a "CHECK" note
-right next to its type. Glance at the column's heading and you will know at once which it
-is: "ZIP" or "Premium". The summary
+Either way, that last kind of column is **flagged** in the summary with a "CHECK" note.
+Glance at the column's heading and you will know at once which it is: "ZIP" or "Premium".
+
+**Every tricky case is flagged the same way.** The last column of the summary lists
+anything about a column you should know, in plain words:
+
+- **CHECK** means the tool had to make a call it could not prove, or had to leave some
+  values empty. For example: a date like 01/02/2026 that could be January or February, a
+  "99%" stored as 99, a column whose heading was blank, a table that might be sideways, or
+  "N/A" entries in a column of figures. Look at the column and confirm.
+- **INFO** means the tool changed something deliberately and is sure of it. For example:
+  times of day dropped from dates, "$" and "," removed from figures, an Excel date number
+  like 46030 turned into 2026-01-08, or a sideways table turned upright.
+
+A column with nothing to report says "NA". So the fastest review of any file is to read
+the CHECK notes in its summary and nothing else. The summary
 also shows what a loading tool would guess on its own if left to itself. Where the two
 disagree, the loader should be told the type rather than left to guess.
 

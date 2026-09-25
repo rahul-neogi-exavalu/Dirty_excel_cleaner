@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
+from . import flags as flag_text
 from . import (
     coerce,
     geometry,
@@ -211,6 +212,7 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
                     f"confidence: {verdict.reason}"
                 )
 
+    _flag_structure(names, found, trace)
     frame = _typed_frame([_fit_row(row, width) for row in kept], names, trace)
     _validate(frame, trace)
 
@@ -220,6 +222,47 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
     trace["column_names"] = names
     trace["clean_shape"] = list(frame.shape)
     return SheetResult(grid.name, frame, trace, region_index=index)
+
+
+def _flag_structure(names, found, trace) -> None:
+    """Flag every column whose name or placement was a decision rather than a reading."""
+    if not found.detected:
+        flag_text.add_to_all(trace, names, flag_text.check(flag_text.NO_HEADER))
+    else:
+        for name in names:
+            if re.fullmatch(r"column_\d+", name):
+                flag_text.add(trace, name, flag_text.check(flag_text.BLANK_HEADER))
+            elif re.fullmatch(r"col_\d+", name):
+                flag_text.add(trace, name, flag_text.info(
+                    f"the header was the number {name[4:]}; named {name} so it is a valid name"
+                ))
+            base = re.fullmatch(r"(.+)_(\d+)", name)
+            if base and base.group(1) in names:
+                flag_text.add(trace, name, flag_text.check(
+                    f"the header '{base.group(1)}' appears more than once; this copy was "
+                    f"renamed {name}"
+                ))
+        if found.multi_row:
+            flag_text.add_to_all(trace, names, flag_text.info(
+                "the header spanned two rows; the two labels were joined"
+            ))
+
+    if trace.get("realigned"):
+        flag_text.add_to_all(trace, names, flag_text.info(
+            "the data sat in different columns from the header (a gap in one but not the "
+            "other); values were moved back under their labels"
+        ))
+
+    orientation = trace.get("orientation", {})
+    if orientation.get("orientation") == "transposed":
+        flag_text.add_to_all(trace, names, flag_text.info(
+            "the table was sideways (fields ran down the sheet); it was turned upright"
+        ))
+    if orientation and not orientation.get("confident", True):
+        flag_text.add_to_all(trace, names, flag_text.check(
+            "which way up this table is was a close call, decided by its shape; check "
+            "it is not sideways"
+        ))
 
 
 # --------------------------------------------------------------------------- #
@@ -342,6 +385,17 @@ def _unpivot(frame, rows, found, names, trace):
     long, report = pivot_mod.melt(frame, detected, names, rows[found.row_index])
     trace["pivot"] = report
     if report.get("unpivoted"):
+        melted = report["value_columns"]
+        # The value columns no longer exist; their flags would point at nothing.
+        for column in melted:
+            trace.get("flags", {}).pop(column, None)
+        flag_text.add(trace, report["variable_column"], flag_text.info(
+            f"created by unpivoting {len(melted)} columns that were values, not fields "
+            f"({', '.join(melted[:3])}...); one row per cell"
+        ))
+        flag_text.add(trace, "value", flag_text.info(
+            f"the cells of the {len(melted)} unpivoted columns"
+        ))
         trace["notes"].append(
             f"columns {report['value_columns'][:3]}... are values of one variable, not "
             f"fields; unpivoted into '{report['variable_column']}' and 'value' "
@@ -383,6 +437,7 @@ def _realign_gutters(names, found, rows, body, width, trace):
         f"header occupies columns {header_columns} but the data occupies {body_columns}; "
         "both hold the same number of values, so the body was re-seated under the header"
     )
+    trace["realigned"] = True
     new_names = [names[index] for index in header_columns]
     new_body = [[row[index] if index < len(row) else None for index in body_columns] for row in body]
     return new_names, new_body, len(new_names)
@@ -403,21 +458,19 @@ def _typed_frame(rows, names, trace) -> pl.DataFrame:
     """
     failures: list[dict] = []
     inferred: dict[str, str] = {}
-    flags: dict[str, str] = {}
     series: list[pl.Series] = []
 
     for index, name in enumerate(names):
         values = [row[index] if index < len(row) else None for row in rows]
         result = coerce.coerce_column(name, values)
         inferred[name] = result.kind
-        if result.flag:
-            flags[name] = result.flag
+        for flag in result.flags:
+            flag_text.add(trace, name, flag)
         failures.extend(result.failures)
         trace["notes"].extend(result.notes)
         series.append(result.series)
 
     trace["inferred_types"] = inferred
-    trace["type_flags"] = flags
     trace["coercion_failures"] = failures
     return pl.DataFrame(series) if series else pl.DataFrame()
 
@@ -436,12 +489,17 @@ def _report_empty_columns(frame, grid, trace) -> None:
     uncached = getattr(grid, "uncached_formula_cells", [])
     for column in empty:
         if uncached:
+            flag_text.add(trace, column, flag_text.check(
+                "entirely empty: the sheet has formulas with no saved results, so the "
+                "values exist in Excel but not in the file; open and re-save it in Excel"
+            ))
             trace["notes"].append(
                 f"column '{column}' is entirely empty; the sheet holds "
                 f"{len(uncached)} formula cell(s) with no cached result, so these "
                 "values exist in Excel but are absent from the file"
             )
         else:
+            flag_text.add(trace, column, flag_text.info("entirely empty in the source"))
             trace["notes"].append(f"column '{column}' is entirely empty in the source")
     trace["empty_columns"] = empty
 

@@ -347,7 +347,7 @@ structural safeguards:
   the values separates them. **More than `CODE_MIN_VALUES` (10) values → code (`String`);
   10 or fewer → number (`Int64`)**, because never-repeating, same-width amounts get
   unlikely as a table grows. Either way the decision is recorded in
-  `trace["type_flags"]` and surfaced as the metadata's `type_flag`, for a person to settle
+  `trace["flags"]` and surfaced as the metadata's `type_flag`, for a person to settle
   from the header. Appended sheets can decide differently (11 rows on one, 8 on another),
   so each sheet's flag is kept, prefixed with its name.
 - **most values parse as dates** → a date column. A column written in four different date
@@ -736,7 +736,6 @@ No metadata is written for a CSV that could not be written.
 |---|---|
 | `header_name` | the cleaned column name |
 | `datatype` | the frame's dtype: the cleaner's decision (`coerce.py`) |
-| `type_flag` | `CHECK: ...` for a judgement-call type (see §6); `NA` otherwise |
 | `inferred_datatype` | `pl.scan_csv(csv, infer_schema_length=1000, try_parse_dates=True)` on the written file |
 | `distinct_count` | `n_unique` of non-null values |
 | `count` | non-null values |
@@ -746,12 +745,60 @@ No metadata is written for a CSV that could not be written.
 | `null_percentage` | nulls ÷ rows × 100, 2 d.p., every dtype |
 | `excel_name` | source file name |
 | `sheet_name` | the sheet (`Output.sheet_names`; never a region label) |
+| `type_flag` | every edge case on the column, joined; `NA` when none (see below) |
 
 A statistic that does not apply is written as `NA` (`metadata.NOT_APPLICABLE`): min, max
 or sum for a type that has none, or for a column with no values. An explicit marker says
 "does not apply", where an empty field could also mean "missing". This applies only to
 the metadata file. In the cleaned data CSVs a missing value is still an empty field,
 because `NA` there would load as a value.
+
+### Flags
+
+Every place the pipeline guesses, or changes a value, attaches a flag to the column
+(`flags.py`). `CHECK` means a judgement call or values lost, for a person to confirm
+against the header. `INFO` means a deliberate, certain change. Flags are raised where
+the decision is made: in `coerce.py` for types and values, `extract.py` for headers,
+orientation, realignment, empty columns and unpivoting, and `orchestrate.py` for borrowed
+names and the added `source_sheet`. They are stored in `trace["flags"]` as
+`{column: [flag, ...]}`. Keys follow the column through renames: adoption re-keys them
+and swaps the positional flag for the borrowed one, and an unpivot drops the melted
+columns' flags. Appended sheets keep each sheet's flags, prefixed with its name.
+
+| Flag | Kind | When |
+|---|---|---|
+| same-width, all-different whole numbers; read as code / as number | CHECK | could be ZIPs, account numbers or amounts; more than 10 values → code, 10 or fewer → number |
+| every value is a 5-digit whole number | CHECK | could be ZIP codes, Excel date serials or amounts; read as number |
+| every value is an 8-digit valid yyyyMMdd date | CHECK | read as dates, but could be identifiers |
+| mostly numbers, but N value(s) mix letters and digits | CHECK | whole column kept as text |
+| mixes identifiers (like POL-1) with plain numbers | CHECK | whole column kept as text |
+| N value(s) are not numbers and were left empty | CHECK | e.g. `N/A` in a number column |
+| N value(s) could not be read as dates and were left empty | CHECK | stragglers in a date column |
+| looked like dates, but none could be read | CHECK | kept as text |
+| dates such as 01/02/2026 fit both month-first and day-first | CHECK | nothing in the column decided the order |
+| percent signs removed: 99% is stored as 99 | CHECK | not 0.99 |
+| no header row was found / the header cell was blank | CHECK | column named by position (`column_3`) |
+| the header appears more than once; this copy renamed `x_2` | CHECK | duplicate labels |
+| column names borrowed from another sheet | CHECK | a continuation sheet with no header |
+| which way up this table is was a close call | CHECK | decided by shape; check it is not sideways |
+| entirely empty: formulas with no saved results | CHECK | open and re-save the workbook in Excel |
+| numbers with leading zeros; kept as text | INFO | e.g. `08085` |
+| dates read as day-first / month-first | INFO | only that reading fits every value |
+| dates written in several formats; normalised to YYYY-MM-DD | INFO | |
+| N Excel serial number(s) converted to dates | INFO | e.g. `46030 = 2026-01-08` |
+| N value(s) written as yyyyMMdd read as dates | INFO | inside a date column |
+| time of day dropped from N value(s) | INFO | `2026-01-08 10:30:00` → `2026-01-08` |
+| formatted numbers; removed currency symbols, separators, brackets | INFO | `(500)` = -500 |
+| the header was the number 2024; named `col_2024` | INFO | |
+| the header spanned two rows; the labels were joined | INFO | |
+| values were moved back under their labels | INFO | header and data had different gaps |
+| the table was sideways; it was turned upright | INFO | |
+| created by unpivoting N columns / the cells of the unpivoted columns | INFO | on the new `period`/`category` and `value` columns |
+| added by the cleaner: the sheet each row came from | INFO | `source_sheet` on appended tables |
+| entirely empty in the source | INFO | |
+
+Row-level decisions (a sparse row kept at low confidence, an unverified total dropped)
+are not column properties and stay in the audit report.
 
 **`datatype` vs `inferred_datatype`.** The cleaner types columns from values. Codes stay
 `String`: alphanumeric values, a leading zero, or more than 10 same-width all-different

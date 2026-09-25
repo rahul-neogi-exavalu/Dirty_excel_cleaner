@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
+from . import flags as flag_text
 from . import signals, typing_utils
 from .typing_utils import is_blank
 
@@ -96,8 +97,8 @@ class Coerced:
     kind: str
     failures: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    # Set when the type was a judgement call a person should check; None otherwise.
-    flag: str | None = None
+    # Edge cases for a person to know about -- see flags.py for CHECK versus INFO.
+    flags: list[str] = field(default_factory=list)
 
 
 def sample(values):
@@ -119,7 +120,7 @@ def coerce_column(name: str, values: list) -> Coerced:
     if not present:
         return Coerced(pl.Series(name, [None] * len(values), dtype=pl.String), typing_utils.EMPTY)
 
-    kind, notes, flag = _decide_kind(name, present)
+    kind, notes, flags = _decide_kind(name, present)
 
     if kind in (typing_utils.INT, typing_utils.FLOAT):
         result = _as_number(name, values, notes)
@@ -127,8 +128,19 @@ def coerce_column(name: str, values: list) -> Coerced:
         result = _as_date(name, values, notes)
     else:
         result = Coerced(_as_text(name, values), kind, notes=notes)
-    result.flag = flag
+    # What decided the type first, then what happened to the values while converting.
+    result.flags = flags + result.flags
+    if result.series.dtype == pl.Int64 and not flags and _all_five_digits(present):
+        result.flags.append(flag_text.check(
+            "every value is a 5-digit whole number: could be ZIP codes, Excel date "
+            "serials or amounts; read as number (Int64)"
+        ))
     return result
+
+
+def _all_five_digits(present) -> bool:
+    texts = [text for text in _texts(present) if text is not None]
+    return bool(texts) and all(len(text) == 5 and text.isdigit() for text in texts)
 
 
 # --------------------------------------------------------------------------- #
@@ -136,7 +148,8 @@ def coerce_column(name: str, values: list) -> Coerced:
 # --------------------------------------------------------------------------- #
 
 
-def _decide_kind(name, present) -> tuple[str, list[str], str | None]:
+def _decide_kind(name, present) -> tuple[str, list[str], list[str]]:
+    """The column's type, the notes for the audit, and the flags for a person."""
     sampled = sample(present)
     notes: list[str] = []
     kind = signals.modal_type(sampled)
@@ -151,42 +164,55 @@ def _decide_kind(name, present) -> tuple[str, list[str], str | None]:
         _parsed, _primary, share = _ladder_parse(pl.Series("s", texts, dtype=pl.String))
         numeric_only = all(text is None or text.isdigit() for text in texts)
         if share >= (1.0 if numeric_only else DATE_SHARE_THRESHOLD):
-            return typing_utils.DATE, notes, None
+            flags = []
+            if numeric_only:
+                flags.append(flag_text.check(
+                    "every value is an 8-digit number that is a valid yyyyMMdd date; "
+                    "read as dates (could be identifiers)"
+                ))
+            return typing_utils.DATE, notes, flags
 
     # Letters and digits in one value -- 12AB, A7, X9Y -- is an identifier, never a
     # number. Letting the majority decide instead read such a column as numeric and
     # silently turned every alphanumeric value into an empty cell. Checked on the whole
     # column, because a sampled check would miss the one value that proves it.
-    if kind in (typing_utils.INT, typing_utils.FLOAT) and has_alphanumeric(present):
-        notes.append(f"column '{name}' kept as text: it holds alphanumeric values")
-        return typing_utils.ID_STRING, notes, None
+    if kind in (typing_utils.INT, typing_utils.FLOAT):
+        mixed = alphanumeric_values(present)
+        if mixed:
+            notes.append(f"column '{name}' kept as text: it holds alphanumeric values")
+            return typing_utils.ID_STRING, notes, [flag_text.check(
+                f"mostly numbers, but {len(mixed)} value(s) mix letters and digits "
+                f"({flag_text.example(mixed)}); whole column kept as text (String)"
+            )]
 
     if kind in (typing_utils.INT, typing_utils.FLOAT):
         shape = code_shape(sampled)
         if shape == LEADING_ZERO:
             notes.append(f"column '{name}' kept as text: a value has a leading zero")
-            return typing_utils.ID_STRING, notes, None
+            return typing_utils.ID_STRING, notes, [flag_text.info(
+                "numbers with leading zeros (e.g. 08085); kept as text so the zeros survive"
+            )]
         if shape == UNIFORM:
             # Counted on the whole column, not the sample: the sample is capped at 1000.
             if len(present) > CODE_MIN_VALUES:
-                flag = (
-                    f"CHECK: same-width, all-different whole numbers (code such as ZIP or "
-                    f"account number, or an amount?); read as code (String) because it has "
-                    f"more than {CODE_MIN_VALUES} values"
-                )
                 notes.append(f"column '{name}' kept as text: values look like codes")
-                return typing_utils.ID_STRING, notes, flag
-            flag = (
-                f"CHECK: same-width, all-different whole numbers (code such as ZIP or "
-                f"account number, or an amount?); read as number (Int64) because it has "
-                f"{CODE_MIN_VALUES} or fewer values"
-            )
+                return typing_utils.ID_STRING, notes, [flag_text.check(
+                    "same-width, all-different whole numbers (code such as ZIP or account "
+                    "number, or an amount?); read as code (String) because it has more "
+                    f"than {CODE_MIN_VALUES} values"
+                )]
             notes.append(f"column '{name}' read as numbers: too few values to call it a code")
-            return typing_utils.INT, notes, flag
+            return typing_utils.INT, notes, [flag_text.check(
+                "same-width, all-different whole numbers (code such as ZIP or account "
+                "number, or an amount?); read as number (Int64) because it has "
+                f"{CODE_MIN_VALUES} or fewer values"
+            )]
 
     if typing_utils.ID_STRING in types and types & {typing_utils.INT, typing_utils.FLOAT}:
         notes.append(f"column '{name}' mixes identifiers and numbers; kept as text")
-        return typing_utils.ID_STRING, notes, None
+        return typing_utils.ID_STRING, notes, [flag_text.check(
+            "mixes identifiers (like POL-1) with plain numbers; whole column kept as text"
+        )]
 
     # A column written in several date formats has no single lexical signature, so the
     # type lattice sees only "text". Parseability is the honest test.
@@ -198,30 +224,53 @@ def _decide_kind(name, present) -> tuple[str, list[str], str | None]:
             # mixed formats would send a reviewer looking for a problem that is not there.
             series = pl.Series("s", texts, dtype=pl.String)
             present = series.len() - series.null_count()
+            flags = []
             if primary and _resolved_share(series, primary, present) < share:
                 notes.append(f"column '{name}' holds several date formats; all parsed as dates")
-            return typing_utils.DATE, notes, None
+                flags.append(flag_text.info(
+                    "dates written in several formats; all normalised to YYYY-MM-DD"
+                ))
+            return typing_utils.DATE, notes, flags
 
     # Money and accounting negatives are text by shape but numeric in substance.
     if (
         kind == typing_utils.TEXT
         and _numeric_share(_texts(sampled)) >= NUMERIC_SHARE_THRESHOLD
-        and not has_alphanumeric(present)
+        and not alphanumeric_values(present)
     ):
         notes.append(f"column '{name}' holds formatted numbers; parsed as numeric")
-        return typing_utils.FLOAT, notes, None
+        return typing_utils.FLOAT, notes, _formatting_flags(_texts(present))
 
-    return kind, notes, None
+    return kind, notes, []
 
 
-def has_alphanumeric(values) -> bool:
-    """Whether any value mixes letters and digits, like ``12AB`` or ``A7``.
+def _formatting_flags(texts) -> list[str]:
+    """What presentation was stripped to read formatted numbers, and what it cost."""
+    present = [text for text in texts if text is not None]
+    found = []
+    if any(re.search(r"[$£€¥₹]", text) for text in present):
+        found.append("currency symbols")
+    if any("," in text for text in present):
+        found.append("thousands separators")
+    if any(_PARENTHESISED.match(text.strip()) for text in present):
+        found.append("brackets (read as negatives, e.g. (500) = -500)")
+    flags = [flag_text.info(f"formatted numbers; removed {', '.join(found)}")] if found else []
+    if any("%" in text for text in present):
+        flags.append(flag_text.check(
+            "percent signs removed: 99% is stored as 99, not 0.99"
+        ))
+    return flags
+
+
+def alphanumeric_values(values) -> list[str]:
+    """Every value that mixes letters and digits, like ``12AB`` or ``A7``.
 
     Vectorised, because it runs over the whole column rather than a sample. Month-name
     dates never reach it: it only guards the paths that would make a column a number.
     """
     texts = pl.Series("v", _texts(values), dtype=pl.String)
-    return bool((texts.str.contains(r"[A-Za-z]") & texts.str.contains(r"\d")).any())
+    mask = texts.str.contains(r"[A-Za-z]") & texts.str.contains(r"\d")
+    return texts.filter(mask.fill_null(False)).to_list()
 
 
 LEADING_ZERO = "leading_zero"
@@ -312,13 +361,20 @@ def _as_number(name, values, notes) -> Coerced:
         if text is not None and result is None
     ]
 
+    flags = []
+    if failures:
+        flags.append(flag_text.check(
+            f"{len(failures)} value(s) are not numbers and were left empty "
+            f"({flag_text.example(item['value'] for item in failures)})"
+        ))
+
     present = parsed.drop_nulls()
     # A column whose every value is whole is written as an integer. Without this a ZIP
     # or a centre number that escaped the code heuristic lands in the CSV as "75202.0",
     # which is wrong for a downstream load and merely noise to a reader.
     if len(present) and bool((present % 1 == 0).all()):
-        return Coerced(parsed.cast(pl.Int64, strict=False), typing_utils.INT, failures, notes)
-    return Coerced(parsed, typing_utils.FLOAT, failures, notes)
+        return Coerced(parsed.cast(pl.Int64, strict=False), typing_utils.INT, failures, notes, flags)
+    return Coerced(parsed, typing_utils.FLOAT, failures, notes, flags)
 
 
 def looks_like_periods(labels) -> bool:
@@ -443,40 +499,95 @@ def _as_date(name, values, notes) -> Coerced:
             for text in texts
             if text is not None
         ]
-        return Coerced(_as_text(name, values), typing_utils.TEXT, failures, notes)
+        return Coerced(_as_text(name, values), typing_utils.TEXT, failures, notes, [
+            flag_text.check("looked like dates, but none could be read; kept as text")
+        ])
 
     notes = list(notes)
-    _note_ambiguity(name, series, chosen, present, share, notes)
+    flags = _date_order(name, series, present, notes)
 
     failures = [
         {"column": name, "value": str(text)[:80], "reason": "unparseable date"}
         for text, result in zip(texts, parsed)
         if text is not None and result is None
     ]
+    if failures:
+        flags.append(flag_text.check(
+            f"{len(failures)} value(s) could not be read as dates and were left empty "
+            f"({flag_text.example(item['value'] for item in failures)})"
+        ))
+    flags.extend(_date_conversion_flags(values, texts, parsed, present))
+
     # Kept as a real Date so the frame's schema says what the column is: the metadata
     # reads its datatype from here. write_csv renders a Date as YYYY-MM-DD.
-    return Coerced(parsed.alias(name), typing_utils.DATE, failures, notes)
+    return Coerced(parsed.alias(name), typing_utils.DATE, failures, notes, flags)
 
 
-def _note_ambiguity(name, series, chosen, present, share, notes) -> None:
-    """Record when a column's date order was a judgement call rather than a reading.
+_TIME_OF_DAY = re.compile(r"\d{1,2}:\d{2}")
+
+
+def _date_conversion_flags(values, texts, parsed, present) -> list[str]:
+    """What turning these values into plain dates changed: serials, compact dates, times."""
+    flags = []
+    resolved = [(text, date) for text, date in zip(texts, parsed) if text is not None and date is not None]
+
+    serials = [(text, date) for text, date in resolved if re.fullmatch(EXCEL_SERIAL, text)]
+    if serials:
+        text, date = serials[0]
+        flags.append(flag_text.info(
+            f"{len(serials)} Excel serial number(s) converted to dates "
+            f"(e.g. {text} = {date.isoformat()})"
+        ))
+
+    compact = [text for text, _date in resolved if re.fullmatch(COMPACT_DATE, text)]
+    # A column made only of them is already flagged as a judgement call when typed.
+    if compact and len(compact) < present:
+        flags.append(flag_text.info(
+            f"{len(compact)} value(s) written as yyyyMMdd (e.g. {compact[0]}) read as dates"
+        ))
+
+    timed = [
+        value for value in values
+        if (isinstance(value, _dt.datetime) and value.time() != _dt.time(0, 0))
+        or (isinstance(value, str) and _TIME_OF_DAY.search(value))
+    ]
+    if timed:
+        flags.append(flag_text.info(
+            f"time of day dropped from {len(timed)} value(s) "
+            f"(e.g. {flag_text.example(timed, 1)}); only the date is kept"
+        ))
+    return flags
+
+
+def _date_order(name, series, present, notes) -> list[str]:
+    """Say which way round slash or dash dates were read, and whether it was a guess.
 
     ``01/02/2026`` is either the first of February or the second of January. The choice
     is made once for the whole column and said out loud, because a column that silently
-    mixes both conventions is exactly the error this pipeline exists to surface.
+    mixes both conventions is exactly the error this pipeline exists to surface. When
+    both readings fit every value, nothing in the data decided it: that is a CHECK.
     """
-    for fmt, label in AMBIGUOUS_FORMATS + AMBIGUOUS_DASHED:
-        if fmt != chosen:
+    flags = []
+    for pair in (AMBIGUOUS_FORMATS, AMBIGUOUS_DASHED):
+        shares = [(_resolved_share(series, fmt, present), fmt, label) for fmt, label in pair]
+        if not any(share for share, _fmt, _label in shares):
             continue
-        other = next(
-            candidate
-            for candidate, _ in AMBIGUOUS_FORMATS + AMBIGUOUS_DASHED
-            if candidate != chosen and candidate[1] == chosen[1]
+        # The ladder tries the better-fitting reading first; on a tie, month-first.
+        (first_share, first_fmt, first_label), (second_share, second_fmt, _label) = sorted(
+            shares, key=lambda item: item[0], reverse=True
         )
-        if abs(_resolved_share(series, other, present) - share) < 1e-9:
+        if abs(first_share - second_share) < 1e-9:
             notes.append(
-                f"column '{name}' dates are ambiguous ({chosen} and {other} both fit); "
-                f"read as {label}"
+                f"column '{name}' dates are ambiguous ({first_fmt} and {second_fmt} both "
+                f"fit); read as {first_label}"
             )
+            flags.append(flag_text.check(
+                f"dates such as 01/02/2026 fit both month-first and day-first; read as "
+                f"{first_label} ({first_fmt}), so confirm against the source"
+            ))
         else:
-            notes.append(f"column '{name}' dates read as {label} ({chosen})")
+            notes.append(f"column '{name}' dates read as {first_label} ({first_fmt})")
+            flags.append(flag_text.info(
+                f"dates read as {first_label} ({first_fmt}): only that reading fits every value"
+            ))
+    return flags

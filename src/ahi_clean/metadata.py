@@ -32,7 +32,6 @@ NOT_APPLICABLE = "NA"
 FIELDNAMES = [
     "header_name",
     "datatype",
-    "type_flag",
     "inferred_datatype",
     "distinct_count",
     "count",
@@ -43,6 +42,7 @@ FIELDNAMES = [
     "null_percentage",
     "excel_name",
     "sheet_name",
+    "type_flag",
 ]
 
 _SCHEMA = {
@@ -82,8 +82,9 @@ def build(
             row.update(
                 header_name=column,
                 datatype=str(frame.schema[column]),
-                # A type that was a judgement call, for someone to check against the
-                # header; NA when the values decided it outright.
+                # Every edge case on this column (flags.py): CHECK for a judgement call
+                # to confirm against the header, INFO for a change made on purpose.
+                # NA when there is nothing to say.
                 type_flag=flags.get(column, NOT_APPLICABLE),
                 inferred_datatype=inferred.get(column),
                 excel_name=excel_name,

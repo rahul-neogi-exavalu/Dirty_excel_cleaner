@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
+from . import flags as flag_text
 from . import signals, typing_utils
 
 FACT = "FACT"
@@ -39,7 +40,7 @@ class Output:
     sheets: list[str] = field(default_factory=list)
     # The workbook sheet each of those tables came from, in the same order.
     sheet_names: list[str] = field(default_factory=list)
-    # Type decisions a person should check, by column name (see coerce.CODE_MIN_VALUES).
+    # Every edge case per column, joined, for the metadata's type_flag (see flags.py).
     type_flags: dict[str, str] = field(default_factory=dict)
     # Set when the output is written: one job id names the CSV and its metadata file.
     job_id: str = ""
@@ -225,9 +226,18 @@ def adopt_sibling_headers(results) -> list[dict]:
             result.frame.columns = list(donor.frame.columns)
             # Types and flags were recorded under the positional names; carry them over,
             # or everything keyed by column name downstream silently misses them.
-            for key in ("inferred_types", "type_flags"):
+            for key in ("inferred_types", "flags"):
                 recorded = result.trace.get(key, {})
                 result.trace[key] = {renamed.get(name, name): value for name, value in recorded.items()}
+            # "Named by position" is no longer true; say where the names came from.
+            positional = {flag_text.check(flag_text.NO_HEADER), flag_text.check(flag_text.BLANK_HEADER)}
+            for column in result.frame.columns:
+                kept = [flag for flag in result.trace.get("flags", {}).get(column, []) if flag not in positional]
+                result.trace.setdefault("flags", {})[column] = kept
+                flag_text.add(result.trace, column, flag_text.check(
+                    f"this sheet had no header; column names borrowed from '{donor.label}', "
+                    "which has the same width and column types"
+                ))
             # `detected` stays False on purpose: this region genuinely has no header
             # row, it has borrowed names from one. Overloading the flag made every
             # downstream row count skip a header line that is not there.
@@ -301,18 +311,29 @@ def plan_workbook(results, stem: str) -> tuple[list[Output], dict]:
 
 
 def _flags(results) -> dict[str, str]:
-    """Every flagged column across the tables that make up one output.
+    """Every flag on every column across the tables that make up one output.
 
     Appended sheets can decide the same column differently -- one with more values than
-    the code threshold, one with fewer -- so both flags are kept rather than one winning.
+    the code threshold, one with fewer -- so each sheet's flags are kept, prefixed with
+    the sheet's name, rather than one winning.
     """
     merged: dict[str, list[str]] = {}
+    if len(results) > 1:
+        merged[SOURCE_SHEET_COLUMN] = [flag_text.info(
+            "added by the cleaner: the sheet each row came from, since appended sheets "
+            "can repeat the same records"
+        )]
     for result in results:
-        for column, flag in result.trace.get("type_flags", {}).items():
-            text = f"{result.sheet_name}: {flag}" if len(results) > 1 else flag
-            if text not in merged.setdefault(column, []):
-                merged[column].append(text)
-    return {column: " | ".join(flags) for column, flags in merged.items()}
+        for column, column_flags in result.trace.get("flags", {}).items():
+            for flag in column_flags:
+                text = f"{result.sheet_name}: {flag}" if len(results) > 1 else flag
+                if text not in merged.setdefault(column, []):
+                    merged[column].append(text)
+    return {
+        column: flag_text.SEPARATOR.join(column_flags)
+        for column, column_flags in merged.items()
+        if column_flags
+    }
 
 
 def _slug(text: str) -> str:
