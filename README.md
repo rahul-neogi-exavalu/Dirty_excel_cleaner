@@ -99,13 +99,14 @@ Built from the typed table at the moment it is written, so it never re-guesses t
 | `distinct_count` | distinct non-empty values |
 | `count` | non-empty values |
 | `total_row_count` | rows in the table, or in this sheet's block |
-| `min`, `max` | numeric and date columns only |
-| `sum` | numeric columns only, summed exactly as decimals |
+| `min`, `max` | numeric and date columns; `NA` otherwise |
+| `sum` | numeric columns, summed exactly as decimals; `NA` otherwise |
 | `null_percentage` | empty cells as a % of rows, any type, 2 decimals |
 | `excel_name` | the source file |
 | `sheet_name` | the sheet the rows came from |
 
-A statistic that does not apply is left empty, never `NA`. An appended table gets one
+A statistic that does not apply is written as `NA`: `min`/`max`/`sum` of a text column,
+`sum` of a date column, or any of them for a column with no values. An appended table gets one
 block of rows per sheet, each labelled with its `sheet_name`.
 
 **`datatype` is the schema to load with.** The cleaner types columns from their values,

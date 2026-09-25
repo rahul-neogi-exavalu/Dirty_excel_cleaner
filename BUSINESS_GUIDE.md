@@ -403,7 +403,8 @@ number, so the two are easy to pair. The audit report uses those same final name
 The summary is the quickest check that a file came through sensibly. A column that should
 be full but shows 40% empty, or a premium total nowhere near the figure you expected, is
 visible before anyone opens the table. Where a figure does not apply, such as the total of
-a name column, the cell is simply left empty rather than filled with "NA".
+a name column, the cell says "NA" (not applicable), so it is never mistaken for a
+missing figure.
 
 **The type column is worth reading.** The tool decides what each column is from its
 contents, and keeps reference codes as text: centre numbers, postcodes, account numbers.

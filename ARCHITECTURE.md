@@ -728,14 +728,17 @@ No metadata is written for a CSV that could not be written.
 | `distinct_count` | `n_unique` of non-null values |
 | `count` | non-null values |
 | `total_row_count` | rows in the group |
-| `min` / `max` | numeric and temporal dtypes |
-| `sum` | numeric dtypes, exact |
+| `min` / `max` | numeric and temporal dtypes; `NA` otherwise |
+| `sum` | numeric dtypes, exact; `NA` otherwise |
 | `null_percentage` | nulls ÷ rows × 100, 2 d.p., every dtype |
 | `excel_name` | source file name |
 | `sheet_name` | the sheet (`Output.sheet_names`; never a region label) |
 
-A statistic that does not apply is written as an empty field, never a placeholder such as
-`NA`, which a loader would read as data.
+A statistic that does not apply is written as `NA` (`metadata.NOT_APPLICABLE`): min, max
+or sum for a type that has none, or for a column with no values. An explicit marker says
+"does not apply", where an empty field could also mean "missing". This applies only to
+the metadata file. In the cleaned data CSVs a missing value is still an empty field,
+because `NA` there would load as a value.
 
 **`datatype` vs `inferred_datatype`.** The cleaner types columns from values. Codes stay
 `String`: a leading zero, same-width near-unique integers (`coerce.looks_like_a_code`), or

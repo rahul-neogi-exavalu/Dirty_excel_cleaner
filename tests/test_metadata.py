@@ -45,14 +45,14 @@ def test_a_date_column_gets_min_and_max_but_no_sum():
     row = described(one([HEADER] + records(6)))["accountingeffectivedate"]
     assert row["datatype"] == "Date"
     assert (row["min"], row["max"]) == ("2026-01-01", "2026-01-06")
-    assert row["sum"] is None
+    assert row["sum"] == metadata.NOT_APPLICABLE
 
 
 def test_a_code_column_is_text_and_gets_no_numeric_statistics():
     """Centre numbers look like integers; the cleaner kept them as text, from values alone."""
     row = described(one([HEADER] + records(6)))["profitcenternumber"]
     assert row["datatype"] == "String"
-    assert (row["min"], row["max"], row["sum"]) == (None, None, None)
+    assert (row["min"], row["max"], row["sum"]) == ("NA", "NA", "NA")
     assert row["distinct_count"] == 6
 
 
@@ -155,3 +155,13 @@ def test_inferred_datatype_shows_what_a_loader_would_guess(tmp_path):
     date = [row for row in rows if row["header_name"] == "accountingeffectivedate"][0]
     assert (date["datatype"], date["inferred_datatype"]) == ("Date", "Date")
     assert list(rows[0]) == metadata.FIELDNAMES
+
+
+def test_statistics_that_do_not_apply_are_written_as_na():
+    frame = pl.DataFrame(
+        {"name": ["a", "b"], "empty": [None, None]},
+        schema={"name": pl.String, "empty": pl.Float64},
+    )
+    text = metadata.build(frame, "book.xlsx", ["Report"]).write_csv()
+    for line in text.splitlines()[1:]:
+        assert ",NA,NA,NA," in line, line

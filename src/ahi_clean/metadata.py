@@ -25,6 +25,10 @@ from .orchestrate import SOURCE_SHEET_COLUMN
 # Rows polars reads when inferring the written CSV's schema.
 INFER_SCHEMA_LENGTH = 1000
 
+# Written where a statistic does not apply -- the sum of a text column, the min of a
+# column with no values -- so a reader sees "does not apply" rather than an ambiguous blank.
+NOT_APPLICABLE = "NA"
+
 FIELDNAMES = [
     "header_name",
     "datatype",
@@ -96,10 +100,9 @@ def describe(series: pl.Series) -> dict:
         "distinct_count": present.n_unique(),
         "count": total - nulls,
         "total_row_count": total,
-        # None, not "", so a blank is written as an empty field rather than "".
-        "min": None,
-        "max": None,
-        "sum": None,
+        "min": NOT_APPLICABLE,
+        "max": NOT_APPLICABLE,
+        "sum": NOT_APPLICABLE,
         "null_percentage": f"{(nulls / total * 100) if total else 0.0:.2f}",
     }
     if present.is_empty():
