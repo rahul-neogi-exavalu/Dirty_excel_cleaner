@@ -2,7 +2,8 @@
 
 Turns report-shaped Excel exports and delimited text files — banners, merged titles, footers, page breaks, blank
 gutters, subtotals, repeated headers, transposed layouts, side-by-side tables — into flat,
-table-ready CSVs, with an audit report explaining every structural decision.
+table-ready CSVs, with an audit report explaining every structural decision and a
+per-column metadata summary beside every cleaned file.
 
 **No schema, no aliases, no field names.** The pipeline has no idea what a "premium" is.
 Every decision comes from the data's own shape, types, distinctness, density and
@@ -31,14 +32,17 @@ setting first — this works the same in PowerShell, cmd and bash.
 python clean.py
 ```
 
-With no arguments it cleans the bundled samples into `cleaned/` and `audit/`. To point it
-at other files:
+With no arguments it cleans every `.xlsx`, `.csv` and `.tsv` in `sample_files_uncleaned/`
+into `cleaned/` and `audit/`. That folder is git-ignored — the scenario corpus is expected
+to be swapped, so supply your own files there. (`legacy/` keeps the six original POC
+workbooks, which are tracked.) To point it at other files:
 
 ```bash
 python clean.py "some_folder/*.xlsx" --out cleaned --audit audit
 ```
 
-Process several workbooks at once:
+`--workers 0` uses one worker per CPU. `--max-cells` sets the per-sheet ceiling (default
+20,000,000). Process several workbooks at once:
 
 ```bash
 python clean.py "inbox/*.xlsx" --workers 8
@@ -66,6 +70,51 @@ python tools/benchmark.py
 python tools/ablation.py
 ```
 
+## Outputs
+
+Each run writes three kinds of file:
+
+| File | Where | What |
+|---|---|---|
+| `<source>_<job_id>.csv` | `--out` | a cleaned table |
+| `<source>_metadata_<job_id>.csv` | `--out` | one row per column of that table (below) |
+| `<source>.audit.json` | `--audit` | every structural decision, with its score and reason |
+
+`<job_id>` is a fresh UUID4, fixed when the file is written and shared by a cleaned CSV and
+its metadata file. `<source>` is the input file's stem. A workbook that yields several
+tables produces one CSV and one metadata file per table, so n sheets with different
+headers give n CSVs and n metadata files. The audit lists each output under its final
+names (`file`, `metadata_file`, `job_id`, plus `table`, the cleaner's own name for it).
+`python clean.py` and `python -m ahi_clean` produce exactly the same files.
+
+### The metadata file
+
+Built from the typed table at the moment it is written, so it never re-guesses types:
+
+| Column | Meaning |
+|---|---|
+| `header_name` | the cleaned column name |
+| `datatype` | the type the cleaner decided (`Int64`, `Float64`, `Date`, `String`, ...) |
+| `inferred_datatype` | what polars infers from the written CSV's first 1,000 rows (`infer_schema_length=1000`) |
+| `distinct_count` | distinct non-empty values |
+| `count` | non-empty values |
+| `total_row_count` | rows in the table, or in this sheet's block |
+| `min`, `max` | numeric and date columns only |
+| `sum` | numeric columns only, summed exactly as decimals |
+| `null_percentage` | empty cells as a % of rows, any type, 2 decimals |
+| `excel_name` | the source file |
+| `sheet_name` | the sheet the rows came from |
+
+A statistic that does not apply is left empty, never `NA`. An appended table gets one
+block of rows per sheet, each labelled with its `sheet_name`.
+
+**`datatype` is the schema to load with.** The cleaner types columns from their values,
+never their names. Codes such as centre numbers, ZIPs and account IDs stay `String`,
+because of a leading zero or because they are same-width, near-unique integers.
+`inferred_datatype` shows what a loader that guesses types would get instead. Where the
+two differ, typically a code column inferred as `Int64`, loading with inference would
+drop leading zeros or add up identifiers. Pass `datatype` as an explicit schema.
+
 ## Delimited files
 
 `.csv`, `.tsv` and `.txt` go through the same pipeline. A delimited file is one sheet by
@@ -90,7 +139,7 @@ where Excel had already destroyed it before the pipeline saw the file.
 |---|---|
 | 0 | every workbook cleaned, no contract violated |
 | 1 | no input matched |
-| 2 | some workbooks could not be read, or an output file was locked |
+| 2 | some workbooks could not be read, or an output file was locked (usually open in Excel) |
 | 3 | an output contract was violated — the data may be wrong |
 
 ## How it decides, in one line each
@@ -120,13 +169,23 @@ whose number equals the sum of the rows above it. A repeated header is caught th
 verbatim, as a fragment, or restated in different words (text sitting where its columns hold
 numbers).
 
-**Join keys.** Found from values, never names — without a schema the two columns are
-literally called `producer_agencyname` and `producer`. Fuzzy matches auto-resolve only if
-they clear 90 **and** beat the runner-up by 10.
+**Multiple sheets.** Every table ships as its own CSV. Tables are appended only when their
+column headers match 100% (same set of names, any order), with a `source_sheet` column
+added; nothing partial counts. Tables are never joined.
 
 **Types.** Inferred per column. Leading zeros and constant-width near-unique integers stay
 text; a column in four different date formats is recognised by what parses, not by how it
 looks; formula cells with no cached value are reported rather than shipped as nulls.
+
+**Dates are written as `YYYY-MM-DD`.** Every value in a date column is normalised,
+whichever of these it arrived in: `yyyy-MM-dd HH:mm:ss` (time dropped), `yyyy-MM-dd`,
+`MM/dd/yyyy`, `M/d/yyyy`, `yyyyMMdd`, `MM-dd-yyyy`, `M-d-yyyy`, the written forms
+(`08 Jan 2026`, `Jan 8, 2026`, `08.01.2026`), day-first slashes when the column proves it,
+and five-digit Excel serial numbers (`46030` → `2026-01-08`, i.e. 1899-12-30 plus n days).
+Two numeric guards: a column of nothing but numbers is a date column only if *every* value
+is a real `yyyyMMdd` date in 1900–2100, and a serial is only read as a date in a column
+that already holds dates written some other way — a column of bare five-digit numbers is
+indistinguishable from ZIPs or codes and stays text.
 
 **Continuation sheets.** A sheet with no header at all adopts the column names of a sibling
 with the same width and the same per-column types — matched on shape, not on sheet order.
@@ -200,14 +259,18 @@ Windows each process is a fresh interpreter that must re-import polars before do
 work, and for report-sized files that startup dwarfs the job. `--executor process` remains
 available for batches of genuinely large files.
 
-**156 tests, in two suites.** `tests/test_scenarios.py` runs against whatever workbooks are
-in `sample_files_uncleaned/` and adapts automatically. Everything else builds its sheets in
+**170 tests with an empty corpus, in two suites.** `tests/test_scenarios.py` runs against
+whatever workbooks are in `sample_files_uncleaned/` and adds tests per workbook
+automatically. With that folder empty, the 16 tests that need real workbooks (there and in
+the orchestration and resilience suites) are skipped rather than failed. Everything else builds its sheets in
 memory and never names a file, so swapping the corpus cannot break what they pin.
 
 ## Layout
 
 ```
 clean.py            entry point (no PYTHONPATH needed)
+legacy/             the original six POC workbooks
+sample_files_uncleaned/  the scenario corpus (git-ignored; supply your own)
 tools/scorecard.py  scores the cleaner against every scenario workbook
 tools/benchmark.py  single-sheet throughput and executor comparison
 tools/ablation.py   disables each signal in turn to show what is load-bearing
@@ -224,10 +287,10 @@ src/ahi_clean/
   contracts.py      checks that refuse, rather than merely report
   failures.py       why a workbook could not be read, in actionable terms
   extract.py        orientation, regions, realignment, types, validation
-  orchestrate.py    table roles, stack/join decisions
-  join.py           value-based key discovery with the margin rule
+  orchestrate.py    table roles, exact-header appends, one CSV per table otherwise
+  metadata.py       per-column metadata, from the typed table as it is written
   audit.py          trace -> JSON report
-  cli.py            batch isolation, parallel workers, CSV writing
+  cli.py            batch isolation, parallel workers, CSV + metadata writing, job ids
 ```
 
 ## Known limits
@@ -244,3 +307,7 @@ src/ahi_clean/
   span exactly the same rows.
 - Pivot detection needs at least three value columns; a two-month matrix is indistinguishable
   from an ordinary table with two numeric columns.
+- Output file names carry the source stem and a job ID, not the sheet; the sheet is in the
+  metadata's `sheet_name` and the audit's `source_sheets`.
+- Numbers use `.` as the decimal separator; `1234,56` is not read as a decimal.
+- `tools/scorecard.py` scores `.xlsx` only; delimited files are covered by the tests.

@@ -1,8 +1,11 @@
-"""Workbook-level decisions: what each table is, and how tables relate.
+"""Workbook-level decisions: what each table is, and which tables are appended.
 
-Roles and relationships are read off the data's shape and content. No canonical field
-list is consulted, and a sheet's tab name is recorded as a hint but never allowed to
-decide anything.
+Roles are read off the data's shape and content and recorded for the report. No
+canonical field list is consulted, and a sheet's tab name is recorded as a hint but never
+allowed to decide anything.
+
+Tables are appended only when their column headers match exactly. Everything else ships
+as its own CSV -- one per table -- and tables are never joined.
 """
 
 from __future__ import annotations
@@ -11,17 +14,14 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
-from . import join, signals, typing_utils
+from . import signals, typing_utils
 
 FACT = "FACT"
 DIMENSION = "DIMENSION"
 UNKNOWN = "UNKNOWN"
 
 STACK = "STACK"
-JOIN = "JOIN"
-NONE = "NONE"
 
-NAME_OVERLAP_THRESHOLD = 0.9
 PROFILE_OVERLAP_THRESHOLD = 0.9
 KEY_DISTINCT_RATIO = 0.9
 DIMENSION_MAX_ROWS = 200
@@ -35,7 +35,14 @@ class Output:
     name: str
     frame: pl.DataFrame
     kind: str
+    # Region labels (``Report``, ``Report_r2``) -- which tables went into this output.
     sheets: list[str] = field(default_factory=list)
+    # The workbook sheet each of those tables came from, in the same order.
+    sheet_names: list[str] = field(default_factory=list)
+    # Set when the output is written: one job id names the CSV and its metadata file.
+    job_id: str = ""
+    file: str = ""
+    metadata_file: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -154,19 +161,11 @@ def classify_table(result) -> tuple[str, dict]:
 # --------------------------------------------------------------------------- #
 
 
-def name_overlap(left: pl.DataFrame, right: pl.DataFrame) -> float:
-    """Jaccard overlap of two tables' column names."""
-    left_names, right_names = set(left.columns), set(right.columns)
-    if not left_names or not right_names:
-        return 0.0
-    return len(left_names & right_names) / len(left_names | right_names)
-
-
 def profile_overlap(left: pl.DataFrame, right: pl.DataFrame) -> float:
     """Similarity of two tables' per-column type profiles.
 
-    The fallback for sheets that hold the same data under different labels -- a
-    January export headed differently from February's.
+    Used to recognise a headerless continuation sheet. It never decides an append:
+    that needs the column headers themselves to match exactly.
     """
     if len(left.columns) != len(right.columns):
         return 0.0
@@ -175,23 +174,18 @@ def profile_overlap(left: pl.DataFrame, right: pl.DataFrame) -> float:
     return signals.profile_similarity(left_profile, right_profile)
 
 
-def _stack_decision(left, right) -> tuple[bool, dict]:
-    names = name_overlap(left.frame, right.frame)
-    profile = profile_overlap(left.frame, right.frame)
-    by_name = names >= NAME_OVERLAP_THRESHOLD
-    by_profile = profile >= PROFILE_OVERLAP_THRESHOLD and len(left.frame.columns) == len(
-        right.frame.columns
-    )
-    detail = {
-        "tables": [left.label, right.label],
-        "name_overlap": round(names, 3),
-        "profile_overlap": round(profile, 3),
-        "decision": STACK if (by_name or by_profile) else NONE,
-        "decided_by": "column_names" if by_name else ("type_profile" if by_profile else None),
-    }
-    if by_profile and not by_name:
-        detail["confidence"] = "low"
-    return by_name or by_profile, detail
+def header_key(result) -> frozenset | None:
+    """What two tables must share, exactly, to be appended: their column headers.
+
+    A 100% match on the set of names, so a sheet that merely reorders its columns still
+    appends. Nothing partial counts -- not 90% of the names, and not a matching type
+    profile under different labels. A table with no header row of its own -- named
+    positionally, or with names adopted from a sibling -- has nothing to match, so it
+    never appends.
+    """
+    if not result.trace.get("header", {}).get("detected"):
+        return None
+    return frozenset(result.frame.columns)
 
 
 # --------------------------------------------------------------------------- #
@@ -241,85 +235,58 @@ def adopt_sibling_headers(results) -> list[dict]:
 
 
 def plan_workbook(results, stem: str) -> tuple[list[Output], dict]:
-    """Classify tables, decide their relationships, and produce the outputs."""
+    """Classify tables, append the ones with identical headers, and produce the outputs."""
     adoptions = adopt_sibling_headers(results)
     live = [result for result in results if not result.frame.is_empty()]
-    roles: dict[str, str] = {}
-    evidence: list[dict] = []
-    for result in live:
-        role, why = classify_table(result)
-        roles[result.label] = role
-        evidence.append(why)
+    # Recorded for the report. Roles no longer decide any output: nothing is joined.
+    evidence = [classify_table(result)[1] for result in live]
 
     report: dict = {
         "table_roles": evidence,
         "relationships": [],
-        "join": None,
         "header_adoptions": adoptions,
     }
-    facts = [result for result in live if roles[result.label] == FACT]
-    dimensions = [result for result in live if roles[result.label] == DIMENSION]
 
-    # --- stack: several fact tables with the same shape -------------------------
-    stack_group: list = []
-    if len(facts) > 1:
-        decisions = []
-        for index in range(len(facts) - 1):
-            stackable, detail = _stack_decision(facts[index], facts[index + 1])
-            decisions.append(stackable)
-            report["relationships"].append(detail)
-        if all(decisions):
-            stack_group = facts
+    # --- append: tables whose headers match exactly ------------------------------
+    groups: dict[frozenset, list] = {}
+    for result in live:
+        key = header_key(result)
+        if key is not None:
+            groups.setdefault(key, []).append(result)
+    stacks = [group for group in groups.values() if len(group) > 1]
+    stacked = {result.label for group in stacks for result in group}
+    shipped = len(stacks) + sum(1 for result in live if result.label not in stacked)
 
     outputs: list[Output] = []
-    if stack_group:
+    for group in stacks:
+        order = list(group[0].frame.columns)
         frames = []
-        for result in stack_group:
+        for result in group:
             # Nothing in the rows identifies which sheet they came from, and periods
             # commonly reuse the same keys. Without this the stacked rows are
             # indistinguishable and read as duplicates.
-            frame = result.frame.insert_column(
+            frame = result.frame.select(order).insert_column(
                 0, pl.Series(SOURCE_SHEET_COLUMN, [result.sheet_name] * len(result.frame))
             )
             frames.append(frame)
+        labels = [result.label for result in group]
+        name = stem if shipped == 1 else f"{stem}_{_slug(labels[0])}"
         outputs.append(
-            Output(stem, pl.concat(frames, how="vertical_relaxed"), "stacked",
-                   [result.label for result in stack_group])
+            Output(name, pl.concat(frames, how="vertical_relaxed"), "stacked", labels,
+                   [result.sheet_name for result in group])
         )
-        remaining_facts = []
-    else:
-        remaining_facts = facts
-
-    # --- join: one fact table enriched by one lookup ----------------------------
-    if len(remaining_facts) == 1 and len(dimensions) == 1:
-        fact, dimension = remaining_facts[0], dimensions[0]
-        key = join.discover_key(fact.frame, dimension.frame)
         report["relationships"].append(
-            {
-                "tables": [fact.label, dimension.label],
-                "roles": [FACT, DIMENSION],
-                "name_overlap": round(name_overlap(fact.frame, dimension.frame), 3),
-                "decision": JOIN if key else NONE,
-                "discovered_key": key,
-            }
+            {"tables": labels, "decision": STACK, "decided_by": "identical_headers"}
         )
-        if key:
-            merged, join_report = join.join_frames(fact.frame, dimension.frame, key)
-            report["join"] = join_report
-            outputs.append(Output(stem, merged, "joined", [fact.label, dimension.label]))
-            # The lookup still ships separately: it is reference data in its own right.
-            outputs.append(
-                Output(f"{stem}_{_slug(dimension.label)}", dimension.frame, "dimension",
-                       [dimension.label])
-            )
 
-    # --- everything else ships standalone ---------------------------------------
-    emitted = {sheet for output in outputs for sheet in output.sheets}
+    # --- everything else ships standalone, one CSV per table --------------------
     for result in live:
-        if result.label in emitted:
+        if result.label in stacked:
             continue
-        name = stem if len(live) == 1 else f"{stem}_{_slug(result.label)}"
-        outputs.append(Output(name, result.frame, "standalone", [result.label]))
+        name = stem if shipped == 1 else f"{stem}_{_slug(result.label)}"
+        outputs.append(
+            Output(name, result.frame, "standalone", [result.label], [result.sheet_name])
+        )
 
     return outputs, report
 

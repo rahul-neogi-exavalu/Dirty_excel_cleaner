@@ -65,6 +65,20 @@ AMBIGUOUS_DASHED = [("%m-%d-%Y", "month-first"), ("%d-%m-%Y", "day-first")]
 _PRESENTATION = re.compile(r"[\s,_ $£€¥₹%]")
 _PARENTHESISED = re.compile(r"^\((.*)\)$")
 _EXCEL_EPOCH = _dt.date(1899, 12, 30)
+_EXCEL_OFFSET = (_EXCEL_EPOCH - _dt.date(1970, 1, 1)).days
+
+# Two all-digit date shapes, handled apart from the format ladder because a bare number
+# is only a date under conditions a format string cannot express.
+#
+# yyyyMMdd must be exactly eight digits and land in a plausible year: chrono would
+# otherwise read a seven-digit id, or year 1005 out of an account number.
+COMPACT_DATE = r"^\d{8}$"
+COMPACT_FORMAT = "%Y%m%d"
+PLAUSIBLE_YEARS = (1900, 2100)
+# A five-digit Excel serial day number (46030 is 2026-01-08). A column of nothing but
+# five-digit numbers is indistinguishable from ZIPs or codes, so serials are read as
+# dates only in a column that already holds dates written some other way.
+EXCEL_SERIAL = r"^\d{5}$"
 
 
 @dataclass
@@ -115,6 +129,17 @@ def _decide_kind(name, present) -> tuple[str, list[str]]:
     notes: list[str] = []
     kind = signals.modal_type(sampled)
     types = {typing_utils.infer_type(value) for value in sampled}
+
+    # Checked before the code heuristic: a column of eight-digit yyyyMMdd values is
+    # constant-width and near-unique, which is exactly what a code looks like. A column
+    # of nothing but numbers must resolve *entirely* -- one value that is not a real
+    # calendar date and it is an identifier, not a date.
+    if kind == typing_utils.INT:
+        texts = _texts(sampled)
+        _parsed, _primary, share = _ladder_parse(pl.Series("s", texts, dtype=pl.String))
+        numeric_only = all(text is None or text.isdigit() for text in texts)
+        if share >= (1.0 if numeric_only else DATE_SHARE_THRESHOLD):
+            return typing_utils.DATE, notes
 
     if kind in (typing_utils.INT, typing_utils.FLOAT) and looks_like_a_code(sampled):
         notes.append(f"column '{name}' kept as text: values look like codes")
@@ -291,8 +316,39 @@ def _ladder_parse(series: pl.Series) -> tuple[pl.Series, str | None, float]:
         if parsed.null_count() < before and primary is None:
             primary = fmt
 
+    before = parsed.null_count()
+    parsed = parsed.fill_null(_compact_dates(series))
+    if parsed.null_count() < before and primary is None:
+        primary = COMPACT_FORMAT
+
+    # Serials only count once something else in the column has proved it holds dates.
+    if parsed.null_count() < series.len():
+        parsed = parsed.fill_null(excel_serials(series))
+
     resolved = parsed.len() - parsed.null_count()
     return parsed, primary, resolved / present
+
+
+def _compact_dates(series: pl.Series) -> pl.Series:
+    """yyyyMMdd, for exactly eight digits in a plausible year; null otherwise."""
+    low, high = PLAUSIBLE_YEARS
+    value = pl.col("v").str.strip_chars()
+    date = value.str.to_date(COMPACT_FORMAT, strict=False)
+    return pl.DataFrame({"v": series}).select(
+        pl.when(value.str.contains(COMPACT_DATE) & date.dt.year().is_between(low, high))
+        .then(date)
+        .otherwise(None)
+    ).to_series()
+
+
+def excel_serials(series: pl.Series) -> pl.Series:
+    """Five-digit Excel serial day numbers as dates (1899-12-30 plus n); null otherwise."""
+    value = pl.col("v").str.strip_chars()
+    days = pl.when(value.str.contains(EXCEL_SERIAL)).then(value).otherwise(None).cast(pl.Int32)
+    # polars stores a Date as days since 1970-01-01, so the Excel epoch is an offset.
+    return pl.DataFrame({"v": series}).select(
+        (days + _EXCEL_OFFSET).cast(pl.Date)
+    ).to_series()
 
 
 def _ladder_order(series: pl.Series, present: int) -> list[str]:
@@ -340,7 +396,9 @@ def _as_date(name, values, notes) -> Coerced:
         for text, result in zip(texts, parsed)
         if text is not None and result is None
     ]
-    return Coerced(parsed.cast(pl.String), typing_utils.DATE, failures, notes)
+    # Kept as a real Date so the frame's schema says what the column is: the metadata
+    # reads its datatype from here. write_csv renders a Date as YYYY-MM-DD.
+    return Coerced(parsed.alias(name), typing_utils.DATE, failures, notes)
 
 
 def _note_ambiguity(name, series, chosen, present, share, notes) -> None:

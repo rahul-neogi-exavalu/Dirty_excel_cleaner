@@ -266,92 +266,41 @@ a perfectly readable grid.
 
 ---
 
-## 4. Multiple sheets or tables — which ones need joining?
+## 4. Multiple sheets or tables — what comes out?
+
+### One table in, one file out
+
+A file may contain several sheets — say, a sheet of transactions and a sheet of producer
+addresses. **Each one comes out as its own cleaned file**, with its own summary. Three
+sheets with different columns give three files and three summaries.
+
+The tool does **not** join sheets together. Deciding that two sheets describe the same
+producers, and which column links them, is a judgement about meaning — and when the
+names don't quite agree (`MJC ` in one sheet, `MJC Agency Group` in the other), any
+automatic match is a guess that can attach the wrong address to a record without anyone
+noticing. Keeping the sheets separate leaves that decision to whoever loads the data,
+with a key they chose.
+
+The tool still notes what kind of table each one looks like — transactions or reference
+details — in the audit, for a reviewer. It does not change what is produced.
+
+## 5. Which sheets get appended together?
 
 ### The question
 
-A file may contain a sheet of transactions and a separate sheet of reference details —
-producer addresses, states, postcodes. Those need to be **joined**: the reference details
-attached to each transaction.
-
-### Step one: what kind of table is each one?
-
-| Kind | How it is recognised | Typical example |
-|---|---|---|
-| **Transaction table** | Contains genuine amounts — figures that vary, repeat or go negative — alongside a reference number or a date. | Policy premiums by producer |
-| **Reference table** | Small. Every row a distinct entity. Descriptive details only, no amounts. | Producer → address, state, postcode |
-
-Two things it deliberately **ignores**:
-
-- **The sheet's name.** A tab called "Producer Lookup" that turns out to contain
-  transactions is treated as transactions. The label is recorded as a hint and nothing more.
-- **Where it sits.** A reference table placed *above* the transactions is still a reference
-  table.
-
-A note on telling amounts from codes: both are numbers and both can be all-distinct — a
-premium is as unique as a postcode. What separates them is that amounts have decimals, or
-repeat, or go negative. A postcode does none of those. **A negative value settles it
-outright**, because reference numbers and postcodes are never negative.
-
-### Step two: finding what to join on
-
-This is where not having a fixed list of names genuinely pays off.
-
-The transaction sheet calls the column `Producer/AgencyName`. The reference sheet calls it
-`Producer`. **Those names do not match** — any approach based on matching column names
-fails here.
-
-So the tool ignores the names entirely and **compares the contents**. It looks for the pair
-of columns, one from each table, whose *values* overlap most. `Pinnacle Agency Partners`
-appearing in both is far stronger evidence than any similarity between the two headings.
-
-### Step three: matching values that don't quite agree
-
-Real data is untidy. The transaction sheet says `MJC ` with a trailing space; the reference
-sheet says `MJC Agency Group`.
-
-Close matches are scored, and a match is accepted automatically only when it is both
-**strong** and **clearly better than the runner-up**.
-
-That second condition is not a technicality — it is the difference between a join you can
-trust and one you can't:
-
-| Value being matched | Best match | Runner-up | Outcome |
-|---|---|---|---|
-| `MJC ` | MJC Agency Group — very strong | Metro Agency Group — weak | **Accepted.** Clear winner. |
-| `Agency Group` | Metro Agency Group — very strong | MJC Agency Group — **equally strong** | **Rejected, flagged.** Two equally good answers means there is no answer. |
-| `Brown & Brown` | nothing close | — | **Rejected, flagged.** Not in the reference data. |
-
-Without the runner-up test, the middle row would have been matched to whichever candidate
-happened to be checked first — a silent, invisible, wrong answer.
-
-### Step four: joining safely
-
-**A transaction row is never dropped because its reference lookup failed.** Every
-transaction survives; unmatched ones simply come through with the reference fields empty,
-and the unmatched value is listed in the audit for someone to resolve.
-
-The reference table is also written out separately, because it is useful in its own right.
-
----
-
-## 5. Which sheets get stacked together?
-
-### The question
-
-A file may hold the same report split across sheets — `Jan` and `Feb`, or a second sheet
-that simply continues where the first ran out of rows. These need to be **stacked**: laid
-end to end into one table.
+A file may hold the same report split across sheets — `Jan` and `Feb`. These can be
+**appended**: laid end to end into one table.
 
 ### How it decides
 
-Two tables are stacked when they are the same shape carrying the same kind of content:
+Two sheets are appended **only when their column headings match exactly** — every
+heading present in both, none extra. The columns may be in a different order; they are
+lined up by name.
 
-- **Same column names**, or
-- **Same number of columns with the same kinds of content in the same order** — the fallback
-  for when two months were exported with slightly different headings. When it is this
-  second route that decides, the result is flagged as lower confidence, because the names
-  did not agree.
+Nothing less counts. Seven of eight headings in common is not enough, and neither is two
+sheets that look alike but are headed differently. Those come out as separate files. It
+is better to hand back two files that someone chooses to combine than one file that was
+combined on a guess.
 
 ### The provenance column — why it exists
 
@@ -387,6 +336,9 @@ content, never on sheet order — so a continuation is recognised whether it com
 after the sheet it belongs to. The adoption is recorded in the audit, naming the sheet the
 names came from.
 
+Because those names were borrowed rather than read from the sheet, the continuation is
+**not** appended: it comes out as its own file, with the right column names.
+
 ---
 
 ## What happens when the tool isn't sure
@@ -402,21 +354,19 @@ disguises the second as the first.
 | No header can be found | Names the columns by position and says so |
 | Orientation is a close call | Uses the fallback rule and marks it "decided by shape" |
 | A thin row doesn't add up | Keeps the row, at reduced confidence |
-| A close match has two equally good candidates | Refuses to match, lists the value for review |
-| A reference lookup finds nothing | Keeps the transaction, leaves the reference fields empty, lists the value |
+| Two sheets look alike but their headings differ | Keeps them as separate files rather than appending |
 | A column is entirely empty | Says whether the source was blank or the values are formulas Excel never saved |
 
 Every removed row is recorded with **the evidence**, not a label. The audit says
 *"this figure equals the sum of the three rows above it"* — not *"matched subtotal
 pattern"*. A reviewer can check the claim.
 
-**Where to look first.** Every file's audit carries three headline counts:
+**Where to look first.** Every file's audit carries two headline counts:
 
 - tables where no header could be found
 - orientations that were a close call
-- lookup values that need a human decision
 
-If all three are zero, the file went through cleanly.
+If both are zero, the file went through cleanly.
 
 ---
 
@@ -436,6 +386,35 @@ the tool copes, because none of them were ever the deciding vote. One thing a CS
 better than Excel: an identifier like `08085` keeps its leading zero, which Excel would
 have thrown away before the tool ever saw the file.
 
+## What you get back
+
+For every table the tool produces, it hands back two files that belong together, plus one
+audit report per input file:
+
+- **the cleaned table** itself
+- **a summary of that table**, one line per column. It shows the column's type, how many
+  values it holds, how many are distinct, and what share is empty. For figures and dates
+  it also gives the smallest and the largest, and for figures the total. Each line names
+  the original file and the sheet the column came from.
+
+Both files are named after the original file and stamped with the same unique job
+number, so the two are easy to pair. The audit report uses those same final names.
+
+The summary is the quickest check that a file came through sensibly. A column that should
+be full but shows 40% empty, or a premium total nowhere near the figure you expected, is
+visible before anyone opens the table. Where a figure does not apply, such as the total of
+a name column, the cell is simply left empty rather than filled with "NA".
+
+**The type column is worth reading.** The tool decides what each column is from its
+contents, and keeps reference codes as text: centre numbers, postcodes, account numbers.
+Those look like numbers but must never be added up or lose a leading zero. The summary
+also shows what a loading tool would guess on its own if left to itself. Where the two
+disagree, the loader should be told the type rather than left to guess.
+
+When sheets were appended into one table, the summary is worked out separately for each
+original sheet and labelled with its name, so January and February can be compared side by
+side.
+
 ## What happens when a file cannot be read at all
 
 A folder of five hundred files will contain a few that are not really spreadsheets: a
@@ -443,14 +422,14 @@ download that was cut short, a workbook someone password-protected, an old `.xls
 saved in the wrong format.
 
 **A bad file costs you that file and nothing else.** Each workbook is handled on its own,
-so one unreadable file no longer stops the run and skip everything after it. The report
+so one unreadable file no longer stops the run and skips everything after it. The report
 names the file and says which of these it was, because each calls for a different response:
 
 | What the report says | What to do about it |
 |---|---|
 | corrupt | ask for the file again; the copy you have is incomplete |
 | password-protected | it must be opened and re-saved without the password |
-| unsupported format | re-save it as `.xlsx` |
+| unsupported format | an old `.xls`, `.xlsb` or `.ods`; re-save it as `.xlsx` |
 | too large | it exceeds the configured ceiling and was refused rather than attempted |
 
 Telling these apart matters. A password-protected file and a truly corrupt one produce the
@@ -523,6 +502,6 @@ confirmation — no hand-built expected answer required.
 and the whole test set re-scored, which shows exactly which files depend on it. This stops
 any assumption quietly becoming load-bearing without anyone noticing.
 
-That check has caught our own measurement twice — cases where switching a rule off appeared
-harmless because the scoring couldn't see the damage. Both gaps are now closed with direct
-checks. A test that cannot fail is not measuring anything.
+That check has caught our own measurement three times — cases where switching a rule off
+appeared harmless because the scoring couldn't see the damage. Each gap is now closed with
+a direct check. A test that cannot fail is not measuring anything.

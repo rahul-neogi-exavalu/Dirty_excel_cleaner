@@ -259,7 +259,9 @@ def test_mixed_date_formats_are_normalised_and_the_invalid_one_reported():
     formats = ["01/01/2026", "2026-01-08", "Jan 22 2026", "2026/01/29", "not a date", "02-12-2026"]
     rows = [HEADER] + [record(index)[:6] + [formats[index]] + [5.0] for index in range(6)]
     result = one(rows)
-    dates = result.frame["accountingeffectivedate"].to_list()
+    column = result.frame["accountingeffectivedate"]
+    assert column.dtype == pl.Date
+    dates = column.cast(pl.String).to_list()
     assert dates[:2] == ["2026-01-01", "2026-01-08"]
     assert dates[4] is None
     assert any(f["reason"] == "unparseable date" for f in result.trace["coercion_failures"])
@@ -333,3 +335,66 @@ def test_presentation_is_still_stripped_from_genuine_numbers():
 
     result = coerce.coerce_column("amount", ["$1,234.56", "(1,000.00)", "2 500", "99%"])
     assert result.series.to_list() == [1234.56, -1000.0, 2500.0, 99.0]
+
+
+# --------------------------------------------------------------------------- #
+# Date normalisation to YYYY-MM-DD
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-01-08 10:30:00",  # yyyy-MM-dd HH:mm:ss
+        "2026-01-08",  # yyyy-MM-dd
+        "01/08/2026",  # MM/dd/yyyy
+        "1/8/2026",  # M/d/yyyy
+        "20260108",  # yyyyMMdd
+        "01-08-2026",  # MM-dd-yyyy
+        "1-8-2026",  # M-d-yyyy
+        "46030",  # Excel serial, in a column that already holds dates
+    ],
+)
+def test_every_supported_date_format_is_written_as_iso(value):
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("when", ["2026-02-01", "03/15/2026", value])
+    assert result.kind == "date"
+    assert result.series.dtype == pl.Date
+    assert result.series.cast(pl.String).to_list()[-1] == "2026-01-08"
+    assert not result.failures
+
+
+def test_a_mixed_format_column_normalises_every_value():
+    from ahi_clean import coerce
+
+    values = ["2026-01-08 10:30:00", "01/09/2026", "1-10-2026", 20260111, 46035.0, None]
+    result = coerce.coerce_column("when", values)
+    assert result.series.cast(pl.String).to_list() == [
+        "2026-01-08", "2026-01-09", "2026-01-10", "2026-01-11", "2026-01-13", None,
+    ]
+
+
+def test_a_column_of_compact_yyyymmdd_numbers_is_a_date_column():
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("when", [20260108, 20260109, 20251231, 20240229])
+    assert result.series.cast(pl.String).to_list() == ["2026-01-08", "2026-01-09", "2025-12-31", "2024-02-29"]
+
+
+def test_eight_digit_identifiers_are_not_read_as_dates():
+    """One value that is no calendar date and a numeric column is an identifier."""
+    from ahi_clean import coerce
+
+    for values in ([10050001, 10050002, 10050003], [20260108, 20261399, 20260110]):
+        result = coerce.coerce_column("account", values)
+        assert result.kind != "date", values
+
+
+def test_a_column_of_only_five_digit_numbers_is_not_read_as_serial_dates():
+    """ZIPs and codes look exactly like serials; nothing in the column says 'date'."""
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("zip", [75202, 46030, 90210, 10001])
+    assert result.kind != "date"
+    assert result.series.to_list() == ["75202", "46030", "90210", "10001"]

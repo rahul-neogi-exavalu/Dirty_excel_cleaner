@@ -1,4 +1,4 @@
-"""Workbook behaviour: roles, stacking, joining, the CLI, and the audit report.
+"""Workbook behaviour: roles, appending, the CLI, and the audit report.
 
 Built in memory, so swapping the sample corpus cannot break what these pin.
 """
@@ -68,47 +68,27 @@ def test_a_table_of_whole_distinct_amounts_is_a_fact_when_any_is_negative():
 
 
 # --------------------------------------------------------------------------- #
-# Joins
+# No joins: one CSV per table
 # --------------------------------------------------------------------------- #
 
 
-def test_a_fact_is_joined_to_its_lookup_and_the_lookup_also_ships():
-    outputs, report = plan_workbook([fact_table(), lookup_table()], "book")
-    kinds = {output.kind: output for output in outputs}
+def test_a_fact_and_a_lookup_ship_as_separate_csvs_and_are_never_joined():
+    fact, lookup = fact_table(), lookup_table()
+    outputs, report = plan_workbook([fact, lookup], "book")
 
-    assert "joined" in kinds and "dimension" in kinds
-    assert {"address", "state", "zip_code"} <= set(kinds["joined"].frame.columns)
-    # The two columns are named differently in their own files; the pair is found from
-    # the values, never from the labels.
-    assert report["join"]["join_key"]["fact_column"] == "producer_agencyname"
-    assert report["join"]["join_key"]["dimension_column"] == "producer"
-
-
-def test_a_lookup_is_recognised_even_when_it_comes_first():
-    """Position on the sheet says nothing about what a table is."""
-    outputs, _report = plan_workbook([lookup_table(), fact_table()], "book")
-    assert {output.kind for output in outputs} == {"joined", "dimension"}
+    assert [output.kind for output in outputs] == ["standalone", "standalone"]
+    assert len({output.name for output in outputs}) == 2
+    by_sheet = {output.sheets[0]: output for output in outputs}
+    assert list(by_sheet[fact.label].frame.columns) == list(fact.frame.columns)
+    assert list(by_sheet[lookup.label].frame.columns) == list(lookup.frame.columns)
+    assert "join" not in report
 
 
-def test_a_join_never_loses_a_fact_row():
-    fact = fact_table()
-    outputs, _report = plan_workbook([fact, lookup_table()], "book")
-    joined = [output for output in outputs if output.kind == "joined"][0]
-    assert len(joined.frame) == len(fact.frame)
-
-
-def test_unresolved_lookup_values_are_reported_not_silently_merged():
-    """A producer the lookup has never heard of keeps its row and is flagged."""
-    rows = [HEADER] + records(8)
-    rows[1][2] = "Brown & Brown"  # absent from LOOKUP_ROWS
-    fact = one(rows)
-    outputs, report = plan_workbook([fact, lookup_table()], "book")
-
-    needs_review = report["join"]["needs_review"]
-    assert any(entry["source_value"] == "Brown & Brown" for entry in needs_review)
-    assert all(entry["matched_value"] is None for entry in needs_review)
-    joined = [output for output in outputs if output.kind == "joined"][0]
-    assert len(joined.frame) == len(fact.frame)
+def test_n_differently_headed_sheets_give_n_csvs():
+    codes = one([["Code", "Label", "Rank"]] + [[f"C{i}", f"label {i}", i] for i in range(5)], name="Codes")
+    outputs, _report = plan_workbook([fact_table(), lookup_table(), codes], "book")
+    assert len(outputs) == 3
+    assert all(output.kind == "standalone" for output in outputs)
 
 
 # --------------------------------------------------------------------------- #
@@ -171,20 +151,55 @@ def test_stacked_periods_are_not_deduplicated():
     assert len(output.frame) == 12
 
 
-def test_tables_with_the_same_shape_but_different_labels_stack_at_low_confidence():
+def test_tables_with_the_same_shape_but_different_labels_are_not_appended():
+    """A matching type profile is not a header match."""
     left = one([HEADER] + records(6), name="Jan")
     right = one([HEADER] + records(6), name="Feb")
     right.frame = right.frame.rename({name: f"{name}_b" for name in right.frame.columns})
-    stackable, detail = orchestrate._stack_decision(left, right)
-    assert stackable is True
-    assert detail["decided_by"] == "type_profile"
-    assert detail["confidence"] == "low"
+    outputs, _report = plan_workbook([left, right], "book")
+    assert [output.kind for output in outputs] == ["standalone", "standalone"]
+
+
+def test_a_partial_header_match_is_not_appended():
+    """Seven of eight names matching is not enough: only 100% appends."""
+    left = one([HEADER] + records(6), name="Jan")
+    right = one([HEADER] + records(6), name="Feb")
+    right.frame = right.frame.rename({"commission": "commission_rate"})
+    outputs, _report = plan_workbook([left, right], "book")
+    assert [output.kind for output in outputs] == ["standalone", "standalone"]
+
+
+def test_reordered_columns_with_identical_headers_are_appended_in_the_first_order():
+    left = one([HEADER] + records(6), name="Jan")
+    right = one([HEADER] + records(6), name="Feb")
+    right.frame = right.frame.select(list(reversed(right.frame.columns)))
+    [output] = plan_workbook([left, right], "book")[0]
+    assert output.kind == "stacked"
+    assert list(output.frame.columns) == [orchestrate.SOURCE_SHEET_COLUMN] + list(left.frame.columns)
+    assert len(output.frame) == 12
+
+
+def test_only_the_matching_sheets_are_appended():
+    january = one([HEADER] + records(6), name="Jan")
+    february = one([HEADER] + records(6), name="Feb")
+    outputs, _report = plan_workbook([january, lookup_table(), february], "book")
+    assert sorted(output.kind for output in outputs) == ["stacked", "standalone"]
+    stacked = [output for output in outputs if output.kind == "stacked"][0]
+    assert stacked.sheets == [january.label, february.label]
+
+
+def test_a_continuation_with_adopted_names_is_not_appended():
+    """Borrowed names are not a header match; the continuation ships on its own."""
+    first = one([HEADER] + records(10), name="Report")
+    second = one(records(10, start=10), name="Continued")
+    outputs, _report = plan_workbook([first, second], "book")
+    assert [output.kind for output in outputs] == ["standalone", "standalone"]
+    assert list(second.frame.columns) == list(first.frame.columns)
 
 
 def test_unrelated_tables_are_not_stacked():
-    left, right = fact_table().frame, lookup_table().frame
-    assert orchestrate.name_overlap(left, right) < orchestrate.NAME_OVERLAP_THRESHOLD
-    assert orchestrate.profile_overlap(left, right) < orchestrate.PROFILE_OVERLAP_THRESHOLD
+    outputs, _report = plan_workbook([fact_table(), lookup_table()], "book")
+    assert "stacked" not in {output.kind for output in outputs}
 
 
 def test_a_single_table_workbook_ships_standalone():

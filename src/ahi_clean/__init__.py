@@ -9,6 +9,5 @@ __all__ = [
     "rowclass",
     "extract",
     "orchestrate",
-    "join",
     "audit",
 ]

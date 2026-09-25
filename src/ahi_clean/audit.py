@@ -1,8 +1,7 @@
 """Assemble and write the per-workbook audit report.
 
 The report is the deliverable that makes the cleaning reviewable: every row the
-pipeline threw away, every structural guess it made, and every join value that a
-human still needs to look at.
+pipeline threw away and every structural guess it made.
 """
 
 from __future__ import annotations
@@ -14,8 +13,6 @@ from pathlib import Path
 
 def build_report(source_path, sheet_traces, workbook_report, outputs, image_count) -> dict:
     """Combine sheet traces and workbook decisions into one report."""
-    needs_review = list((workbook_report.get("join") or {}).get("needs_review", []))
-
     return {
         "source_file": str(source_path),
         "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
@@ -24,7 +21,10 @@ def build_report(source_path, sheet_traces, workbook_report, outputs, image_coun
         "workbook": workbook_report,
         "outputs": [
             {
-                "file": f"{output.name}.csv",
+                "file": output.file or f"{output.name}.csv",
+                "metadata_file": output.metadata_file,
+                "job_id": output.job_id,
+                "table": output.name,
                 "kind": output.kind,
                 "source_sheets": output.sheets,
                 "rows": int(len(output.frame)),
@@ -37,7 +37,6 @@ def build_report(source_path, sheet_traces, workbook_report, outputs, image_coun
             "dropped_by_classification": _count_classifications(sheet_traces),
             "coercion_failures": sum(len(trace.get("coercion_failures", [])) for trace in sheet_traces),
             "validation_findings": sum(len(trace.get("validation", [])) for trace in sheet_traces),
-            "join_values_needing_review": len(needs_review),
             "contract_violations": len(workbook_report.get("contract_violations", [])),
             "tables_found": len(sheet_traces),
             "headerless_tables": sum(
@@ -47,7 +46,6 @@ def build_report(source_path, sheet_traces, workbook_report, outputs, image_coun
                 1 for trace in sheet_traces if not trace.get("orientation", {}).get("confident", True)
             ),
         },
-        "needs_human_review": needs_review,
     }
 
 

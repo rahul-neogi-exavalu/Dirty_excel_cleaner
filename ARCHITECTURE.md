@@ -1,7 +1,7 @@
 # Architecture — AHI Schema-Free Cleaning Pipeline
 
-Technical reference for the pipeline that converts report-shaped Excel exports into
-table-ready CSVs.
+Technical reference for the pipeline that converts report-shaped Excel exports and
+delimited text files into table-ready CSVs, each with a per-column metadata summary.
 
 Built on **polars**. Measured: **1,000,000 rows in 93 seconds** on a single sheet.
 
@@ -28,23 +28,24 @@ For the same decisions explained without the machinery, see
 ```mermaid
 flowchart LR
     XLSX[".xlsx workbook"] --> R["reader.py<br/>cells · formatting · formulas"]
+    DLM[".csv · .tsv · .txt"] --> D["delimited.py<br/>delimiter + encoding"]
+    D --> R
     R --> P["pivot.py<br/>matrix? then do not orient"]
     P --> O1["extract.py<br/>orient the sheet"]
     O1 --> G["geometry.py<br/>sheet → table regions"]
     G --> E["extract.py<br/>region → tidy frame"]
     E --> H["header.py"]
     E --> RC["rowclass.py"]
-    E --> ORC["orchestrate.py<br/>roles + relationships"]
-    ORC --> J["join.py<br/>value-based keys"]
-    ORC --> CSV["cleaned/*.csv"]
-    J --> CSV
-    CSV --> META["clean_metadata.py<br/>per-file column summaries"]
+    E --> ORC["orchestrate.py<br/>roles + exact-header appends"]
+    ORC --> CSV["cleaned/source_uuid.csv<br/>one per table"]
+    ORC --> META["metadata.py<br/>typed frame → column stats"]
     META --> MCsv["cleaned/source_metadata_uuid.csv"]
     E -. trace .-> A["audit.py"]
     ORC -. decisions .-> A
     A --> JSON["audit/*.audit.json"]
 
     style XLSX fill:#e8e8e8,stroke:#666
+    style DLM fill:#e8e8e8,stroke:#666
     style CSV fill:#d4edda,stroke:#28a745
     style MCsv fill:#d4edda,stroke:#28a745
     style JSON fill:#fff3cd,stroke:#d39e00
@@ -67,39 +68,10 @@ from. Nothing in the tree consults a field name.
 | `contracts.py` | Checks that refuse, rather than merely report |
 | `failures.py` | Why a workbook could not be read, in terms someone can act on |
 | `extract.py` | Sheet orientation, region sequencing, gutter realignment, types, validation |
-| `orchestrate.py` | Table roles, stack/join relationships |
-| `join.py` | Value-based key discovery, fuzzy resolution with a margin rule |
+| `orchestrate.py` | Table roles (recorded), exact-header appends, one output per table otherwise |
 | `audit.py` | Every decision, with its score and its reason |
-| `cli.py` | Per-file error boundaries, parallel workers, contract gate, CSV writing |
-| `clean_metadata.py` | Per-cleaned-file transposed column statistics and sheet information |
-
-### Metadata companion files
-
-After the existing cleaning pipeline writes its normal CSV outputs, `clean.py` invokes
-`clean_metadata.py`. It writes one companion file beside each cleaned CSV. Each output
-gets a UUID job identifier, using the names
-`<sourcefilename>_<job_id>.csv` and `<sourcefilename>_metadata_<job_id>.csv`. Metadata
-files are skipped when the output directory is scanned, so rerunning the command does
-not create metadata files for metadata files.
-
-Each metadata row describes one cleaned column. The fields are written in this order:
-
-| Field | Meaning |
-|---|---|
-| `header_name` | The cleaned CSV column name |
-| `distinct_count` | Number of distinct non-empty values in that column |
-| `count` | Number of non-empty values in that column |
-| `total_row_count` | Number of rows represented for the sheet group |
-| `min` | Minimum date or numeric value; blank for other types |
-| `max` | Maximum date or numeric value; blank for other types |
-| `sum` | Sum of numeric values; blank for other types |
-| `null_percentage` | Percentage of rows with an empty value, regardless of datatype |
-| `sheet_info` | Corresponding cleaned CSV filename |
-
-For stacked outputs, rows are still grouped by the generated `source_sheet` column when
-calculating per-sheet statistics, but `sheet_info` consistently records the corresponding
-cleaned CSV filename. The metadata generator uses the audit's recorded output columns if
-a cleaned CSV does not expose a readable header row.
+| `cli.py` | Per-file error boundaries, parallel workers, contract gate, CSV + metadata writing, job IDs |
+| `metadata.py` | Per-column metadata from the typed frame, written beside each CSV (§14) |
 
 **Ordering is load-bearing in four places.** A pivot is recognised *before* orientation,
 because a matrix reads consistently both ways and the tiebreak would stand it on its side.
@@ -186,7 +158,7 @@ flowchart TD
     SAME --> CS["column runs, per region"]
     NEW --> CS
     ATT --> CS
-    CS --> EX{"same rows exactly,<br/>or gap ≤ 1 col?"}
+    CS --> EX{"same rows exactly, or<br/>gap ≤ 1 col and ≥75% row overlap?"}
     EX -->|yes| GUT["gutter — drop the empty columns"]
     EX -->|no| SPLIT["side-by-side tables — split"]
     GUT --> F{"modal fill ≥ 2<br/>and ≥ 2 rows?"}
@@ -370,6 +342,12 @@ structural safeguards:
   formats has no single lexical signature, so the type lattice sees only "text".
   Parseability is the honest test, and the stragglers become reportable failures rather
   than the column's true nature.
+- **a numeric column that resolves *entirely* as dates** → a date column. Checked before the
+  code rule, because eight-digit `yyyyMMdd` values are constant-width and near-unique,
+  which is exactly what a code looks like. One value that is not a calendar date and it
+  is an identifier.
+
+Every date column is written as `YYYY-MM-DD`; a time of day is dropped.
 
 A float column whose every value is whole is written as `Int64`, so a ZIP does not land in
 the CSV as `75202.0`.
@@ -389,14 +367,24 @@ a human. The pipeline stops at per-file-correct structure and records every infe
 
 ---
 
-## 7. Table roles and relationships
+## 7. Table roles, appends and outputs
+
+**One CSV per table, unless headers match exactly.** Every table the workbook yields
+ships as its own CSV (and so gets its own metadata file), with one exception: tables whose
+column headers match **100%** are appended into one. Tables are never joined.
 
 | Decision | Signal |
 |---|---|
-| **FACT** | continuous measures alongside a key or a date column |
-| **DIMENSION** | small, one unique entity per row, no continuous measures |
-| **STACK** | ≥90% matching column names, **or** identical width with ≥90% matching type profile |
-| **JOIN** | one FACT + one DIMENSION with a discoverable value-based key |
+| **STACK** (append) | the tables' detected headers are the same set of column names — every name, no threshold |
+| standalone | everything else, one CSV per table |
+| FACT / DIMENSION | recorded in the audit for review; no longer decides any output |
+
+Order does not matter: a sheet that lists the same columns in a different order still
+appends, and its columns are reordered to match the first table's. Anything short of an
+exact match does not append — seven of eight names in common, or the same width with the
+same per-column types under different labels, both ship as separate CSVs. When a workbook
+has several groups of identically-headed tables, each group appends on its own and the
+rest ship standalone.
 
 A **measure** is a numeric column that is fractional, or repeats, **or goes negative**.
 Distinctness alone cannot separate a premium from a ZIP — both are unique. A negative value
@@ -418,6 +406,12 @@ That sheet's names are adopted, matched on shape and type rather than on positio
 name, so a continuation is recognised whether it comes before or after the sheet it belongs
 to. The adoption is recorded in the audit, naming the donor.
 
+**Adopted names never trigger an append.** The match that found the donor is a ≥90%
+type-profile match, not a header match — the continuation has no header of its own. It
+ships as its own CSV, correctly named. The same goes for a table named positionally
+(`column_1`, `column_2`, ...): two headerless tables never append because their placeholder
+names agree.
+
 Uniqueness checks are scoped **within a region**, and a key column is nominated by *shape*
 rather than distinctness: the thing being looked for is a duplicate, so requiring a high
 distinct ratio would mean a column stops counting as a key exactly when it has the problem
@@ -425,43 +419,18 @@ worth reporting.
 
 ---
 
-## 8. Join key discovery and the margin rule
+## 8. Why there are no joins
 
-Keys are found from **values, never header names** — load-bearing rather than merely
-principled: without a schema the two columns are literally called `producer_agencyname`
-and `producer`, and no name matching would pair them.
+An earlier version joined one transactional table to one lookup on a key discovered from
+the values, with fuzzy matching and a runner-up margin. It was removed: a join decides
+that two sheets describe the same entities and merges them, which is a semantic decision
+the pipeline cannot verify from structure alone, and a fuzzy key match that is wrong
+silently attaches the wrong reference details to a record. Each sheet now ships as its own
+table, so whatever joins them downstream does so with a key someone chose.
 
-Two passes, for cost. Normalized exact set-overlap across all column pairs first; fuzzy
-scoring, which is quadratic, only runs on what is left, and only against dimension columns
-distinct enough to be a key.
-
-```mermaid
-flowchart TD
-    V["fact value"] --> EX{"exact match after<br/>trim + casefold?"}
-    EX -->|yes| AUTO["auto_resolved"]
-    EX -->|no| SC["token_set_ratio vs<br/>every dimension key"]
-    SC --> B{"best ≥ 90?"}
-    B -->|no| L{"best ≥ 60?"}
-    L -->|yes| LOW["low_confidence — flag"]
-    L -->|no| UNR["unresolved — flag"]
-    B -->|yes| M{"best − runner-up ≥ 10?"}
-    M -->|yes| AUTO
-    M -->|no| AMB["ambiguous — flag"]
-
-    style AUTO fill:#d4edda,stroke:#28a745
-    style AMB fill:#f8d7da,stroke:#dc3545
-```
-
-`token_set_ratio` returns 100 whenever one side's tokens are a subset of the other's, so a
-generic value clears any absolute threshold against several candidates at once:
-
-```
-'MJC '         → MJC Agency Group=100 , Metro Agency Group= 10   margin 90  ✓ resolve
-'Agency Group' → Metro Agency Group=100, MJC Agency Group=100    margin  0  ✗ flag
-'Brown & Brown'→ Apex Insurance Brokers=34                       below 60  ✗ flag
-```
-
-**Joins are always `how='left'`.** A fact row never disappears because its lookup missed.
+The same reasoning is why appends need an exact header match: a 90% threshold appends two
+tables that are *probably* the same report, and "probably" is a guess made on the
+reader's behalf.
 
 ---
 
@@ -555,7 +524,7 @@ and has been swapped three times during development.
 | Suite | Scope | Stability |
 |---|---|---|
 | `test_scenarios.py` | Every workbook currently in `sample_files_uncleaned/` | Parametrized over whatever is present; new files are picked up with nothing to register, and no assertion pins a file count |
-| everything else | Header, geometry, row classification, types, joins, orchestration, pivots | Sheets built **in memory**; never names a corpus file, so swapping the samples cannot break them |
+| everything else | Header, geometry, row classification, types, appends, orchestration, pivots | Sheets built **in memory**; never names a corpus file, so swapping the samples cannot break them |
 
 That split is itself a fix. Behaviour tests originally named corpus files, and each corpus
 swap broke a chunk of the suite for reasons that had nothing to do with the code.
@@ -576,7 +545,9 @@ happens to a batch containing a corrupt, encrypted, legacy and empty workbook, a
 every output contract *fires* on deliberately broken input, and checks that a parallel run
 produces byte-identical output to a sequential one under both executors.
 
-156 tests. `python -m pytest`. Measure with `python tools/benchmark.py`.
+170 tests with an empty corpus, of which the 16 that need real workbooks skip; each
+workbook in `sample_files_uncleaned/` adds its own scenario tests.
+`python -m pytest`. Measure with `python tools/benchmark.py`.
 
 ---
 
@@ -595,7 +566,18 @@ implementation on a 4,000-row sheet:
 | `_mostly_dates` during header scoring | 28% | scanned all 4,000 values to answer a yes/no question |
 
 The format is a property of the column, so it is decided once. `coerce.py` applies a
-**format ladder**: ISO, then the unambiguous written forms, then the ambiguous pair. What
+**format ladder**: ISO (with or without a time), then the unambiguous written forms, then
+the ambiguous pairs (`MM/dd` vs `dd/MM`, slashed and dashed, single-digit month and day
+accepted), then two all-digit rungs:
+
+| Rung | Accepts | Guard |
+|---|---|---|
+| `yyyyMMdd` | exactly eight digits | year within 1900–2100 |
+| Excel serial | exactly five digits, as 1899-12-30 + n days (`46030` → 2026-01-08) | only once another rung has resolved something in the column |
+
+The serial guard exists because a column of bare five-digit numbers is equally a column of
+ZIPs or centre codes, and nothing in the values tells them apart. In a column that already
+holds dates, a five-digit number is a date Excel wrote as its serial. What
 counts is the share the ladder resolves *as a whole*, not what its best single rung does.
 A report whose dates arrive in four formats resolves fully while no single format covers a
 quarter of it, and judging on the best single rung would call that column text and lose
@@ -645,7 +627,7 @@ trace:
 |---|---|
 | `corrupt` | not a readable zip |
 | `encrypted` | an OLE container. A password-protected .xlsx raises the *same* error as a corrupt one, so the magic bytes decide -- telling someone their file is corrupt when it is merely locked sends them looking in the wrong place. |
-| `unsupported_format` | .xls, .xlsb, .ods, .csv, named individually so the message can say what to convert from |
+| `unsupported_format` | .xls, .xlsb, .ods, named individually so the message can say what to convert from. (.csv, .tsv and .txt are read directly — see `delimited.py`.) |
 | `too_large` | beyond the configured cell ceiling |
 | `missing` / `unexpected` | gone, or something nobody anticipated; the latter keeps its traceback in a file |
 
@@ -706,7 +688,77 @@ cannot be driven from a REPL or `python -c`. Threads work everywhere.
 
 ---
 
-## 14. Known limits
+## 14. Metadata files and job IDs
+
+**Types are decided once, by the cleaner, and carried to the end.** The metadata is built
+by `metadata.build` from the typed polars frame, in `cli.clean_workbook`, immediately after
+that frame is written as the CSV. Nothing is re-read, matched by file name or re-guessed.
+
+That replaces an earlier design, a post-processing script run only from `clean.py`. It
+re-read each CSV as text, looked its types up in the audit JSON by file name, fell back to
+guessing from the values, and renamed files by modification time. Every defect it had came
+from reconstructing information the pipeline had already thrown away:
+
+| Defect | Cause |
+|---|---|
+| code columns summed | the value guess overrode the audit's "keep as text" |
+| a 2nd table on a sheet got the wrong types | types keyed by sheet name, outputs by region label (`Report_r2`) |
+| a continuation sheet's types were lost | types recorded under `column_1..n`, before names were adopted |
+| `datatype` and the stats disagreed | two independent inferences |
+| audit named outputs by pre-rename names | renaming happened after the audit was written |
+| wrong files could be renamed | renaming chose files by modification time |
+
+All six disappear by construction once the metadata comes from the frame.
+
+### Job IDs
+
+`clean_workbook` assigns each output a UUID4 before writing it, and writes
+`<source>_<job_id>.csv` and `<source>_metadata_<job_id>.csv` directly. The audit's
+`outputs[]` carries `file`, `metadata_file`, `job_id` and `table` (the cleaner's own name).
+A locked metadata file is handled exactly like a locked CSV: listed, skipped, exit code 2.
+No metadata is written for a CSV that could not be written.
+
+### Fields
+
+| Field | Meaning |
+|---|---|
+| `header_name` | the cleaned column name |
+| `datatype` | the frame's dtype: the cleaner's decision (`coerce.py`) |
+| `inferred_datatype` | `pl.scan_csv(csv, infer_schema_length=1000, try_parse_dates=True)` on the written file |
+| `distinct_count` | `n_unique` of non-null values |
+| `count` | non-null values |
+| `total_row_count` | rows in the group |
+| `min` / `max` | numeric and temporal dtypes |
+| `sum` | numeric dtypes, exact |
+| `null_percentage` | nulls ÷ rows × 100, 2 d.p., every dtype |
+| `excel_name` | source file name |
+| `sheet_name` | the sheet (`Output.sheet_names`; never a region label) |
+
+A statistic that does not apply is written as an empty field, never a placeholder such as
+`NA`, which a loader would read as data.
+
+**`datatype` vs `inferred_datatype`.** The cleaner types columns from values. Codes stay
+`String`: a leading zero, same-width near-unique integers (`coerce.looks_like_a_code`), or
+IDs mixed with numbers. Polars inference, like Spark's `inferSchema`, sees `1005, 1006` as
+`Int64`. The difference is reported, not resolved, because it is exactly the warning a
+loader needs. `datatype` is the schema to load with.
+
+**Dates are real `Date` columns in the frame.** `coerce._as_date` returns `pl.Date` rather
+than a string. `write_csv` renders it as `YYYY-MM-DD`, so the CSV is byte-identical to
+before, while the schema now says `Date`.
+
+**Exact sums.** A numeric column is rendered to text and parsed with `str.to_decimal`,
+because a float-to-Decimal cast truncates. It is then widened to `Decimal(38, scale)`
+before summing. Without the widening, polars keeps the sum inside the precision it
+inferred from the values: 10.5 + 21.0 + 31.5 + 42.0 + 52.5 came out as `158` with no
+error. Beyond 38 digits it falls back to Python's `Decimal`.
+
+**Appended tables** are partitioned on `source_sheet` in workbook order, and each block
+is labelled with its `sheet_name`.
+
+---
+
+## 15. Known limits
 
 | Limit | Consequence |
 |---|---|
@@ -717,10 +769,12 @@ cannot be driven from a REPL or `python -c`. Threads work everywhere.
 | Integer measures that never repeat | Read as codes unless negative. Affects role classification only, never row data. |
 | Headers beyond two rows | Merged to two; deeper hierarchies flagged, not guessed. |
 | Wide gutters inside one table | A gap ≥2 columns is read as a table boundary unless both sides span exactly the same rows. |
-| One fact + one dimension per workbook | Multiple lookups are not chained — deliberate, beyond POC scope. |
+| No joins | Related sheets (a transaction table and its lookup) ship as separate CSVs; joining them is left downstream. |
+| Appends need an exact header match | Two months exported with one renamed column ship as two CSVs, not one. |
 | A CSV carries no cell types, formatting, merges or formulas | The shape-based lattice and the additive emphasis signal absorb this; a leading zero actually survives better than in .xlsx. |
 | Thousands/decimal separators are not locale-aware | `1,234.56` is read correctly; `1234,56` (European decimal comma) is not. |
 | The reader stays on openpyxl | calamine/fastexcel are faster but expose only values, not error cells, formulas, merged ranges or styling, all load-bearing signals here. A hybrid read is possible and out of scope. |
 | Process pools need an importable entry point | A consequence of Windows spawn, not of this design. Threads are the default and are unaffected. |
 | Pivot detection needs ≥3 value columns | A two-month matrix is indistinguishable from an ordinary table with two numeric columns. |
 | Header adoption needs an exact width match | A continuation sheet missing a column keeps positional names rather than guessing an alignment. |
+| The scorecard reads `.xlsx` only | Delimited inputs are covered by `tests/test_delimited.py`, not by the oracle. |

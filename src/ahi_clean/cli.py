@@ -7,12 +7,13 @@ import glob
 import os
 import sys
 import traceback
+import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 import zipfile
 
-from . import audit, contracts, failures, orchestrate
+from . import audit, contracts, failures, metadata, orchestrate
 from .extract import extract_sheet
 from .failures import Failure
 from .reader import DEFAULT_MAX_CELLS, count_embedded_images, read_workbook
@@ -44,22 +45,26 @@ def clean_workbook(source: Path, out_dir: Path, audit_dir: Path, max_cells: int 
     out_dir.mkdir(parents=True, exist_ok=True)
     written, blocked = [], []
     for output in outputs:
-        path = out_dir / f"{output.name}.csv"
-        try:
-            output.frame.write_csv(path)
-        except OSError as error:
-            # Almost always the file is open in Excel, which locks it for writing.
-            # Skip it, keep cleaning the rest, and say which files need closing.
-            #
-            # OSError rather than PermissionError: polars reports a Windows sharing
-            # violation as a bare OSError with errno 32, where pandas raised
-            # PermissionError. Catching only the narrower type silently stopped
-            # handling locked files the moment the writer changed.
-            if not _is_locked(error):
-                raise
-            blocked.append(path)
+        # The job id is fixed at write time, so the CSV, its metadata and the audit all
+        # carry the final names -- nothing is renamed afterwards.
+        output.job_id = str(uuid.uuid4())
+        output.file = f"{stem}_{output.job_id}.csv"
+        output.metadata_file = f"{stem}_metadata_{output.job_id}.csv"
+
+        path = out_dir / output.file
+        if not _write(output.frame, path, blocked):
+            # No CSV, so nothing for the metadata to describe.
             continue
         written.append(path)
+
+        # Built from the typed frame just written, never re-read and re-guessed: the
+        # frame's schema is the cleaner's own type decision.
+        described = metadata.build(
+            output.frame, source.name, output.sheet_names, metadata.inferred_schema(path)
+        )
+        metadata_path = out_dir / output.metadata_file
+        if _write(described, metadata_path, blocked):
+            written.append(metadata_path)
 
     report = audit.build_report(
         source,
@@ -78,6 +83,25 @@ def clean_workbook(source: Path, out_dir: Path, audit_dir: Path, max_cells: int 
         "outputs": outputs,
         "violations": violations,
     }
+
+
+def _write(frame, path: Path, blocked: list) -> bool:
+    """Write a CSV, recording rather than raising when the file is locked."""
+    try:
+        frame.write_csv(path)
+    except OSError as error:
+        # Almost always the file is open in Excel, which locks it for writing.
+        # Skip it, keep cleaning the rest, and say which files need closing.
+        #
+        # OSError rather than PermissionError: polars reports a Windows sharing
+        # violation as a bare OSError with errno 32, where pandas raised
+        # PermissionError. Catching only the narrower type silently stopped
+        # handling locked files the moment the writer changed.
+        if not _is_locked(error):
+            raise
+        blocked.append(path)
+        return False
+    return True
 
 
 # Windows sharing violation. A locked file is a transient, user-fixable condition;
@@ -263,7 +287,8 @@ def main(argv=None) -> int:
         print(f"{outcome['source'].name}")
         for output in outcome["outputs"]:
             sheets = ", ".join(output.sheets)
-            print(f"  -> {output.name}.csv  [{output.kind}] {len(output.frame)} rows  (from {sheets})")
+            print(f"  -> {output.file}  [{output.kind}] {len(output.frame)} rows  (from {sheets})")
+            print(f"     {output.metadata_file}")
         print(f"  -> {outcome['report'].name}")
 
     return _report_problems(len(paths), len(outcomes), blocked, failed, violations)

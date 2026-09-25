@@ -4,6 +4,7 @@ These two concerns are tested together because they are the same promise from a 
 point of view: what reaches the tables is either correct, or it is loudly not.
 """
 
+import re
 import shutil
 
 import polars as pl
@@ -223,7 +224,7 @@ def test_the_pipeline_does_not_import_pandas():
         "import sys;"
         "sys.path.insert(0, r'" + str(ROOT / "src") + "');"
         "import ahi_clean.cli, ahi_clean.extract, ahi_clean.orchestrate,"
-        " ahi_clean.join, ahi_clean.pivot, ahi_clean.coerce;"
+        " ahi_clean.pivot, ahi_clean.coerce;"
         "sys.exit(1 if 'pandas' in sys.modules else 0)"
     )
     result = subprocess.run([_sys.executable, "-c", probe], capture_output=True)
@@ -257,9 +258,14 @@ def test_parallel_output_is_identical_to_sequential(tmp_path, executor):
     parallel_dir = tmp_path / "parallel"
     cli.clean_batch(paths, parallel_dir, tmp_path / "pa", workers=4, executor=executor)
 
-    serial = {path.name: path.read_bytes() for path in serial_dir.glob("*.csv")}
-    parallel = {path.name: path.read_bytes() for path in parallel_dir.glob("*.csv")}
+    # Every output carries a fresh job id, so files are matched on the name without it.
+    serial = {_without_job_id(path): path.read_bytes() for path in serial_dir.glob("*.csv")}
+    parallel = {_without_job_id(path): path.read_bytes() for path in parallel_dir.glob("*.csv")}
     assert serial and serial == parallel
+
+
+def _without_job_id(path) -> str:
+    return re.sub(r"_[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$", "", path.stem)
 
 
 def test_parallel_results_keep_the_input_order(tmp_path):
