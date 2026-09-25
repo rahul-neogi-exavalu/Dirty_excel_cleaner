@@ -66,11 +66,15 @@ def sniff_delimiter(text: str) -> str:
     opening lines, not by which is most frequent. Frequency picks the comma out of a
     semicolon-delimited file full of prose; consistency does not.
     """
+    return sniff_delimiter_detail(text)[0]
+
+
+def sniff_delimiter_detail(text: str) -> tuple[str, list[str]]:
+    """The separator, and any other candidate that scored exactly as well."""
     lines = [line for line in text.splitlines()[:20] if line.strip()]
     if not lines:
-        return ","
-
-    best, best_score = ",", (0, 0)
+        return ",", []
+    scores = {}
     for delimiter in DELIMITERS:
         counts = [line.count(delimiter) for line in lines]
         if not any(counts):
@@ -78,11 +82,12 @@ def sniff_delimiter(text: str) -> str:
         modal = max(set(counts), key=counts.count)
         if modal == 0:
             continue
-        agreement = counts.count(modal) / len(counts)
-        score = (agreement, modal)
-        if score > best_score:
-            best, best_score = delimiter, score
-    return best
+        scores[delimiter] = (counts.count(modal) / len(counts), modal)
+    if not scores:
+        return ",", []
+    best = max(scores, key=lambda delimiter: (scores[delimiter], -DELIMITERS.index(delimiter)))
+    ties = [delimiter for delimiter in scores if delimiter != best and scores[delimiter] == scores[best]]
+    return best, ties
 
 
 def read_delimited(path, max_cells: int, sheet_too_large) -> list:
@@ -91,7 +96,7 @@ def read_delimited(path, max_cells: int, sheet_too_large) -> list:
 
     path = Path(path)
     text, encoding = read_text(path)
-    delimiter = sniff_delimiter(text[:SNIFF_BYTES])
+    delimiter, ties = sniff_delimiter_detail(text[:SNIFF_BYTES])
 
     rows: list[list] = []
     error_cells: list[str] = []
@@ -121,7 +126,28 @@ def read_delimited(path, max_cells: int, sheet_too_large) -> list:
     grid = SheetGrid(name=path.stem, rows=rows, error_cells=error_cells)
     grid.styles = [[None] * width for _ in rows]
     grid.source_format = f"delimited ({encoding}, {_name_of(delimiter)})"
+    grid.read_flags = _read_flags(delimiter, ties, encoding)
     return [grid]
+
+
+def _read_flags(delimiter, ties, encoding) -> list[str]:
+    from . import flags as flag_text
+
+    found = []
+    if ties:
+        others = ", ".join(_name_of(other) for other in ties)
+        found.append(flag_text.check(
+            f"the separator was a close call: {_name_of(delimiter)} and {others} split the "
+            f"opening lines equally well; read with {_name_of(delimiter)}"
+        ))
+    if encoding == "cp1252":
+        found.append(flag_text.info("the file is not UTF-8; read as Windows-1252"))
+    elif encoding == "latin-1":
+        found.append(flag_text.check(
+            "the file is neither UTF-8 nor Windows-1252; read as Latin-1, so accented or "
+            "special characters may be wrong"
+        ))
+    return found
 
 
 def _trim(rows) -> list[list]:

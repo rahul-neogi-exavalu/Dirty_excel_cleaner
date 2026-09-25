@@ -217,11 +217,13 @@ def adopt_sibling_headers(results) -> list[dict]:
     for result in results:
         if result.frame.is_empty() or result.trace.get("header", {}).get("detected"):
             continue
-        for donor in donors:
-            if len(donor.frame.columns) != len(result.frame.columns):
-                continue
-            if profile_overlap(donor.frame, result.frame) < PROFILE_OVERLAP_THRESHOLD:
-                continue
+        matches = [
+            donor for donor in donors
+            if len(donor.frame.columns) == len(result.frame.columns)
+            and profile_overlap(donor.frame, result.frame) >= PROFILE_OVERLAP_THRESHOLD
+        ]
+        rival_names = {tuple(donor.frame.columns) for donor in matches}
+        for donor in matches:
             renamed = dict(zip(result.frame.columns, donor.frame.columns))
             result.frame.columns = list(donor.frame.columns)
             # Types and flags were recorded under the positional names; carry them over,
@@ -238,6 +240,11 @@ def adopt_sibling_headers(results) -> list[dict]:
                     f"this sheet had no header; column names borrowed from '{donor.label}', "
                     "which has the same width and column types"
                 ))
+                if len(rival_names) > 1:
+                    flag_text.add(result.trace, column, flag_text.check(
+                        f"{len(matches)} sheets with different column names matched equally "
+                        f"well; the names were taken from the first, '{donor.label}'"
+                    ))
             # `detected` stays False on purpose: this region genuinely has no header
             # row, it has borrowed names from one. Overloading the flag made every
             # downstream row count skip a header line that is not there.

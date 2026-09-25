@@ -23,6 +23,8 @@ GUTTER_MAX_WIDTH = 1
 MIN_TABLE_ROWS = 2
 MAX_JUNK_RUN_ROWS = 2
 PROFILE_SAMPLE_ROWS = 5
+# A join or split decided within this distance of its threshold is a close call.
+CLOSE_CALL_MARGIN = 0.1
 
 
 @dataclass
@@ -38,6 +40,8 @@ class Region:
     source_rows: list[int] = field(default_factory=list)
     column_offset: int = 0
     origin: str = "row_segmentation"
+    # Boundary decisions that were close calls, in words, for the table's flags.
+    close_calls: list[str] = field(default_factory=list)
     _width: int | None = field(default=None, repr=False, compare=False)
 
     @property
@@ -123,7 +127,11 @@ def _columns_used(profile) -> set[int]:
 
 
 def _belongs_to_previous(anchor_rows, candidate_rows, width) -> bool:
-    """Whether a run continues the region before it, across a gap of any size."""
+    return _join_decision(anchor_rows, candidate_rows, width)[0]
+
+
+def _join_decision(anchor_rows, candidate_rows, width) -> tuple[bool, str | None]:
+    """Whether a run continues the region before it, and a note if that was close."""
     anchor_profile = signals.type_profile(_profile_rows(anchor_rows), width)
     candidate_profile = signals.type_profile(_profile_rows(candidate_rows), width)
     anchor_fill = signals.modal_fill(anchor_rows)
@@ -141,7 +149,7 @@ def _belongs_to_previous(anchor_rows, candidate_rows, width) -> bool:
         and len(candidate_rows) <= MAX_JUNK_RUN_ROWS
         and _columns_used(candidate_profile) <= _columns_used(anchor_profile)
     ):
-        return True
+        return True, None
 
     # Both questions must be answered yes. Coverage asks whether the two runs use the
     # same columns at all; similarity asks whether those shared columns hold the same
@@ -149,7 +157,17 @@ def _belongs_to_previous(anchor_rows, candidate_rows, width) -> bool:
     # first; a chunk of the same table with a gap in one field passes both.
     coverage = signals.profile_coverage(anchor_profile, candidate_profile)
     similarity = signals.profile_similarity(anchor_profile, candidate_profile)
-    return coverage >= COVERAGE_MATCH_THRESHOLD and similarity >= PROFILE_MATCH_THRESHOLD
+    joined = coverage >= COVERAGE_MATCH_THRESHOLD and similarity >= PROFILE_MATCH_THRESHOLD
+    margin = min(coverage - COVERAGE_MATCH_THRESHOLD, similarity - PROFILE_MATCH_THRESHOLD)
+    note = None
+    if abs(margin) < CLOSE_CALL_MARGIN:
+        detail = f"column overlap {coverage:.0%}, type agreement {similarity:.0%}; cut-off 70%"
+        note = (
+            f"rows after a gap were joined to this table although they only just match ({detail})"
+            if joined else
+            f"this table was split from the rows above although they nearly match ({detail})"
+        )
+    return joined, note
 
 
 def _segment_rows(grid: list[list]) -> list[Region]:
@@ -162,18 +180,24 @@ def _segment_rows(grid: list[list]) -> list[Region]:
     padded = [list(row) + [None] * (width - len(row)) for row in grid]
 
     groups: list[list[tuple[int, int]]] = [[runs[0]]]
+    notes: list[list[str]] = [[]]
     for run in runs[1:]:
         anchor_rows = [row for start, end in groups[-1] for row in padded[start:end]]
-        if _belongs_to_previous(anchor_rows, padded[run[0] : run[1]], width):
+        joined, note = _join_decision(anchor_rows, padded[run[0] : run[1]], width)
+        if joined:
             groups[-1].append(run)
+            if note:
+                notes[-1].append(note)
         else:
             groups.append([run])
+            notes.append([note] if note else [])
 
     regions = []
-    for group in groups:
+    for group, group_notes in zip(groups, notes):
         indices = [index for start, end in group for index in range(start, end)]
         regions.append(
-            Region(rows=[padded[index] for index in indices], source_rows=indices)
+            Region(rows=[padded[index] for index in indices], source_rows=indices,
+                   close_calls=group_notes)
         )
     return regions
 
@@ -239,6 +263,7 @@ def _segment_columns(region: Region) -> list[Region]:
         return []
 
     groups: list[list[tuple[int, int]]] = [[runs[0]]]
+    column_notes: list[str] = []
     for run in runs[1:]:
         previous = groups[-1][-1]
         left = _row_extent(region.rows, *previous)
@@ -250,11 +275,22 @@ def _segment_columns(region: Region) -> list[Region]:
         # tables placed side by side almost always differ in length, and that
         # difference is the one honest signal that they are unrelated.
         same_rows = left is not None and left == right
-        gutter = same_rows or (gap <= GUTTER_MAX_WIDTH and _extents_match(left, right))
+        extents = _extents_match(left, right)
+        gutter = same_rows or (gap <= GUTTER_MAX_WIDTH and extents)
         if gutter:
             groups[-1].append(run)
+            if not same_rows:
+                column_notes.append(
+                    "a blank column was treated as a gap inside this table although the "
+                    "two sides span slightly different rows"
+                )
         else:
             groups.append([run])
+            if extents:
+                column_notes.append(
+                    "a wide blank column split this table from its neighbour although "
+                    "both span nearly the same rows"
+                )
 
     regions = []
     for group in groups:
@@ -276,6 +312,7 @@ def _segment_columns(region: Region) -> list[Region]:
                 source_rows=sources,
                 column_offset=region.column_offset + group[0][0],
                 origin="column_segmentation" if len(groups) > 1 else region.origin,
+                close_calls=region.close_calls + column_notes,
             )
         )
     return regions

@@ -441,6 +441,19 @@ Short words such as "at" and "on" count only on their own ("Created At"), so "St
 "Rate" never counts as a date just because it contains the letters "at". And "Created
 By" holds a person, not a date.
 
+**Numbers from Europe.** Many European exports write one thousand two hundred and
+thirty-four point five six as "1.234,56", with the comma and dot swapped. The tool
+works out which style each column uses from the figures themselves. A figure like "99,5"
+can only be European, and "10.5" can only be US. It then reads every figure in the
+column the same way. When a column's figures fit both styles (only values like "1,234"),
+it reads them the US way and says CHECK.
+
+**Things about the whole file or sheet are flagged too.** For example: a spreadsheet
+error such as #REF! that was left empty, formulas Excel never saved a result for, a CSV
+whose separator or character encoding was a close call, a "Total" row that was removed
+even though its figure did not add up, or a row kept even though it looked incomplete.
+Those notes appear on every column of the table they affect, so they cannot be missed.
+
 A column with nothing to report says "NA". So the fastest review of any file is to read
 the CHECK notes in its summary and nothing else. The summary
 also shows what a loading tool would guess on its own if left to itself. Where the two

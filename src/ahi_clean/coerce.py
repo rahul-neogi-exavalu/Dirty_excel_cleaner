@@ -123,6 +123,32 @@ NOT_DATE_FRAGMENTS = (
 )
 
 
+# Header words that name an identifier, for the other tie a header breaks: eight-digit
+# numbers that are all valid yyyyMMdd dates (20240101) but sit under PolicyNo. Whole
+# words only; "no" or "id" inside another word (piano, valid) must not count.
+ID_HEADER_WORDS = {
+    "id", "no", "nbr", "num", "number", "code", "ref", "key", "acct", "account",
+    "policy", "invoice", "order", "customer", "cust", "sku", "zip", "pin", "postal",
+    "postcode", "serial", "ssn", "tin", "ein",
+}
+ID_HEADER_SUFFIXES = ("number", "nbr", "code")
+
+# A text column where at least this share of values read as dates or numbers is mixed,
+# not text: flagged, because the minority that did read is probably the real content.
+MIXED_SHARE_FLOOR = 0.2
+
+_SCIENTIFIC = re.compile(r"^-?\d+(\.\d+)?[eE][+-]?\d+$")
+_TRAILING_MINUS = re.compile(r"\d-$")
+
+# Decimal-mark evidence, judged on each value with currency, spaces and signs removed.
+# A value only one convention can read is a vote for it; 1,234 and 1.234 -- one
+# separator followed by exactly three digits -- fit both and vote for neither.
+_US_ONLY = re.compile(r"^-?(\d{1,3}(,\d{3})+\.\d+|\d{1,3}(,\d{3}){2,}|\d*\.(\d{1,2}|\d{4,}))$")
+_EU_ONLY = re.compile(r"^-?(\d{1,3}(\.\d{3})+,\d+|\d{1,3}(\.\d{3}){2,}|\d*,(\d{1,2}|\d{4,}))$")
+_EITHER = re.compile(r"^-?\d{1,3}[.,]\d{3}$")
+US, EU = "us", "eu"
+
+
 @dataclass
 class Coerced:
     """A typed column, with everything a reviewer needs to check the decision."""
@@ -172,7 +198,7 @@ def coerce_column(name: str, values: list, label=None) -> Coerced:
             result.notes.append(f"column '{name}' read as Excel date serials: header names a date")
             return result
 
-    kind, notes, flags = _decide_kind(name, present)
+    kind, notes, flags = _decide_kind(name, present, header)
 
     if kind in (typing_utils.INT, typing_utils.FLOAT):
         result = _as_number(name, values, notes)
@@ -190,7 +216,20 @@ def coerce_column(name: str, values: list, label=None) -> Coerced:
             f"{excel_serials(pl.Series([serial_like[0]]))[0].isoformat()}); the header "
             f"'{header}' does not name a date, so kept as {read_as}"
         ))
+    scientific = [text for text in _texts(present) if text and _SCIENTIFIC.match(text)]
+    if scientific:
+        result.flags.append(flag_text.check(
+            f"{len(scientific)} value(s) in scientific notation ({flag_text.example(scientific)}): "
+            "Excel shows long numbers such as IDs this way, and the digits it rounded off "
+            "may already be lost in the source"
+        ))
     return result
+
+
+def header_names_an_id(header: str) -> bool:
+    """Whether a header names an identifier: PolicyNo, account_number, ZipCode."""
+    words = header_words(header)
+    return any(word in ID_HEADER_WORDS or word.endswith(ID_HEADER_SUFFIXES) for word in words)
 
 
 def _serial_candidates(present) -> list[str]:
@@ -233,7 +272,7 @@ def header_names_a_date(header: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def _decide_kind(name, present) -> tuple[str, list[str], list[str]]:
+def _decide_kind(name, present, header=None) -> tuple[str, list[str], list[str]]:
     """The column's type, the notes for the audit, and the flags for a person."""
     sampled = sample(present)
     notes: list[str] = []
@@ -249,13 +288,25 @@ def _decide_kind(name, present) -> tuple[str, list[str], list[str]]:
         _parsed, _primary, share = _ladder_parse(pl.Series("s", texts, dtype=pl.String))
         numeric_only = all(text is None or text.isdigit() for text in texts)
         if share >= (1.0 if numeric_only else DATE_SHARE_THRESHOLD):
-            flags = []
-            if numeric_only:
-                flags.append(flag_text.check(
-                    "every value is an 8-digit number that is a valid yyyyMMdd date; "
-                    "read as dates (could be identifiers)"
-                ))
-            return typing_utils.DATE, notes, flags
+            if not numeric_only:
+                return typing_utils.DATE, notes, []
+            # Eight-digit numbers that are all real dates: yyyyMMdd, or identifiers that
+            # happen to look like it. The same tie as ZIP-or-serial, broken the same way.
+            label = header or name
+            if header_names_an_id(label) and not header_names_a_date(label):
+                notes.append(f"column '{name}' kept as text: header names an identifier")
+                return typing_utils.ID_STRING, notes, [flag_text.check(
+                    "every value is an 8-digit number that is also a valid yyyyMMdd date; "
+                    f"kept as text because the header '{label}' names an identifier"
+                )]
+            reason = (
+                f"the header '{label}' names a date" if header_names_a_date(label)
+                else f"the header '{label}' names neither a date nor an identifier"
+            )
+            return typing_utils.DATE, notes, [flag_text.check(
+                "every value is an 8-digit number that is a valid yyyyMMdd date; read as "
+                f"dates because {reason} (could be identifiers)"
+            )]
 
     # Letters and digits in one value -- 12AB, A7, X9Y -- is an identifier, never a
     # number. Letting the majority decide instead read such a column as numeric and
@@ -326,7 +377,32 @@ def _decide_kind(name, present) -> tuple[str, list[str], list[str]]:
         notes.append(f"column '{name}' holds formatted numbers; parsed as numeric")
         return typing_utils.FLOAT, notes, _formatting_flags(_texts(present))
 
-    return kind, notes, []
+    return kind, notes, _mixed_text_flags(kind, sampled)
+
+
+def _mixed_text_flags(kind, sampled) -> list[str]:
+    """A text column where a real share of values read as dates or numbers.
+
+    Below the 60% needed to convert the column, those values stay text -- which is
+    right, but silently so. A column that is one third dates is worth a look.
+    """
+    if kind not in (typing_utils.TEXT, typing_utils.DATE_STRING):
+        return []
+    texts = _texts(sampled)
+    total = sum(1 for text in texts if text is not None)
+    if not total:
+        return []
+    _parsed, _primary, date_share = _ladder_parse(pl.Series("s", texts, dtype=pl.String))
+    number_share = _numeric_share(texts)
+    what, share = max((("dates", date_share), ("numbers", number_share)), key=lambda item: item[1])
+    # At or above the conversion threshold the column was kept as text for another
+    # reason (scientific notation, letters mixed in), which has its own flag.
+    if not MIXED_SHARE_FLOOR <= share < DATE_SHARE_THRESHOLD:
+        return []
+    return [flag_text.check(
+        f"about {share:.0%} of the values read as {what}, too few (under "
+        f"{DATE_SHARE_THRESHOLD:.0%}) to treat the column as {what}; kept as text"
+    )]
 
 
 def _formatting_flags(texts) -> list[str]:
@@ -335,8 +411,6 @@ def _formatting_flags(texts) -> list[str]:
     found = []
     if any(re.search(r"[$£€¥₹]", text) for text in present):
         found.append("currency symbols")
-    if any("," in text for text in present):
-        found.append("thousands separators")
     if any(_PARENTHESISED.match(text.strip()) for text in present):
         found.append("brackets (read as negatives, e.g. (500) = -500)")
     flags = [flag_text.info(f"formatted numbers; removed {', '.join(found)}")] if found else []
@@ -421,23 +495,66 @@ def _numeric_share(texts) -> float:
     return (parsed.len() - parsed.null_count()) / present if present else 0.0
 
 
-def _clean_numeric(series: pl.Series) -> pl.Series:
+def _clean_numeric(series: pl.Series, convention: str = US) -> pl.Series:
     """Strip presentation so the number underneath can be cast.
 
     Handles currency symbols, thousands separators, percent signs and accounting
-    negatives -- ``(1,234.56)`` means minus one thousand two hundred and thirty four,
-    and reading it as text loses the sign entirely.
+    negatives -- ``(1,234.56)`` and ``1,234.56-`` both mean minus one thousand two
+    hundred and thirty four, and reading either as text loses the sign entirely.
+
+    ``convention`` says which mark is the decimal point. In European exports it is the
+    comma and the dot groups thousands: ``1.234,56``. Read with US rules that value
+    became 1.23456 and ``99,5`` became 995 -- plausible numbers, silently wrong.
     """
-    return (
+    cleaned = (
         series.str.strip_chars()
         .str.replace_all(r"^\((.*)\)$", r"-${1}")
-        .str.replace_all(_PRESENTATION.pattern, "")
+        .str.replace_all(r"^(.*\d)\s*-$", r"-${1}")
     )
+    if convention == EU:
+        cleaned = cleaned.str.replace_all(".", "", literal=True).str.replace_all(",", ".", literal=True)
+    return cleaned.str.replace_all(_PRESENTATION.pattern, "")
+
+
+def _decimal_convention(texts) -> tuple[str, list[str]]:
+    """Which mark is the decimal point in this column, decided from the values.
+
+    Each value that only one convention can read is a vote: 1,234.56 or 10.5 for US,
+    1.234,56 or 99,5 for European. The column follows the votes. Values like 1,234 fit
+    both, so a column holding only those is a genuine tie: read as US, and flagged.
+    """
+    cores = [re.sub(r"[^\d.,-]", "", text) for text in texts if text]
+    us = sum(1 for core in cores if _US_ONLY.match(core))
+    eu = sum(1 for core in cores if _EU_ONLY.match(core))
+    either = [core for core in cores if _EITHER.match(core)]
+
+    if eu and not us:
+        return EU, [flag_text.info(
+            "European number format: comma is the decimal mark and dot groups thousands "
+            "(1.234,56 read as 1234.56)"
+        )]
+    if eu and us:
+        winner = EU if eu > us else US
+        name = "European (1.234,56)" if winner == EU else "US (1,234.56)"
+        return winner, [flag_text.check(
+            f"mixes US and European number formats ({us} US-only, {eu} European-only "
+            f"values); read as {name}, so the other values may be wrong"
+        )]
+    flags = []
+    if either and not us:
+        flags.append(flag_text.check(
+            f"values such as {either[0]} fit both number formats: {either[0].replace(',', '').replace('.', '')} "
+            f"(US thousands) or {either[0].replace(',', '.')} (European decimal); read as US"
+        ))
+    elif any("," in core for core in cores):
+        flags.append(flag_text.info("thousands separators removed (1,234.56 read as 1234.56)"))
+    return US, flags
 
 
 def _as_number(name, values, notes) -> Coerced:
     texts = _texts(values)
-    cleaned = _clean_numeric(pl.Series(name, texts, dtype=pl.String))
+    convention, flags = _decimal_convention(texts)
+    cleaned = _clean_numeric(pl.Series(name, texts, dtype=pl.String), convention)
     parsed = cleaned.cast(pl.Float64, strict=False)
 
     failures = [
@@ -446,7 +563,12 @@ def _as_number(name, values, notes) -> Coerced:
         if text is not None and result is None
     ]
 
-    flags = []
+    trailing = [text for text in texts if text and _TRAILING_MINUS.search(text.strip())]
+    if trailing:
+        flags.append(flag_text.info(
+            f"{len(trailing)} value(s) with a trailing minus read as negative "
+            f"(e.g. {trailing[0]} = -{trailing[0].strip().rstrip('-').strip()})"
+        ))
     if failures:
         flags.append(flag_text.check(
             f"{len(failures)} value(s) are not numbers and were left empty "

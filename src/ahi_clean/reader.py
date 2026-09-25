@@ -28,6 +28,9 @@ class SheetGrid:
     merged_ranges: list[str] = field(default_factory=list)
     image_count: int = 0
     source_format: str = "xlsx"
+    # Flags about how the file itself was read (separator, encoding); every column of
+    # every table from this grid carries them. See flags.py.
+    read_flags: list[str] = field(default_factory=list)
 
     @property
     def height(self) -> int:

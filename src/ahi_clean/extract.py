@@ -212,12 +212,16 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
         else:
             kept.append(body[verdict.index])
             if verdict.confidence < 1.0:
+                trace.setdefault("low_confidence_rows", []).append(
+                    region.source_rows[body_start + verdict.index] + 1
+                    if body_start + verdict.index < len(region.source_rows) else None
+                )
                 trace["notes"].append(
                     f"row {region.row_offset + body_start + verdict.index} kept with low "
                     f"confidence: {verdict.reason}"
                 )
 
-    _flag_structure(names, found, trace)
+    _flag_structure(names, found, trace, grid, region)
     frame = _typed_frame([_fit_row(row, width) for row in kept], names, trace, labels)
     _validate(frame, trace)
 
@@ -229,8 +233,17 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
     return SheetResult(grid.name, frame, trace, region_index=index)
 
 
-def _flag_structure(names, found, trace) -> None:
-    """Flag every column whose name or placement was a decision rather than a reading."""
+# A header chosen with a score this close to the cut-off (0.55) was nearly refused.
+HEADER_LOW_CONFIDENCE = 0.65
+
+
+def _flag_structure(names, found, trace, grid=None, region=None) -> None:
+    """Flag every column whose name or placement was a decision rather than a reading.
+
+    Also carries the table-, sheet- and file-level edge cases onto every column: they
+    are not properties of one column, but a reader of the metadata needs to see them.
+    """
+    _flag_table(names, found, trace, grid, region)
     if not found.detected:
         flag_text.add_to_all(trace, names, flag_text.check(flag_text.NO_HEADER))
     else:
@@ -268,6 +281,75 @@ def _flag_structure(names, found, trace) -> None:
             "which way up this table is was a close call, decided by its shape; check "
             "it is not sideways"
         ))
+
+
+def _flag_table(names, found, trace, grid, region) -> None:
+    """Edge cases about the file, the sheet, the table's boundaries and its rows."""
+    every = lambda flag: flag_text.add_to_all(trace, names, flag)  # noqa: E731
+
+    for flag in getattr(grid, "read_flags", []) or []:
+        every(flag)
+    for note in getattr(region, "close_calls", []) or []:
+        every(flag_text.check(f"table boundary was a close call: {note}"))
+
+    if found.detected and found.score < HEADER_LOW_CONFIDENCE:
+        every(flag_text.check(
+            f"the header row was chosen with low confidence (score {found.score:.2f}, "
+            f"cut-off {header_mod.HEADER_THRESHOLD}); check these are the real column names"
+        ))
+    mismatch = trace.get("alignment_mismatch")
+    if mismatch:
+        every(flag_text.check(
+            f"the header sits in columns {mismatch['header']} but the data in "
+            f"{mismatch['data']}, and they could not be lined up; check each value is "
+            "under the right header"
+        ))
+
+    errors = getattr(grid, "error_cells", []) or []
+    if errors:
+        every(flag_text.check(
+            f"{len(errors)} Excel error value(s) on this sheet (#REF!, #N/A ...) were left "
+            f"empty ({flag_text.example(errors)})"
+        ))
+    uncached = getattr(grid, "uncached_formula_cells", []) or []
+    if uncached:
+        every(flag_text.check(
+            f"{len(uncached)} formula cell(s) on this sheet have no saved result and are "
+            f"empty in the output ({flag_text.example(uncached)}); open and re-save the "
+            "workbook in Excel"
+        ))
+    tall_merges = [
+        merged for merged in getattr(grid, "merged_ranges", []) or []
+        if _merge_spans_rows(merged)
+    ]
+    if tall_merges:
+        every(flag_text.info(
+            f"{len(tall_merges)} merged cell range(s) spanning several rows were filled "
+            f"with their value in every row ({flag_text.example(tall_merges)})"
+        ))
+
+    shaky = trace.get("low_confidence_rows", [])
+    if shaky:
+        every(flag_text.check(
+            f"{len(shaky)} row(s) kept although they look incomplete (sheet rows "
+            f"{flag_text.example(shaky, 5)}); check they are real records"
+        ))
+    unverified = [
+        row["sheet_row"] for row in trace.get("dropped_rows", [])
+        if row["classification"] == rowclass.UNVERIFIED_TOTAL
+    ]
+    if unverified:
+        every(flag_text.check(
+            f"{len(unverified)} row(s) labelled as totals were dropped although their "
+            f"figures did not add up (sheet rows {flag_text.example(unverified, 5)}); "
+            "check nothing real was removed"
+        ))
+
+
+def _merge_spans_rows(merged: str) -> bool:
+    """Whether a merged range such as A5:A7 covers more than one row."""
+    found = re.fullmatch(r"[A-Z]+(\d+):[A-Z]+(\d+)", merged)
+    return bool(found) and found.group(1) != found.group(2)
 
 
 # --------------------------------------------------------------------------- #
@@ -436,6 +518,12 @@ def _realign_gutters(names, found, rows, body, width, trace):
     if not body or header_columns == body_columns:
         return names, body, width
     if len(header_columns) != len(body_columns):
+        # Different numbers of values: nothing can be moved safely. When each side has
+        # columns the other lacks, the two are offset and that deserves a flag. A blank
+        # header cell over data, or a label over an empty column, is not a shift and has
+        # its own flag.
+        if set(header_columns) - set(body_columns) and set(body_columns) - set(header_columns):
+            trace["alignment_mismatch"] = {"header": header_columns, "data": body_columns}
         return names, body, width
 
     trace["notes"].append(

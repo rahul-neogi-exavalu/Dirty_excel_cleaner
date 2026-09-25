@@ -829,6 +829,14 @@ columns' flags. Appended sheets keep each sheet's flags, prefixed with its name.
 | N value(s) written as yyyyMMdd read as dates | INFO | inside a date column |
 | time of day dropped from N value(s) | INFO | `2026-01-08 10:30:00` → `2026-01-08` |
 | formatted numbers; removed currency symbols, separators, brackets | INFO | `(500)` = -500 |
+| European number format: comma is the decimal mark | INFO | `1.234,56` read as 1234.56, `99,5` as 99.5; decided per column from the values |
+| thousands separators removed | INFO | `1,234.56` read as 1234.56 |
+| values such as 1,234 fit both number formats; read as US | CHECK | `1,234` is 1234 (US) or 1.234 (European); nothing in the column decides |
+| mixes US and European number formats | CHECK | read by the majority; the other values may be wrong |
+| N value(s) with a trailing minus read as negative | INFO | `500-` = -500 |
+| N value(s) in scientific notation | CHECK | `1.23E+05`: Excel may already have rounded off an ID's digits |
+| about N% of the values read as dates / numbers, too few; kept as text | CHECK | a partly mixed column (20–60%) |
+| 8-digit numbers kept as text because the header names an identifier | CHECK | `20240101` under `PolicyNo`; under a date header or neither, read as dates, CHECK |
 | the header was the number 2024; named `col_2024` | INFO | |
 | the header spanned two rows; the labels were joined | INFO | |
 | values were moved back under their labels | INFO | header and data had different gaps |
@@ -836,6 +844,21 @@ columns' flags. Appended sheets keep each sheet's flags, prefixed with its name.
 | created by unpivoting N columns / the cells of the unpivoted columns | INFO | on the new `period`/`category` and `value` columns |
 | added by the cleaner: the sheet each row came from | INFO | `source_sheet` on appended tables |
 | entirely empty in the source | INFO | |
+| the separator was a close call | CHECK | CSV: two separators split the lines equally well |
+| the file is not UTF-8; read as Windows-1252 | INFO | CSV |
+| read as Latin-1, so accented or special characters may be wrong | CHECK | CSV: last-resort encoding |
+| N Excel error value(s) (#REF!, #N/A ...) were left empty | CHECK | lists the cells |
+| N formula cell(s) have no saved result and are empty in the output | CHECK | open and re-save in Excel |
+| N merged cell range(s) spanning several rows were filled in every row | INFO | `A5:A7`; title merges across one row are not flagged |
+| the header row was chosen with low confidence | CHECK | header score under 0.65 (cut-off 0.55) |
+| the header and the data could not be lined up | CHECK | each side has columns the other lacks |
+| table boundary was a close call | CHECK | rows joined or split across a gap, or a blank column treated as a gap or a split, within 10% of the threshold |
+| N sheets with different names matched equally well | CHECK | a continuation sheet with two possible donors |
+| N row(s) kept although they look incomplete | CHECK | sparse rows that are not totals; lists the sheet rows |
+| N row(s) labelled as totals were dropped although their figures did not add up | CHECK | lists the sheet rows |
+
+Flags about the file, the sheet, the table and its rows are not about any one column,
+so they are attached to every column of the table they affect.
 
 Row-level decisions (a sparse row kept at low confidence, an unverified total dropped)
 are not column properties and stay in the audit report.
@@ -875,7 +898,7 @@ is labelled with its `sheet_name`.
 | No joins | Related sheets (a transaction table and its lookup) ship as separate CSVs; joining them is left downstream. |
 | Appends need an exact header match | Two months exported with one renamed column ship as two CSVs, not one. |
 | A CSV carries no cell types, formatting, merges or formulas | The shape-based lattice and the additive emphasis signal absorb this; a leading zero actually survives better than in .xlsx. |
-| Thousands/decimal separators are not locale-aware | `1,234.56` is read correctly; `1234,56` (European decimal comma) is not. |
+| The decimal mark is decided per column | A value only one convention can read (`1.234,56`, `99,5`; `1,234.56`, `10.5`) is a vote. A column of only `1,234`-style values fits both, and is read as US and flagged `CHECK`. |
 | The reader stays on openpyxl | calamine/fastexcel are faster but expose only values, not error cells, formulas, merged ranges or styling, all load-bearing signals here. A hybrid read is possible and out of scope. |
 | Process pools need an importable entry point | A consequence of Windows spawn, not of this design. Threads are the default and are unaffected. |
 | Pivot detection needs ≥3 value columns | A two-month matrix is indistinguishable from an ordinary table with two numeric columns. |
