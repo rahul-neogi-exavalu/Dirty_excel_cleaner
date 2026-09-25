@@ -50,10 +50,33 @@ def test_a_date_column_gets_min_and_max_but_no_sum():
 
 def test_a_code_column_is_text_and_gets_no_numeric_statistics():
     """Centre numbers look like integers; the cleaner kept them as text, from values alone."""
-    row = described(one([HEADER] + records(6)))["profitcenternumber"]
+    row = described(one([HEADER] + records(12)))["profitcenternumber"]
     assert row["datatype"] == "String"
     assert (row["min"], row["max"], row["sum"]) == ("NA", "NA", "NA")
-    assert row["distinct_count"] == 6
+    assert row["distinct_count"] == 12
+
+
+def test_a_judgement_call_is_flagged_beside_the_datatype_and_others_say_na():
+    result = one([HEADER] + records(6))
+    [output], _report = plan_workbook([result], "book")
+    rows = metadata.build(
+        output.frame, "book.xlsx", output.sheet_names, flags=output.type_flags
+    ).to_dicts()
+    by_column = {row["header_name"]: row for row in rows}
+
+    assert list(rows[0])[:3] == ["header_name", "datatype", "type_flag"]
+    flagged = by_column["profitcenternumber"]
+    assert flagged["datatype"] == "Int64"
+    assert flagged["type_flag"].startswith("CHECK:")
+    assert by_column["premium"]["type_flag"] == "NA"
+
+
+def test_an_adopted_continuation_keeps_its_flags_under_the_borrowed_names():
+    first = one([HEADER] + records(6), name="Report")
+    second = one(records(4, start=6), name="Continued")
+    outputs, _report = plan_workbook([first, second], "book")
+    table = [output for output in outputs if output.sheets == [second.label]][0]
+    assert "profitcenternumber" in table.type_flags
 
 
 def test_null_percentage_is_counted_for_every_type():
@@ -118,9 +141,9 @@ def test_a_continuation_with_adopted_names_is_typed_by_its_own_values():
 def _workbook(path):
     book = openpyxl.Workbook()
     book.remove(book.active)
-    for name, start in (("Jan", 0), ("Feb", 6)):
+    for name, start in (("Jan", 0), ("Feb", 12)):
         worksheet = book.create_sheet(name)
-        for row in [HEADER] + records(6, start=start):
+        for row in [HEADER] + records(12, start=start):
             worksheet.append(row)
     book.save(path)
     return path

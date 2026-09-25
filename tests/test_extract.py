@@ -276,8 +276,69 @@ def test_leading_zero_identifiers_stay_text():
 
 
 def test_constant_width_codes_stay_text_rather_than_becoming_numbers():
-    result = one([HEADER] + records(6))
+    """More than CODE_MIN_VALUES same-width, all-different numbers: a code, flagged."""
+    result = one([HEADER] + records(12))
     assert result.frame["profitcenternumber"].dtype == pl.String
+    assert "read as code" in result.trace["type_flags"]["profitcenternumber"]
+
+
+def test_a_few_same_width_numbers_are_read_as_numbers_and_flagged():
+    """Ten or fewer: too few to call a code, so a number -- and flagged for a person."""
+    from ahi_clean import coerce
+
+    for values in ([1500, 2300, 4100, 3700], list(range(1005, 1015))):
+        result = coerce.coerce_column("amount", values)
+        assert result.series.dtype == pl.Int64, values
+        assert "read as number" in result.flag
+
+
+def test_the_code_threshold_is_more_than_ten_values():
+    from ahi_clean import coerce
+
+    assert coerce.coerce_column("c", list(range(1005, 1015))).series.dtype == pl.Int64
+    assert coerce.coerce_column("c", list(range(1005, 1016))).series.dtype == pl.String
+
+
+def test_a_leading_zero_is_a_code_whatever_the_size_and_is_not_flagged():
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("zip", ["08085", "75202", "10001"])
+    assert result.series.dtype == pl.String
+    assert result.flag is None
+
+
+def test_ordinary_numbers_are_not_flagged():
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("qty", [250, 1500, 32000, 7, 1500])
+    assert result.series.dtype == pl.Int64
+    assert result.flag is None
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["1234", "5678", "12AB", "9012"],
+        ["100.5", "200.25", "A7", "3.5", "4.5"],
+        ["$1,234", "(500)", "X9Y", "12"],
+    ],
+)
+def test_a_column_with_any_alphanumeric_value_stays_text(values):
+    """12AB is an identifier; reading the column as numbers used to blank it out."""
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("ref", values)
+    assert result.series.dtype == pl.String
+    assert result.series.to_list() == values
+    assert not result.failures
+
+
+def test_letters_without_digits_do_not_make_a_number_column_text():
+    """N/A is a missing marker, not an identifier; the column is still numeric."""
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("amount", ["$1,234", "(500)", "N/A", "12"])
+    assert result.series.dtype == pl.Int64
 
 
 def test_duplicate_keys_are_flagged_not_deduplicated():
@@ -396,5 +457,6 @@ def test_a_column_of_only_five_digit_numbers_is_not_read_as_serial_dates():
     from ahi_clean import coerce
 
     result = coerce.coerce_column("zip", [75202, 46030, 90210, 10001])
-    assert result.kind != "date"
-    assert result.series.to_list() == ["75202", "46030", "90210", "10001"]
+    assert result.series.dtype != pl.Date
+    assert result.series.cast(pl.String).to_list() == ["75202", "46030", "90210", "10001"]
+    assert result.flag  # a ZIP-or-amount column is left for a person to check

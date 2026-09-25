@@ -335,9 +335,21 @@ what the decisions mean.
 Each column becomes whatever the majority of its own values already are, with three
 structural safeguards:
 
+- **any value mixing letters and digits** → keep as text (`coerce.has_alphanumeric`,
+  checked on the whole column, not the sample). Letting the numeric majority decide used
+  to read `1234, 5678, 12AB` as numbers and silently blank `12AB`. Letters without digits
+  (`N/A`) do not count: that is a missing marker, not an identifier.
 - **leading zero** → keep as text. Meaningless in a quantity; only survives if already text.
-- **near-unique integers all of one digit width** → keep as text. Account numbers, centre
-  codes, branch ids. A measure varies in magnitude; a code does not.
+  Decisive, never flagged.
+- **near-unique integers all of one digit width** (`coerce.code_shape` = `UNIFORM`) → a
+  judgement call. Account numbers, centre codes and ZIPs look like this, and so do
+  whole-dollar amounts that happen never to repeat (`1500, 2300, 4100, 3700`). Nothing in
+  the values separates them. **More than `CODE_MIN_VALUES` (10) values → code (`String`);
+  10 or fewer → number (`Int64`)**, because never-repeating, same-width amounts get
+  unlikely as a table grows. Either way the decision is recorded in
+  `trace["type_flags"]` and surfaced as the metadata's `type_flag`, for a person to settle
+  from the header. Appended sheets can decide differently (11 rows on one, 8 on another),
+  so each sheet's flag is kept, prefixed with its name.
 - **most values parse as dates** → a date column. A column written in four different date
   formats has no single lexical signature, so the type lattice sees only "text".
   Parseability is the honest test, and the stragglers become reportable failures rather
@@ -724,6 +736,7 @@ No metadata is written for a CSV that could not be written.
 |---|---|
 | `header_name` | the cleaned column name |
 | `datatype` | the frame's dtype: the cleaner's decision (`coerce.py`) |
+| `type_flag` | `CHECK: ...` for a judgement-call type (see §6); `NA` otherwise |
 | `inferred_datatype` | `pl.scan_csv(csv, infer_schema_length=1000, try_parse_dates=True)` on the written file |
 | `distinct_count` | `n_unique` of non-null values |
 | `count` | non-null values |
@@ -741,8 +754,8 @@ the metadata file. In the cleaned data CSVs a missing value is still an empty fi
 because `NA` there would load as a value.
 
 **`datatype` vs `inferred_datatype`.** The cleaner types columns from values. Codes stay
-`String`: a leading zero, same-width near-unique integers (`coerce.looks_like_a_code`), or
-IDs mixed with numbers. Polars inference, like Spark's `inferSchema`, sees `1005, 1006` as
+`String`: alphanumeric values, a leading zero, or more than 10 same-width all-different
+integers (flagged). Polars inference, like Spark's `inferSchema`, sees `1005, 1006` as
 `Int64`. The difference is reported, not resolved, because it is exactly the warning a
 loader needs. `datatype` is the schema to load with.
 

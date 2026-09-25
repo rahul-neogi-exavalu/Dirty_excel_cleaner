@@ -28,6 +28,13 @@ NUMERIC_SHARE_THRESHOLD = 0.6
 SAMPLE_HEAD = 200
 SAMPLE_CAP = 1000
 
+# A column of same-width, all-different whole numbers could be codes (ZIPs, account and
+# centre numbers) or amounts; the values alone cannot say which. With more than this many
+# values it is read as a code -- amounts that never repeat and never change width get
+# unlikely as a table grows -- and with this many or fewer it is read as a number. Either
+# way the column is flagged in the metadata for someone to check against its header.
+CODE_MIN_VALUES = 10
+
 # Tried in order. Unambiguous shapes come first so that a column which fits one of them
 # is never handed to a pair whose reading depends on convention.
 DATE_FORMATS = [
@@ -89,6 +96,8 @@ class Coerced:
     kind: str
     failures: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Set when the type was a judgement call a person should check; None otherwise.
+    flag: str | None = None
 
 
 def sample(values):
@@ -110,13 +119,16 @@ def coerce_column(name: str, values: list) -> Coerced:
     if not present:
         return Coerced(pl.Series(name, [None] * len(values), dtype=pl.String), typing_utils.EMPTY)
 
-    kind, notes = _decide_kind(name, present)
+    kind, notes, flag = _decide_kind(name, present)
 
     if kind in (typing_utils.INT, typing_utils.FLOAT):
-        return _as_number(name, values, notes)
-    if kind in (typing_utils.DATE, typing_utils.DATETIME, typing_utils.DATE_STRING):
-        return _as_date(name, values, notes)
-    return Coerced(_as_text(name, values), typing_utils.ID_STRING if kind == typing_utils.ID_STRING else kind, notes=notes)
+        result = _as_number(name, values, notes)
+    elif kind in (typing_utils.DATE, typing_utils.DATETIME, typing_utils.DATE_STRING):
+        result = _as_date(name, values, notes)
+    else:
+        result = Coerced(_as_text(name, values), kind, notes=notes)
+    result.flag = flag
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -124,7 +136,7 @@ def coerce_column(name: str, values: list) -> Coerced:
 # --------------------------------------------------------------------------- #
 
 
-def _decide_kind(name, present) -> tuple[str, list[str]]:
+def _decide_kind(name, present) -> tuple[str, list[str], str | None]:
     sampled = sample(present)
     notes: list[str] = []
     kind = signals.modal_type(sampled)
@@ -139,15 +151,42 @@ def _decide_kind(name, present) -> tuple[str, list[str]]:
         _parsed, _primary, share = _ladder_parse(pl.Series("s", texts, dtype=pl.String))
         numeric_only = all(text is None or text.isdigit() for text in texts)
         if share >= (1.0 if numeric_only else DATE_SHARE_THRESHOLD):
-            return typing_utils.DATE, notes
+            return typing_utils.DATE, notes, None
 
-    if kind in (typing_utils.INT, typing_utils.FLOAT) and looks_like_a_code(sampled):
-        notes.append(f"column '{name}' kept as text: values look like codes")
-        return typing_utils.ID_STRING, notes
+    # Letters and digits in one value -- 12AB, A7, X9Y -- is an identifier, never a
+    # number. Letting the majority decide instead read such a column as numeric and
+    # silently turned every alphanumeric value into an empty cell. Checked on the whole
+    # column, because a sampled check would miss the one value that proves it.
+    if kind in (typing_utils.INT, typing_utils.FLOAT) and has_alphanumeric(present):
+        notes.append(f"column '{name}' kept as text: it holds alphanumeric values")
+        return typing_utils.ID_STRING, notes, None
+
+    if kind in (typing_utils.INT, typing_utils.FLOAT):
+        shape = code_shape(sampled)
+        if shape == LEADING_ZERO:
+            notes.append(f"column '{name}' kept as text: a value has a leading zero")
+            return typing_utils.ID_STRING, notes, None
+        if shape == UNIFORM:
+            # Counted on the whole column, not the sample: the sample is capped at 1000.
+            if len(present) > CODE_MIN_VALUES:
+                flag = (
+                    f"CHECK: same-width, all-different whole numbers (code such as ZIP or "
+                    f"account number, or an amount?); read as code (String) because it has "
+                    f"more than {CODE_MIN_VALUES} values"
+                )
+                notes.append(f"column '{name}' kept as text: values look like codes")
+                return typing_utils.ID_STRING, notes, flag
+            flag = (
+                f"CHECK: same-width, all-different whole numbers (code such as ZIP or "
+                f"account number, or an amount?); read as number (Int64) because it has "
+                f"{CODE_MIN_VALUES} or fewer values"
+            )
+            notes.append(f"column '{name}' read as numbers: too few values to call it a code")
+            return typing_utils.INT, notes, flag
 
     if typing_utils.ID_STRING in types and types & {typing_utils.INT, typing_utils.FLOAT}:
         notes.append(f"column '{name}' mixes identifiers and numbers; kept as text")
-        return typing_utils.ID_STRING, notes
+        return typing_utils.ID_STRING, notes, None
 
     # A column written in several date formats has no single lexical signature, so the
     # type lattice sees only "text". Parseability is the honest test.
@@ -161,36 +200,54 @@ def _decide_kind(name, present) -> tuple[str, list[str]]:
             present = series.len() - series.null_count()
             if primary and _resolved_share(series, primary, present) < share:
                 notes.append(f"column '{name}' holds several date formats; all parsed as dates")
-            return typing_utils.DATE, notes
+            return typing_utils.DATE, notes, None
 
     # Money and accounting negatives are text by shape but numeric in substance.
-    if kind == typing_utils.TEXT and _numeric_share(_texts(sampled)) >= NUMERIC_SHARE_THRESHOLD:
+    if (
+        kind == typing_utils.TEXT
+        and _numeric_share(_texts(sampled)) >= NUMERIC_SHARE_THRESHOLD
+        and not has_alphanumeric(present)
+    ):
         notes.append(f"column '{name}' holds formatted numbers; parsed as numeric")
-        return typing_utils.FLOAT, notes
+        return typing_utils.FLOAT, notes, None
 
-    return kind, notes
+    return kind, notes, None
 
 
-def looks_like_a_code(values) -> bool:
-    """Whether a numeric column is really an identifier that must stay text.
+def has_alphanumeric(values) -> bool:
+    """Whether any value mixes letters and digits, like ``12AB`` or ``A7``.
 
-    Two structural tells, neither of which needs to know the field's name:
+    Vectorised, because it runs over the whole column rather than a sample. Month-name
+    dates never reach it: it only guards the paths that would make a column a number.
+    """
+    texts = pl.Series("v", _texts(values), dtype=pl.String)
+    return bool((texts.str.contains(r"[A-Za-z]") & texts.str.contains(r"\d")).any())
 
-    * a leading zero, which is meaningless in a quantity and survives only as text;
-    * near-unique integers all of one digit width -- account numbers, centre codes,
-      branch ids. A genuine measure varies in magnitude; a code does not.
 
-    This recovers, from the data alone, the decision a schema used to declare: ``1005``
-    is an identifier, not a quantity, and must not become arithmetic.
+LEADING_ZERO = "leading_zero"
+UNIFORM = "uniform"
+
+
+def code_shape(values) -> str | None:
+    """How much a column of whole numbers looks like a code, from its values alone.
+
+    * ``LEADING_ZERO`` -- a value such as ``08085``. Meaningless in a quantity and kept
+      only by text, so this settles it: the column is a code.
+    * ``UNIFORM`` -- near-unique integers all of one digit width: account numbers, centre
+      codes, ZIPs. But whole-dollar amounts that happen never to repeat look the same,
+      so this is only a suspicion; the caller decides on size and flags it.
+    * ``None`` -- nothing code-like; an ordinary number column.
     """
     texts = [str(value).strip() for value in values]
     digits = [text for text in texts if text.isdigit()]
     if len(digits) < len(texts) or len(digits) < 3:
-        return False
+        return None
     if any(text.startswith("0") for text in digits):
-        return True
+        return LEADING_ZERO
     widths = {len(text) for text in digits}
-    return len(widths) == 1 and next(iter(widths)) >= 3 and len(set(digits)) / len(digits) >= 0.9
+    if len(widths) == 1 and next(iter(widths)) >= 3 and len(set(digits)) / len(digits) >= 0.9:
+        return UNIFORM
+    return None
 
 
 # --------------------------------------------------------------------------- #

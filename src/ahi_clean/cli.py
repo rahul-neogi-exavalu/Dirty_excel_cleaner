@@ -60,7 +60,11 @@ def clean_workbook(source: Path, out_dir: Path, audit_dir: Path, max_cells: int 
         # Built from the typed frame just written, never re-read and re-guessed: the
         # frame's schema is the cleaner's own type decision.
         described = metadata.build(
-            output.frame, source.name, output.sheet_names, metadata.inferred_schema(path)
+            output.frame,
+            source.name,
+            output.sheet_names,
+            metadata.inferred_schema(path),
+            output.type_flags,
         )
         metadata_path = out_dir / output.metadata_file
         if _write(described, metadata_path, blocked):

@@ -95,6 +95,7 @@ Built from the typed table at the moment it is written, so it never re-guesses t
 |---|---|
 | `header_name` | the cleaned column name |
 | `datatype` | the type the cleaner decided (`Int64`, `Float64`, `Date`, `String`, ...) |
+| `type_flag` | `CHECK: ...` when the type was a judgement call to verify against the header; `NA` otherwise |
 | `inferred_datatype` | what polars infers from the written CSV's first 1,000 rows (`infer_schema_length=1000`) |
 | `distinct_count` | distinct non-empty values |
 | `count` | non-empty values |
@@ -109,9 +110,17 @@ A statistic that does not apply is written as `NA`: `min`/`max`/`sum` of a text 
 `sum` of a date column, or any of them for a column with no values. An appended table gets one
 block of rows per sheet, each labelled with its `sheet_name`.
 
-**`datatype` is the schema to load with.** The cleaner types columns from their values,
-never their names. Codes such as centre numbers, ZIPs and account IDs stay `String`,
-because of a leading zero or because they are same-width, near-unique integers.
+**How codes and numbers are told apart**, from values only, never names:
+
+- **any value mixing letters and digits** (`12AB`, `A7`) → the column is text.
+- **a value with a leading zero** (`08085`) → a code, kept as text.
+- **same-width, all-different whole numbers** (`1005, 1006, 1007`) could be codes (ZIPs,
+  account or centre numbers) or amounts; the values cannot say which. **More than 10
+  values** → read as a code (`String`); **10 or fewer** → read as a number (`Int64`).
+  Either way the column is **flagged** in the metadata's `type_flag`, so someone can
+  check it against its header.
+
+**`datatype` is the schema to load with**, after checking any flagged column.
 `inferred_datatype` shows what a loader that guesses types would get instead. Where the
 two differ, typically a code column inferred as `Int64`, loading with inference would
 drop leading zeros or add up identifiers. Pass `datatype` as an explicit schema.
@@ -174,8 +183,9 @@ numbers).
 column headers match 100% (same set of names, any order), with a `source_sheet` column
 added; nothing partial counts. Tables are never joined.
 
-**Types.** Inferred per column. Leading zeros and constant-width near-unique integers stay
-text; a column in four different date formats is recognised by what parses, not by how it
+**Types.** Inferred per column. Alphanumeric values and leading zeros stay text;
+same-width, all-different whole numbers are a code above 10 values and a number at 10 or
+fewer, and flagged either way; a column in four different date formats is recognised by what parses, not by how it
 looks; formula cells with no cached value are reported rather than shipped as nulls.
 
 **Dates are written as `YYYY-MM-DD`.** Every value in a date column is normalised,

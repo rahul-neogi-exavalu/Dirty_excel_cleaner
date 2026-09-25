@@ -403,17 +403,21 @@ def _typed_frame(rows, names, trace) -> pl.DataFrame:
     """
     failures: list[dict] = []
     inferred: dict[str, str] = {}
+    flags: dict[str, str] = {}
     series: list[pl.Series] = []
 
     for index, name in enumerate(names):
         values = [row[index] if index < len(row) else None for row in rows]
         result = coerce.coerce_column(name, values)
         inferred[name] = result.kind
+        if result.flag:
+            flags[name] = result.flag
         failures.extend(result.failures)
         trace["notes"].extend(result.notes)
         series.append(result.series)
 
     trace["inferred_types"] = inferred
+    trace["type_flags"] = flags
     trace["coercion_failures"] = failures
     return pl.DataFrame(series) if series else pl.DataFrame()
 

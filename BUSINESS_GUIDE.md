@@ -407,8 +407,18 @@ a name column, the cell says "NA" (not applicable), so it is never mistaken for 
 missing figure.
 
 **The type column is worth reading.** The tool decides what each column is from its
-contents, and keeps reference codes as text: centre numbers, postcodes, account numbers.
-Those look like numbers but must never be added up or lose a leading zero. The summary
+contents, never its name:
+
+- anything mixing letters and digits (`12AB`) is text;
+- a number with a leading zero (`08085`) is a code, kept as text;
+- a column of whole numbers that are all the same length and all different, such as
+  `1005, 1006, 1007`, is the one genuinely hard case. It could be postcodes or account
+  numbers, or it could be amounts that happen never to repeat. With **more than 10
+  values** it is treated as a code; with **10 or fewer**, as a number.
+
+Either way, that last kind of column is **flagged** in the summary with a "CHECK" note
+right next to its type. Glance at the column's heading and you will know at once which it
+is: "ZIP" or "Premium". The summary
 also shows what a loading tool would guess on its own if left to itself. Where the two
 disagree, the loader should be told the type rather than left to guess.
 

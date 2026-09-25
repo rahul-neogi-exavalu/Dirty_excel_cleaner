@@ -32,6 +32,7 @@ NOT_APPLICABLE = "NA"
 FIELDNAMES = [
     "header_name",
     "datatype",
+    "type_flag",
     "inferred_datatype",
     "distinct_count",
     "count",
@@ -55,6 +56,7 @@ def build(
     excel_name: str,
     sheet_names: list[str],
     inferred: dict[str, str] | None = None,
+    flags: dict[str, str] | None = None,
 ) -> pl.DataFrame:
     """One row per column, and per source sheet when the table was appended.
 
@@ -62,6 +64,7 @@ def build(
     compared side by side; ``sheet_name`` labels each block.
     """
     inferred = inferred or {}
+    flags = flags or {}
     if SOURCE_SHEET_COLUMN in frame.columns:
         groups = [
             (str(key[0]), part)
@@ -79,6 +82,9 @@ def build(
             row.update(
                 header_name=column,
                 datatype=str(frame.schema[column]),
+                # A type that was a judgement call, for someone to check against the
+                # header; NA when the values decided it outright.
+                type_flag=flags.get(column, NOT_APPLICABLE),
                 inferred_datatype=inferred.get(column),
                 excel_name=excel_name,
                 sheet_name=sheet_name,

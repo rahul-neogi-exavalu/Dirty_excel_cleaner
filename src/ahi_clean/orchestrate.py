@@ -39,6 +39,8 @@ class Output:
     sheets: list[str] = field(default_factory=list)
     # The workbook sheet each of those tables came from, in the same order.
     sheet_names: list[str] = field(default_factory=list)
+    # Type decisions a person should check, by column name (see coerce.CODE_MIN_VALUES).
+    type_flags: dict[str, str] = field(default_factory=dict)
     # Set when the output is written: one job id names the CSV and its metadata file.
     job_id: str = ""
     file: str = ""
@@ -219,7 +221,13 @@ def adopt_sibling_headers(results) -> list[dict]:
                 continue
             if profile_overlap(donor.frame, result.frame) < PROFILE_OVERLAP_THRESHOLD:
                 continue
+            renamed = dict(zip(result.frame.columns, donor.frame.columns))
             result.frame.columns = list(donor.frame.columns)
+            # Types and flags were recorded under the positional names; carry them over,
+            # or everything keyed by column name downstream silently misses them.
+            for key in ("inferred_types", "type_flags"):
+                recorded = result.trace.get(key, {})
+                result.trace[key] = {renamed.get(name, name): value for name, value in recorded.items()}
             # `detected` stays False on purpose: this region genuinely has no header
             # row, it has borrowed names from one. Overloading the flag made every
             # downstream row count skip a header line that is not there.
@@ -273,7 +281,7 @@ def plan_workbook(results, stem: str) -> tuple[list[Output], dict]:
         name = stem if shipped == 1 else f"{stem}_{_slug(labels[0])}"
         outputs.append(
             Output(name, pl.concat(frames, how="vertical_relaxed"), "stacked", labels,
-                   [result.sheet_name for result in group])
+                   [result.sheet_name for result in group], _flags(group))
         )
         report["relationships"].append(
             {"tables": labels, "decision": STACK, "decided_by": "identical_headers"}
@@ -285,10 +293,26 @@ def plan_workbook(results, stem: str) -> tuple[list[Output], dict]:
             continue
         name = stem if shipped == 1 else f"{stem}_{_slug(result.label)}"
         outputs.append(
-            Output(name, result.frame, "standalone", [result.label], [result.sheet_name])
+            Output(name, result.frame, "standalone", [result.label], [result.sheet_name],
+                   _flags([result]))
         )
 
     return outputs, report
+
+
+def _flags(results) -> dict[str, str]:
+    """Every flagged column across the tables that make up one output.
+
+    Appended sheets can decide the same column differently -- one with more values than
+    the code threshold, one with fewer -- so both flags are kept rather than one winning.
+    """
+    merged: dict[str, list[str]] = {}
+    for result in results:
+        for column, flag in result.trace.get("type_flags", {}).items():
+            text = f"{result.sheet_name}: {flag}" if len(results) > 1 else flag
+            if text not in merged.setdefault(column, []):
+                merged[column].append(text)
+    return {column: " | ".join(flags) for column, flags in merged.items()}
 
 
 def _slug(text: str) -> str:
