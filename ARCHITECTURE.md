@@ -15,7 +15,7 @@ records.** A few carry an advisory — the pipeline reporting honest uncertainty
 error.
 
 ```bash
-python tools/scorecard.py
+python backend/tools/scorecard.py
 ```
 
 For the same decisions explained without the machinery, see
@@ -452,7 +452,7 @@ Every signal is disabled in turn and the whole corpus re-scored, so no assumptio
 quietly become load-bearing without it showing up.
 
 ```bash
-python tools/ablation.py
+python backend/tools/ablation.py
 ```
 
 **Run it rather than trusting a number quoted here.** The results depend on the corpus as
@@ -518,7 +518,7 @@ failure modes have happened here.
 
 Each time an ablation "passed" because the harness could not see the damage. A benchmark
 that cannot fail is not measuring anything, so each gap is now closed with a direct check
-in `tools/scorecard.py`:
+in `backend/tools/scorecard.py`:
 
 | What was missed | The check now |
 |---|---|
@@ -535,7 +535,7 @@ and has been swapped three times during development.
 
 | Suite | Scope | Stability |
 |---|---|---|
-| `test_scenarios.py` | Every workbook currently in `sample_files_uncleaned/` | Parametrized over whatever is present; new files are picked up with nothing to register, and no assertion pins a file count |
+| `test_scenarios.py` | Every workbook currently in `backend/sample_files_uncleaned/` | Parametrized over whatever is present; new files are picked up with nothing to register, and no assertion pins a file count |
 | everything else | Header, geometry, row classification, types, appends, orchestration, pivots | Sheets built **in memory**; never names a corpus file, so swapping the samples cannot break them |
 
 That split is itself a fix. Behaviour tests originally named corpus files, and each corpus
@@ -552,14 +552,14 @@ reporting that it was not certain — an orientation decided by shape, a column 
 positionally because its header cell was blank. Those are a feature, and counting them as
 failures would push the design towards false confidence.
 
-**Resilience and contracts have their own suite.** `tests/test_resilience.py` covers what
+**Resilience and contracts have their own suite.** `backend/tests/test_resilience.py` covers what
 happens to a batch containing a corrupt, encrypted, legacy and empty workbook, asserts that
 every output contract *fires* on deliberately broken input, and checks that a parallel run
 produces byte-identical output to a sequential one under both executors.
 
 170 tests with an empty corpus, of which the 16 that need real workbooks skip; each
-workbook in `sample_files_uncleaned/` adds its own scenario tests.
-`python -m pytest`. Measure with `python tools/benchmark.py`.
+workbook in `backend/sample_files_uncleaned/` adds its own scenario tests.
+`python -m pytest`. Measure with `python backend/tools/benchmark.py`.
 
 ---
 
@@ -903,4 +903,4 @@ is labelled with its `sheet_name`.
 | Process pools need an importable entry point | A consequence of Windows spawn, not of this design. Threads are the default and are unaffected. |
 | Pivot detection needs ≥3 value columns | A two-month matrix is indistinguishable from an ordinary table with two numeric columns. |
 | Header adoption needs an exact width match | A continuation sheet missing a column keeps positional names rather than guessing an alignment. |
-| The scorecard reads `.xlsx` only | Delimited inputs are covered by `tests/test_delimited.py`, not by the oracle. |
+| The scorecard reads `.xlsx` only | Delimited inputs are covered by `backend/tests/test_delimited.py`, not by the oracle. |

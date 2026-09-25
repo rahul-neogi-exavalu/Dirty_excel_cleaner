@@ -54,3 +54,8 @@ scratch/
 tmp/
 *.log
 cleaned/
+# --- Web app ---------------------------------------------------------------
+# Uploads, job outputs and exports written by the API server.
+.workspace/
+frontend/node_modules/
+frontend/dist/
