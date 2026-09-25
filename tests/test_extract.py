@@ -483,7 +483,7 @@ def test_a_column_of_only_five_digit_numbers_is_not_read_as_serial_dates():
         (["$1,234", "(500)", "12"], pl.Int64, ["INFO: formatted numbers; removed currency symbols"]),
         (["10%", "20%", "35%"], pl.Int64, ["CHECK: percent signs removed"]),
         (["$1,234", "(500)", "N/A", "12"], pl.Int64, ["CHECK: 1 value(s) are not numbers"]),
-        ([75202, 46030, 75202, 10001], pl.Int64, ["CHECK: every value is a 5-digit whole number"]),
+        ([46030, 46031, 46030, 46045], pl.Int64, ["CHECK: every value is a 5-digit number: could be ZIP"]),
         (["08085", "75202", "10001"], pl.String, ["INFO: numbers with leading zeros"]),
         (["1234", "5678", "12AB"], pl.String, ["CHECK: mostly numbers, but 1 value(s) mix letters"]),
         (list(range(1005, 1016)), pl.String, ["CHECK: same-width, all-different whole numbers"]),
@@ -525,3 +525,60 @@ def test_a_headerless_table_flags_every_column():
         any("no header row was found" in flag for flag in result.trace["flags"][name])
         for name in result.frame.columns
     )
+
+
+
+# --------------------------------------------------------------------------- #
+# ZIP code or Excel date serial: the one tie the header breaks
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Txn Dt", "txndt", "TXN_DTTM", "created_at", "CreatedAt", "Posted On",
+        "AccountingEffectiveDate", "effectivedate", "fecha", "LastUpdated", "ExpiryDt",
+        "Timestamp", "DOB", "PeriodEnd", "Closed",
+    ],
+)
+def test_five_digit_serials_under_a_date_header_become_dates_and_are_flagged(label):
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("c", [46030, 46031, 46045, 46030], label)
+    assert result.series.dtype == pl.Date
+    assert result.series.cast(pl.String).to_list()[0] == "2026-01-08"
+    assert result.flags[0].startswith("CHECK:") and "names a date" in result.flags[0]
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "ZIP", "zip_code", "Postal", "Rate", "State", "Status", "Category", "Format",
+        "Latitude", "update_count", "width", "lifetime_value", "created_by", "updated_by",
+        "Candidate No", "media", "stage", None,
+    ],
+)
+def test_five_digit_numbers_without_a_date_header_stay_numbers_and_are_flagged(label):
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("c", [46030, 46031, 46045, 46030], label)
+    assert result.series.dtype == pl.Int64
+    assert any("does not name a date" in flag for flag in result.flags)
+
+
+def test_five_digit_numbers_that_cannot_be_dates_are_not_flagged_as_serials():
+    """75202 as a serial is the year 2105: outside any plausible date, so not a serial."""
+    from ahi_clean import coerce
+
+    result = coerce.coerce_column("c", [75202, 90210, 75202, 60601], "Posted On")
+    assert result.series.dtype == pl.Int64
+    assert not any("serial" in flag for flag in result.flags)
+
+
+def test_the_header_hint_is_read_from_the_sheet_label():
+    """End to end: the raw header, camelCase and all, reaches the tie-break."""
+    header = ["Policy", "CreatedAt", "Amount"]
+    rows = [header] + [[f"POL-{i}", 46030 + i, 100.5 + i] for i in range(6)]
+    result = one(rows)
+    assert result.frame["createdat"].dtype == pl.Date
+    assert any("names a date" in flag for flag in result.trace["flags"]["createdat"])

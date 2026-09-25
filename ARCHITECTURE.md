@@ -585,11 +585,50 @@ accepted), then two all-digit rungs:
 | Rung | Accepts | Guard |
 |---|---|---|
 | `yyyyMMdd` | exactly eight digits | year within 1900–2100 |
-| Excel serial | exactly five digits, as 1899-12-30 + n days (`46030` → 2026-01-08) | only once another rung has resolved something in the column |
+| Excel serial | exactly five digits, as 1899-12-30 + n days (`46030` → 2026-01-08) | only once another rung has resolved something in the column, or when the header names a date (below) |
 
 The serial guard exists because a column of bare five-digit numbers is equally a column of
 ZIPs or centre codes, and nothing in the values tells them apart. In a column that already
-holds dates, a five-digit number is a date Excel wrote as its serial. What
+holds dates, a five-digit number is a date Excel wrote as its serial.
+
+**The one place a header is read: ZIP code or Excel date serial.** A column of nothing
+but 5-digit numbers that are all plausible serials (years 1900–2100) is a genuine tie:
+`46030` is an Indiana ZIP code and also `2026-01-08`. The values cannot settle it, so the
+column's header does, and the column is flagged `CHECK` either way:
+
+- the header names a date → read as Excel serials and converted to `YYYY-MM-DD`;
+- otherwise → kept as a number.
+
+The header counts as a date in three ways (`coerce.header_names_a_date`):
+
+| Match | Words | Examples that match |
+|---|---|---|
+| **anywhere**, like SQL `LIKE '%date%'` | `date`, `dt`, `time`, `day`, `period`, `expir`, `effectiv`, `matur`, `birth`, `fecha`, `datum`, `giorno`, `tarih` | `TxnDate`, `txndt`, `TXN_DTTM`, `Timestamp`, `PeriodEnd`, `ExpiryDt` |
+| **whole word only**, after splitting on separators and camelCase | `at`, `on`, `ts`, `dob`, `doj`, `when`, `since`, `until`, `due`, `asof`, `eff`, `tag`, `dia`, `jour` | `created_at`, `CreatedAt`, `Posted On`, `updated_ts`, `DOB` |
+| **event word**, unless a person or id is named beside it | `created`, `updated`, `modified`, `posted`, `issued`, `closed`, `opened` | `LastUpdated`, `Closed`; but not `created_by` or `updated_by`, which hold user ids |
+
+The words follow common naming conventions: dbt and GitLab use `<event>_at` for
+timestamps and `<event>_date` for dates, Oracle uses `_dt` and `_dttm`, `_on` marks
+date-only columns, and `_ts` marks timestamps.
+
+**Ordinary words containing a date fragment are set aside first.** Otherwise `width`
+would match `%dt%`, `lifetime` `%time%`, and `update_count` or `candidate` `%date%`. The
+list is `NOT_DATE_FRAGMENTS` in `coerce.py`.
+
+**Why `at`, `on` and `ts` are whole words and not `%at%`.** As a substring, `at` matches
+`rate`, `state`, `status`, `category`, `format`, `vat`, `latitude` and `location`. That
+would turn a ZIP column under a `State` header into dates. The short words are matched
+only when they stand alone, so they still catch `created_at`, `CreatedAt` and
+`Posted On`. The same applies to `dia` (`media`, `india`), `tag` (`stage`) and `jour`
+(`journal`).
+
+This is the only decision in the pipeline that reads a header, and it is deliberately a
+tiebreaker rather than a primary signal. It runs only when every value is a plausible
+serial, and it is always flagged. The raw label reaches `coerce_column` through
+`extract` (`labels`), so camelCase survives. The normalised name would have lost it:
+`CreatedAt` becomes `createdat`.
+
+What
 counts is the share the ladder resolves *as a whole*, not what its best single rung does.
 A report whose dates arrive in four formats resolves fully while no single format covers a
 quarter of it, and judging on the best single rung would call that column text and lose
@@ -768,7 +807,8 @@ columns' flags. Appended sheets keep each sheet's flags, prefixed with its name.
 | Flag | Kind | When |
 |---|---|---|
 | same-width, all-different whole numbers; read as code / as number | CHECK | could be ZIPs, account numbers or amounts; more than 10 values → code, 10 or fewer → number |
-| every value is a 5-digit whole number | CHECK | could be ZIP codes, Excel date serials or amounts; read as number |
+| every value is a 5-digit number; read as dates because the header names a date | CHECK | ZIP or Excel serial? the header (`Txn Dt`, `created_at`, ...) broke the tie |
+| every value is a 5-digit number; the header does not name a date, so kept as number | CHECK | could be ZIP codes, amounts or Excel date serials |
 | every value is an 8-digit valid yyyyMMdd date | CHECK | read as dates, but could be identifiers |
 | mostly numbers, but N value(s) mix letters and digits | CHECK | whole column kept as text |
 | mixes identifiers (like POL-1) with plain numbers | CHECK | whole column kept as text |

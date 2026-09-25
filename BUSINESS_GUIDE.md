@@ -430,6 +430,17 @@ anything about a column you should know, in plain words:
   times of day dropped from dates, "$" and "," removed from figures, an Excel date number
   like 46030 turned into 2026-01-08, or a sideways table turned upright.
 
+**The ZIP-or-date puzzle.** The number 46030 is both a US ZIP code and, as Excel stores
+dates, 8 January 2026. When a column holds nothing but numbers like that, the tool reads
+the column's heading. A heading that names a date ("Txn Dt", "Created At", "Posted On",
+"Effective Date") turns them into dates. Any other heading ("ZIP", "Postal") leaves them
+as numbers. Either way the summary says CHECK, because the heading, not the data, made
+the call. Headings are read sensibly: anything containing "date", "dt" or "time" counts
+("TxnDate", "Expiry Dt"), but ordinary words like "Update", "Width" or "Lifetime" do not.
+Short words such as "at" and "on" count only on their own ("Created At"), so "State" or
+"Rate" never counts as a date just because it contains the letters "at". And "Created
+By" holds a person, not a date.
+
 A column with nothing to report says "NA". So the fastest review of any file is to read
 the CHECK notes in its summary and nothing else. The summary
 also shows what a loading tool would guess on its own if left to itself. Where the two

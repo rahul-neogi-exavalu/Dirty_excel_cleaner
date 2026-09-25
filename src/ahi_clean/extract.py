@@ -194,6 +194,11 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
 
     body = rows[body_start:]
     names = _fit_names(found.names, width)
+    # The header as the sheet wrote it, per column name: typing reads it for one tie only.
+    labels = (
+        {name: label for name, label in zip(names, header_row) if not is_blank(label)}
+        if header_row is not None else {}
+    )
     names, body, width = _realign_gutters(names, found, rows, body, width, trace)
 
     verdicts = rowclass.classify_rows(body, header_names=names, header_row=header_row)
@@ -213,7 +218,7 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
                 )
 
     _flag_structure(names, found, trace)
-    frame = _typed_frame([_fit_row(row, width) for row in kept], names, trace)
+    frame = _typed_frame([_fit_row(row, width) for row in kept], names, trace, labels)
     _validate(frame, trace)
 
     frame = _unpivot(frame, rows, found, names, trace)
@@ -448,7 +453,7 @@ def _realign_gutters(names, found, rows, body, width, trace):
 # --------------------------------------------------------------------------- #
 
 
-def _typed_frame(rows, names, trace) -> pl.DataFrame:
+def _typed_frame(rows, names, trace, labels=None) -> pl.DataFrame:
     """Build the frame column-by-column, typing each one as it is built.
 
     Columns rather than rows because that is the shape every type decision is made in:
@@ -462,7 +467,7 @@ def _typed_frame(rows, names, trace) -> pl.DataFrame:
 
     for index, name in enumerate(names):
         values = [row[index] if index < len(row) else None for row in rows]
-        result = coerce.coerce_column(name, values)
+        result = coerce.coerce_column(name, values, (labels or {}).get(name))
         inferred[name] = result.kind
         for flag in result.flags:
             flag_text.add(trace, name, flag)

@@ -88,6 +88,40 @@ PLAUSIBLE_YEARS = (1900, 2100)
 # dates only in a column that already holds dates written some other way.
 EXCEL_SERIAL = r"^\d{5}$"
 
+# Header words that name a date. Used for ONE decision only: a column of nothing but
+# five-digit numbers, where the values genuinely cannot say ZIP code or Excel date serial
+# (46030 is both an Indiana ZIP and 2026-01-08). Everywhere else the values decide and the
+# header is never read. A hint never goes unannounced: the column is flagged CHECK
+# whichever way it goes.
+#
+# Conventions covered: dbt and GitLab name timestamps <event>_at and dates <event>_date,
+# Oracle uses _dt and _dttm, _on marks date-only columns, _ts timestamps.
+#
+# Matched anywhere in the header, like SQL's LIKE '%date%': long, distinctive fragments.
+DATE_HEADER_SUBSTRINGS = (
+    "date", "dt", "time", "day", "period", "expir", "effectiv", "matur", "birth",
+    "fecha", "datum", "giorno", "tarih",
+)
+# Matched only as a whole word of the header, split on separators and camelCase. As
+# substrings these are ruinous: "at" alone is inside rate, state, status, category,
+# format, vat, latitude and location.
+DATE_HEADER_WORDS = {
+    "at", "on", "ts", "dob", "doj", "when", "since", "until", "due", "asof", "eff",
+    "tag", "dia", "jour",
+}
+# Event words that are dates -- created, updated -- unless the header also marks a person
+# or an identifier: created_by and updated_by hold user ids, which can be 5-digit numbers.
+DATE_EVENT_WORDS = {"created", "updated", "modified", "posted", "issued", "closed", "opened"}
+NOT_A_DATE_MARKERS = {"by", "id", "user", "no", "num", "number", "code", "count"}
+# Ordinary words that contain a date fragment. Removed before the substring search, so
+# width is not %dt%, lifetime is not %time% and update_count is not %date%.
+NOT_DATE_FRAGMENTS = (
+    "bandwidth", "width", "breadth", "hundredth", "thousandth",
+    "lifetime", "overtime", "runtime", "downtime", "uptime", "timeout", "anytime",
+    "update", "candidate", "validate", "mandate", "accommodate", "consolidate",
+    "liquidate", "sedate", "intimidate",
+)
+
 
 @dataclass
 class Coerced:
@@ -114,11 +148,29 @@ def sample(values):
     return values[:SAMPLE_HEAD] + values[SAMPLE_HEAD::stride][: SAMPLE_CAP - SAMPLE_HEAD]
 
 
-def coerce_column(name: str, values: list) -> Coerced:
-    """Decide what a column is, then convert all of it in one pass."""
+def coerce_column(name: str, values: list, label=None) -> Coerced:
+    """Decide what a column is, then convert all of it in one pass.
+
+    ``label`` is the header exactly as the sheet wrote it (``CreatedAt``, ``Txn Dt``). It
+    is consulted for one tie only -- see ``DATE_HEADER_WORDS``.
+    """
     present = [value for value in values if not is_blank(value)]
     if not present:
         return Coerced(pl.Series(name, [None] * len(values), dtype=pl.String), typing_utils.EMPTY)
+
+    serial_like = _serial_candidates(present)
+    header = str(label) if label is not None else name
+    if serial_like and header_names_a_date(header):
+        result = _as_date(name, values, [], serials=True)
+        if result.series.dtype == pl.Date:
+            example = f"{serial_like[0]} = {result.series.drop_nulls()[0].isoformat()}"
+            result.flags.insert(0, flag_text.check(
+                f"every value is a 5-digit number (ZIP code or Excel date serial?); read "
+                f"as dates because the header '{header}' names a date (e.g. {example}); "
+                "confirm it is not a ZIP or code"
+            ))
+            result.notes.append(f"column '{name}' read as Excel date serials: header names a date")
+            return result
 
     kind, notes, flags = _decide_kind(name, present)
 
@@ -130,17 +182,50 @@ def coerce_column(name: str, values: list) -> Coerced:
         result = Coerced(_as_text(name, values), kind, notes=notes)
     # What decided the type first, then what happened to the values while converting.
     result.flags = flags + result.flags
-    if result.series.dtype == pl.Int64 and not flags and _all_five_digits(present):
+    if serial_like:
+        read_as = "number (Int64)" if result.series.dtype == pl.Int64 else "text (String)"
         result.flags.append(flag_text.check(
-            "every value is a 5-digit whole number: could be ZIP codes, Excel date "
-            "serials or amounts; read as number (Int64)"
+            "every value is a 5-digit number: could be ZIP codes, amounts or Excel date "
+            f"serials (e.g. {serial_like[0]} would be "
+            f"{excel_serials(pl.Series([serial_like[0]]))[0].isoformat()}); the header "
+            f"'{header}' does not name a date, so kept as {read_as}"
         ))
     return result
 
 
-def _all_five_digits(present) -> bool:
+def _serial_candidates(present) -> list[str]:
+    """The values, when every one is a 5-digit number that is a plausible date serial."""
     texts = [text for text in _texts(present) if text is not None]
-    return bool(texts) and all(len(text) == 5 and text.isdigit() for text in texts)
+    if not texts or not all(len(text) == 5 and text.isdigit() for text in texts):
+        return []
+    dates = excel_serials(pl.Series(texts))
+    low, high = PLAUSIBLE_YEARS
+    return texts if bool(dates.dt.year().is_between(low, high).all()) else []
+
+
+def header_words(header: str) -> list[str]:
+    """A header split into lower-case words: on separators, and on camelCase."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", str(header))
+    return [word for word in re.split(r"[^A-Za-z0-9]+", spaced.lower()) if word]
+
+
+def header_names_a_date(header: str) -> bool:
+    """Whether a header reads as a date.
+
+    Three ways in: a date fragment anywhere (``%date%``, ``%dt%``, ``%time%`` ...) once
+    ordinary words containing one are set aside; a short date word standing on its own
+    (``created_at``, ``Posted On``); or an event word with no person or id beside it.
+    """
+    text = str(header).lower()
+    for fragment in NOT_DATE_FRAGMENTS:
+        text = text.replace(fragment, " ")
+    if any(fragment in text for fragment in DATE_HEADER_SUBSTRINGS):
+        return True
+
+    words = set(header_words(header))
+    if words & DATE_HEADER_WORDS:
+        return True
+    return bool(words & DATE_EVENT_WORDS) and not words & NOT_A_DATE_MARKERS
 
 
 # --------------------------------------------------------------------------- #
@@ -400,7 +485,7 @@ def looks_like_periods(labels) -> bool:
     return False
 
 
-def _ladder_parse(series: pl.Series) -> tuple[pl.Series, str | None, float]:
+def _ladder_parse(series: pl.Series, serials: bool = False) -> tuple[pl.Series, str | None, float]:
     """Apply every format in turn, keeping what each one resolves.
 
     The share that matters is what the ladder resolves *as a whole*, not what its best
@@ -434,9 +519,13 @@ def _ladder_parse(series: pl.Series) -> tuple[pl.Series, str | None, float]:
     if parsed.null_count() < before and primary is None:
         primary = COMPACT_FORMAT
 
-    # Serials only count once something else in the column has proved it holds dates.
-    if parsed.null_count() < series.len():
+    # Serials only count once something else in the column has proved it holds dates --
+    # or when the caller has already settled that the column is serials.
+    if serials or parsed.null_count() < series.len():
+        before = parsed.null_count()
         parsed = parsed.fill_null(excel_serials(series))
+        if parsed.null_count() < before and primary is None:
+            primary = "excel_serial"
 
     resolved = parsed.len() - parsed.null_count()
     return parsed, primary, resolved / present
@@ -485,14 +574,14 @@ def _resolved_share(series: pl.Series, fmt: str, present: int) -> float:
     return (parsed.len() - parsed.null_count()) / present
 
 
-def _as_date(name, values, notes) -> Coerced:
+def _as_date(name, values, notes, serials: bool = False) -> Coerced:
     texts = _texts(values)
     series = pl.Series(name, texts, dtype=pl.String)
     present = series.len() - series.null_count()
     if not present:
         return Coerced(series, typing_utils.DATE, notes=notes)
 
-    parsed, chosen, share = _ladder_parse(series)
+    parsed, chosen, share = _ladder_parse(series, serials=serials)
     if chosen is None:
         failures = [
             {"column": name, "value": str(text)[:80], "reason": "unparseable date"}
@@ -516,7 +605,9 @@ def _as_date(name, values, notes) -> Coerced:
             f"{len(failures)} value(s) could not be read as dates and were left empty "
             f"({flag_text.example(item['value'] for item in failures)})"
         ))
-    flags.extend(_date_conversion_flags(values, texts, parsed, present))
+    if not serials:
+        # When serials alone decided the column, the CHECK already says so.
+        flags.extend(_date_conversion_flags(values, texts, parsed, present))
 
     # Kept as a real Date so the frame's schema says what the column is: the metadata
     # reads its datatype from here. write_csv renders a Date as YYYY-MM-DD.
