@@ -202,24 +202,25 @@ def test_no_append_report_when_keeping_sheets_separate(client):
 
 
 def test_each_sheet_is_read_and_cleaned_once(client, monkeypatch):
-    from api.services import cleaning_service
+    from api.services import sheet_worker
 
-    calls = {"read": 0, "extract": 0}
-    real_read, real_extract = cleaning_service.read_workbook, cleaning_service.extract_sheet
+    calls = {"read": [], "extract": 0}
+    real_read, real_extract = sheet_worker.read_sheet, sheet_worker.extract_sheet
 
-    def read(*args, **kwargs):
-        calls["read"] += 1
-        return real_read(*args, **kwargs)
+    def read(path, name, *args, **kwargs):
+        calls["read"].append(name)
+        return real_read(path, name, *args, **kwargs)
 
     def extract(*args, **kwargs):
         calls["extract"] += 1
         return real_extract(*args, **kwargs)
 
-    monkeypatch.setattr(cleaning_service, "read_workbook", read)
-    monkeypatch.setattr(cleaning_service, "extract_sheet", extract)
+    monkeypatch.setattr(sheet_worker, "read_sheet", read)
+    monkeypatch.setattr(sheet_worker, "extract_sheet", extract)
     workbook_id = _upload(client, MULTI_SHEET).json()["id"]
     _run(client, workbook_id, ["Jan", "Feb"])
-    assert calls == {"read": 1, "extract": 2}
+    # One read per selected sheet -- no whole-workbook pass -- and one clean each.
+    assert calls == {"read": ["Jan", "Feb"], "extract": 2}
 
 
 # --------------------------------------------------------------------------- #
@@ -255,18 +256,40 @@ def test_clean_workbook_passes_every_check(client):
     assert results["summary"]["consistency_issues"] == 0
 
 
-def test_row_accounting_catches_a_silently_dropped_row(client):
-    """File2 row 3 ('Exavalu') sits above the table: neither kept nor logged as removed."""
+def test_rows_outside_the_table_are_accounted_for(client):
+    """File2: '#VALUE!' merged over A1:D2, then 'Exavalu' alone on row 3, above the table.
+
+    Neither is table-shaped, so region finding rejects both. They must still leave with a
+    reason: the error rows are not blank (they held a value), and the lone title is a banner.
+    """
     results, report = _consistency(client, BANNERED, ["Data"])
     sheet = report["accounting"][0]
-    assert sheet["raw"] == 21 and sheet["blank"] == 4 and sheet["header"] == 1
-    assert sheet["removed"] == 5 and sheet["kept"] == 10
-    assert sheet["unaccounted"] == 1
-    assert sheet["unaccounted_rows"] == [{"sheet_row": 3, "content": "Exavalu"}]
-    assert _check(report, "row_accounting")["status"] == "failed"
-    assert report["status"] == "failed" and results["summary"]["consistency_issues"] >= 1
-    # The grand total it removed does reconcile, so that check genuinely passed.
+    # Only rows 4 and 19 are truly blank.
+    assert sheet["raw"] == 21 and sheet["blank"] == 2 and sheet["header"] == 1
+    assert sheet["removed"] == 8 and sheet["kept"] == 10 and sheet["unaccounted"] == 0
+    assert sheet["removed_by_reason"] == {"EXCEL_ERROR": 2, "BANNER": 3, "GRAND_TOTAL": 1, "FOOTER": 2}
+    removed = {row["sheet_row"]: row["classification"] for row in sheet["removed_rows"]}
+    assert removed[1] == removed[2] == "EXCEL_ERROR" and removed[3] == "BANNER"
+    assert _check(report, "row_accounting")["status"] == "passed"
+    # Rows outside the region do not disturb the in-region conservation contract.
+    assert _check(report, "row_conservation")["status"] == "passed"
     assert _check(report, "total_reconciliation")["status"] == "passed"
+    assert report["status"] == "passed" and results["summary"]["consistency_issues"] == 0
+
+
+def test_row_accounting_catches_a_silently_dropped_row():
+    """If a row ever leaves without a logged reason, the sheet-level accounting says so."""
+    from ahi_clean.extract import extract_sheet
+    from ahi_clean.reader import read_workbook
+    from api.services import consistency_service
+
+    [grid] = read_workbook(BANNERED)
+    results = extract_sheet(grid)
+    trace = results[0].trace
+    trace["dropped_rows"] = [row for row in trace["dropped_rows"] if row["sheet_row"] != 3]
+    sheet = consistency_service._account(grid, results)
+    assert sheet["unaccounted"] == 1 and sheet["status"] == "failed"
+    assert sheet["unaccounted_rows"] == [{"sheet_row": 3, "content": "Exavalu"}]
 
 
 def test_transposed_sheet_is_accounted_along_its_columns(client):
@@ -295,3 +318,133 @@ def test_a_contract_violation_fails_its_check(client, monkeypatch):
     check = _check(report, "empty_key_column")
     assert check["status"] == "failed" and "entirely null" in check["details"][0]
     assert report["issues"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Batches: several files, each with its own sheets and append mode
+# --------------------------------------------------------------------------- #
+
+
+def _run_batch(client, files):
+    response = client.post("/api/batches", json={"files": files})
+    assert response.status_code == 202, response.text
+    batch_id = response.json()["id"]
+    for _ in range(600):
+        status = client.get(f"/api/batches/{batch_id}").json()
+        if status["status"] not in ("queued", "running"):
+            return status
+        time.sleep(0.05)
+    raise AssertionError("batch did not finish")
+
+
+def test_batch_cleans_each_file_with_its_own_settings(client):
+    multi = _upload(client, MULTI_SHEET).json()["id"]
+    two = _upload(client, TWO_TABLES).json()["id"]
+    status = _run_batch(client, [
+        {"workbook_id": multi, "sheets": ["Jan", "Feb"], "append": True},
+        {"workbook_id": two, "sheets": ["Report", "Producer"], "append": False},
+    ])
+    assert status["status"] == "succeeded", status
+    assert status["files_total"] == status["files_succeeded"] == 2 and status["progress"] == 1.0
+    first, second = status["jobs"]
+    assert first["batch_id"] == second["batch_id"] == status["id"]
+    assert first["workbook_id"] == multi and second["workbook_id"] == two
+
+    appended = client.get(f"/api/jobs/{first['id']}/results").json()
+    assert [output["kind"] for output in appended["outputs"]] == ["stacked"]
+    separate = client.get(f"/api/jobs/{second['id']}/results").json()
+    assert [output["kind"] for output in separate["outputs"]] == ["standalone", "standalone"]
+    assert separate["append_check"] is None
+
+
+def test_batch_zip_has_one_folder_per_file(client):
+    import zipfile
+
+    first = _upload(client, MULTI_SHEET).json()["id"]
+    # Same file name twice: the folders must not collide.
+    second = _upload(client, MULTI_SHEET).json()["id"]
+    status = _run_batch(client, [
+        {"workbook_id": first, "sheets": ["Jan"], "append": True},
+        {"workbook_id": second, "sheets": ["Feb"], "append": True},
+    ])
+    response = client.get(f"/api/batches/{status['id']}/export/zip")
+    assert response.status_code == 200
+    names = zipfile.ZipFile(io.BytesIO(response.content)).namelist()
+    folders = {name.split("/")[0] for name in names}
+    assert folders == {"File5_Scenario_MultiSheet", "File5_Scenario_MultiSheet (2)"}
+    assert all(name.count("/") == 1 for name in names)
+
+
+def test_one_failing_file_does_not_stop_the_batch(client, tmp_path):
+    path = tmp_path / "blank.xlsx"
+    workbook = openpyxl.Workbook()
+    workbook.active.title = "Empty"
+    workbook.save(path)
+    blank = _upload(client, path).json()["id"]
+    good = _upload(client, MULTI_SHEET).json()["id"]
+    status = _run_batch(client, [
+        {"workbook_id": blank, "sheets": ["Empty"], "append": True},
+        {"workbook_id": good, "sheets": ["Jan", "Feb"], "append": True},
+    ])
+    assert status["status"] == "partial"
+    assert [job["status"] for job in status["jobs"]] == ["failed", "succeeded"]
+    assert status["jobs"][0]["error"]["kind"] == "no_table"
+
+
+def test_batch_is_validated_before_anything_runs(client):
+    good = _upload(client, MULTI_SHEET).json()["id"]
+    other = _upload(client, TWO_TABLES).json()["id"]
+    bad = client.post("/api/batches", json={"files": [
+        {"workbook_id": good, "sheets": ["Jan"]},
+        {"workbook_id": other, "sheets": ["Nope"]},
+    ]})
+    assert bad.status_code == 422 and bad.json()["error"]["code"] == "unknown_sheet"
+    # Nothing was started for the valid first file.
+    from api.store import store
+    assert not store.jobs_for(good)
+
+    duplicate = client.post("/api/batches", json={"files": [
+        {"workbook_id": good, "sheets": ["Jan"]},
+        {"workbook_id": good, "sheets": ["Feb"]},
+    ]})
+    assert duplicate.status_code == 422
+    assert client.post("/api/batches", json={"files": []}).status_code == 422
+
+
+def test_cancelling_a_batch_skips_files_still_waiting(client, monkeypatch):
+    import threading
+
+    from api import config
+    from api.services import sheet_worker
+
+    started, release = threading.Event(), threading.Event()
+    real_extract = sheet_worker.extract_sheet
+
+    def slow_extract(*args, **kwargs):
+        started.set()
+        release.wait(5)
+        return real_extract(*args, **kwargs)
+
+    monkeypatch.setattr(sheet_worker, "extract_sheet", slow_extract)
+    # One file at a time, so the second is still waiting when the batch is cancelled.
+    monkeypatch.setattr(config, "BATCH_FILE_CONCURRENCY", 1)
+    first = _upload(client, MULTI_SHEET).json()["id"]
+    second = _upload(client, TWO_TABLES).json()["id"]
+    batch_id = client.post("/api/batches", json={"files": [
+        {"workbook_id": first, "sheets": ["Jan"]},
+        {"workbook_id": second, "sheets": ["Producer"]},
+    ]}).json()["id"]
+    assert started.wait(5)
+    # A file in a running batch can't be removed from under it.
+    assert client.delete(f"/api/workbooks/{second}").status_code == 409
+    cancelled = client.post(f"/api/batches/{batch_id}/cancel").json()
+    assert cancelled["jobs"][1]["status"] == "cancelled"
+    release.set()
+    for _ in range(200):
+        status = client.get(f"/api/batches/{batch_id}").json()
+        if status["status"] not in ("queued", "running"):
+            break
+        time.sleep(0.05)
+    assert status["status"] == "cancelled"
+    assert [job["status"] for job in status["jobs"]] == ["cancelled", "cancelled"]
+    assert client.get(f"/api/batches/{batch_id}/export/zip").status_code == 409

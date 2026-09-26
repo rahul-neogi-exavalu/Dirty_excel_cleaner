@@ -47,7 +47,7 @@ def extract_sheet(grid) -> list[SheetResult]:
     rows, flipped = _orient_sheet(grid.rows)
     regions = geometry.find_regions(rows)
     if not regions:
-        return [
+        results = [
             SheetResult(
                 grid.name,
                 pl.DataFrame(),
@@ -58,11 +58,60 @@ def extract_sheet(grid) -> list[SheetResult]:
                 },
             )
         ]
+    else:
+        results = [
+            _extract_region(grid, region, index, len(regions), flipped)
+            for index, region in enumerate(regions)
+        ]
+    _record_outside_rows(grid, rows, flipped, regions, results)
+    return results
 
-    return [
-        _extract_region(grid, region, index, len(regions), flipped)
-        for index, region in enumerate(regions)
-    ]
+
+def _record_outside_rows(grid, rows, flipped, regions, results) -> None:
+    """Log every non-blank line no table region took, so nothing leaves without a reason.
+
+    Region finding keeps only blocks that can be a table. A lone title fenced off by
+    blank rows -- a company name under the logo, a one-line note far below the data --
+    is rejected as "not a table" and, before this, simply vanished: neither kept nor
+    logged. Such a line is recorded as a banner when a table follows it and as a footer
+    otherwise. A line holding nothing but Excel error values is recorded as such rather
+    than passing for blank.
+
+    These rows sit outside every region, so each is marked ``outside_region`` and the
+    in-region row-conservation contract leaves them out of its own arithmetic.
+    """
+    covered = {index for region in regions for index in region.source_rows}
+    errors = grid.error_lines(transposed=flipped) if hasattr(grid, "error_lines") else {}
+    starts = sorted((region.source_rows[0], position) for position, region in enumerate(regions) if region.source_rows)
+    for index, line in enumerate(rows):
+        if index in covered:
+            continue
+        blank = all(is_blank(cell) for cell in line)
+        if blank and index not in errors:
+            continue
+        below = next((position for start, position in starts if start > index), None)
+        if blank:
+            kind = rowclass.EXCEL_ERROR
+            reason = f"holds only Excel error values ({', '.join(dict.fromkeys(errors[index]))}), no data"
+        elif not regions:
+            kind, reason = rowclass.BANNER, "no table was found on this sheet"
+        elif below is not None:
+            kind, reason = rowclass.BANNER, "sits above the table, apart from it"
+        else:
+            kind, reason = rowclass.FOOTER, "sits below the table, apart from it"
+        # Kept with the table it belongs to; a sheet with no table keeps it on its one result.
+        owner = results[below if below is not None else len(results) - 1]
+        content = " | ".join("" if is_blank(cell) else str(cell) for cell in line).strip(" |")
+        owner.trace["dropped_rows"].append(
+            {
+                "sheet_row": index + 1,
+                "region_row": None,
+                "outside_region": True,
+                "classification": kind,
+                "reason": reason,
+                "content": (content or " | ".join(errors.get(index, [])))[:200],
+            }
+        )
 
 
 def _orient_sheet(rows):

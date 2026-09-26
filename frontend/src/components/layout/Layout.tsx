@@ -63,11 +63,12 @@ export function Logo({ compact }: { compact?: boolean }) {
 
 function useStepState(page: Page): { done: boolean; locked: string | null; busy: boolean } {
   const flow = useWorkflow();
-  if (page === "configuration") return { done: Boolean(flow.workbook && flow.selected.length), locked: null, busy: false };
+  const configured = flow.files.length > 0 && flow.files.every((entry) => entry.selected.length > 0);
+  if (page === "configuration") return { done: configured, locked: null, busy: false };
   if (page === "run")
     return {
-      done: flow.job?.status === "succeeded" && !flow.stale,
-      locked: flow.workbook && flow.selected.length ? null : flow.runBlockedReason,
+      done: (flow.batch?.status === "succeeded" || flow.batch?.status === "partial") && !flow.stale,
+      locked: flow.files.length ? null : flow.runBlockedReason,
       busy: flow.running,
     };
   return { done: false, locked: flow.reviewBlockedReason, busy: false };
@@ -123,14 +124,31 @@ function NavItem({ page, active, compact, onNavigate }: { page: Page; active: bo
 function WorkbookCard({ compact }: { compact: boolean }) {
   const flow = useWorkflow();
   const [confirm, setConfirm] = useState(false);
-  if (!flow.workbook || compact) return null;
+  if (!flow.files.length || compact) return null;
+  const shown = flow.files.slice(0, 4);
+  const hidden = flow.files.length - shown.length;
+  const size = flow.files.reduce((sum, entry) => sum + entry.workbook.size, 0);
   const status = flow.running
-    ? <Badge tone="info" dot>Cleaning</Badge>
-    : flow.job?.status === "succeeded" && !flow.stale
-      ? <Badge tone="success" dot>Cleaned</Badge>
-      : flow.job?.status === "failed"
-        ? <Badge tone="danger" dot>Failed</Badge>
-        : <Badge tone="neutral" dot>Uploaded</Badge>;
+    ? <Badge tone="info" dot>Cleaning · {Math.round((flow.batch?.progress ?? 0) * 100)}%</Badge>
+    : flow.stale || !flow.batch
+      ? <Badge tone="neutral" dot>Uploaded</Badge>
+      : flow.batch.status === "succeeded"
+        ? <Badge tone="success" dot>Cleaned</Badge>
+        : flow.batch.status === "partial"
+          ? <Badge tone="warning" dot>Partly cleaned</Badge>
+          : flow.batch.status === "failed"
+            ? <Badge tone="danger" dot>Failed</Badge>
+            : <Badge tone="neutral" dot>Cancelled</Badge>;
+  const dot = (id: string) => {
+    const job = flow.stale && !flow.running ? null : flow.jobFor(id);
+    return job?.status === "succeeded"
+      ? "bg-emerald-400"
+      : job?.status === "failed"
+        ? "bg-brand-500"
+        : job?.status === "running"
+          ? "bg-sky-400 animate-pulse"
+          : "bg-ink-500";
+  };
   return (
     <div className="rounded-lg border border-nav-line bg-nav-raised p-3">
       <div className="flex items-start gap-2.5">
@@ -138,17 +156,17 @@ function WorkbookCard({ compact }: { compact: boolean }) {
           <FileSpreadsheet className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[13px] font-medium text-white" title={flow.workbook.filename}>
-            {flow.workbook.filename}
+          <p className="truncate text-[13px] font-medium text-white">
+            {flow.files.length === 1 ? flow.files[0].workbook.filename : plural(flow.files.length, "file")}
           </p>
           <p className="num text-caption text-ink-400">
-            {formatBytes(flow.workbook.size)} · {plural(flow.workbook.sheets.length, "sheet")}
+            {formatBytes(size)} · {plural(flow.totalSheets, "sheet")}
           </p>
         </div>
         <button
           type="button"
-          aria-label="Remove workbook"
-          title="Remove workbook"
+          aria-label="Remove all files"
+          title="Remove all files"
           disabled={flow.running}
           onClick={() => setConfirm(true)}
           className="rounded p-1 text-ink-400 hover:bg-nav-line hover:text-white disabled:opacity-40"
@@ -156,21 +174,32 @@ function WorkbookCard({ compact }: { compact: boolean }) {
           <Trash2 className="h-4 w-4" />
         </button>
       </div>
+      {flow.files.length > 1 && (
+        <ul className="mt-2.5 space-y-1">
+          {shown.map((entry) => (
+            <li key={entry.workbook.id} className="flex items-center gap-2 text-caption text-ink-300">
+              <span className={clsx("h-1.5 w-1.5 shrink-0 rounded-full", dot(entry.workbook.id))} aria-hidden />
+              <span className="truncate" title={entry.workbook.filename}>{entry.workbook.filename}</span>
+            </li>
+          ))}
+          {hidden > 0 && <li className="pl-3.5 text-caption text-ink-500">+{hidden} more</li>}
+        </ul>
+      )}
       <div className="mt-2.5">{status}</div>
       <Modal
         open={confirm}
         onClose={() => setConfirm(false)}
-        title="Remove this workbook?"
-        description={`${flow.workbook.filename} and any cleaning results for it will be removed from this workspace. Files you already downloaded are not affected.`}
+        title={flow.files.length === 1 ? "Remove this workbook?" : `Remove all ${flow.files.length} files?`}
+        description="The files and any cleaning results for them will be removed from this workspace. Files you already downloaded are not affected."
         footer={
           <>
-            <Button onClick={() => setConfirm(false)}>Keep workbook</Button>
+            <Button onClick={() => setConfirm(false)}>Keep files</Button>
             <Button
               variant="primary"
               icon={<Trash2 />}
               onClick={async () => {
                 setConfirm(false);
-                await flow.removeWorkbook();
+                await flow.removeAll();
               }}
             >
               Remove
@@ -198,7 +227,9 @@ function SidebarContent({ page, compact, onNavigate, onToggle }: { page: Page; c
         ))}
       </ol>
       <div className="my-6 border-t border-nav-line" />
-      {!compact && flow.workbook && <p className="label-caps mb-2 px-3 !text-ink-500">Workbook</p>}
+      {!compact && flow.files.length > 0 && (
+        <p className="label-caps mb-2 px-3 !text-ink-500">{flow.files.length > 1 ? "Workbooks" : "Workbook"}</p>
+      )}
       <WorkbookCard compact={compact} />
       <div className="mt-auto flex items-center justify-between gap-2 px-2 pt-6 text-caption text-ink-500">
         {!compact && <span>v1.0.0 · Enterprise workspace</span>}
@@ -273,15 +304,17 @@ export function AppShell({ page, onNavigate, children }: { page: Page; onNavigat
             </span>
           </nav>
           <div className="ml-auto flex items-center gap-3">
-            {flow.running && flow.job && (
+            {flow.running && flow.batch && (
               <button
                 type="button"
                 onClick={() => onNavigate("run")}
                 className="flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-caption font-medium text-sky-700 hover:bg-sky-100"
               >
                 <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                <span className="hidden sm:inline">Cleaning ·</span>
-                <span className="num">{Math.round(flow.job.progress * 100)}%</span>
+                <span className="hidden sm:inline">
+                  Cleaning{flow.batch.files_total > 1 ? ` · ${flow.batch.files_done}/${flow.batch.files_total} files done` : ""} ·
+                </span>
+                <span className="num">{Math.round(flow.batch.progress * 100)}%</span>
               </button>
             )}
           </div>
@@ -333,7 +366,7 @@ function WorkflowStepper({ current }: { current: Page }) {
   const pages = Object.keys(PAGE_META) as Page[];
   const index = pages.indexOf(current);
   return (
-    <ol className="hidden items-center xl:flex" aria-label="Workflow progress">
+    <ol className="hidden shrink-0 items-center xl:flex" aria-label="Workflow progress">
       {pages.map((page, i) => {
         const state = i < index ? "done" : i === index ? "current" : "upcoming";
         return (
@@ -350,7 +383,7 @@ function WorkflowStepper({ current }: { current: Page }) {
               >
                 {state === "done" ? <Check className="h-3.5 w-3.5" strokeWidth={3} /> : i + 1}
               </span>
-              <span className={clsx("text-caption", state === "current" ? "font-semibold text-ink-900" : "text-ink-500")}>
+              <span className={clsx("whitespace-nowrap text-caption", state === "current" ? "font-semibold text-ink-900" : "text-ink-500")}>
                 {PAGE_META[page].label}
               </span>
             </div>

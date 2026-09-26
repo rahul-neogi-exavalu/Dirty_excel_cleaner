@@ -20,6 +20,7 @@ def status_of(job: Job) -> JobStatus:
         elapsed = round((job.finished_at or time.time()) - job.started_at, 2)
     return JobStatus(
         id=job.id,
+        batch_id=job.batch_id,
         workbook_id=job.workbook_id,
         source_name=job.source_name,
         sheets=job.sheets,
@@ -30,6 +31,8 @@ def status_of(job: Job) -> JobStatus:
         progress=job.progress,
         message=job.message,
         current_sheet=job.current_sheet,
+        active_sheets=list(job.active_sheets),
+        parallel_workers=job.parallel_workers,
         sheets_done=job.sheets_done,
         sheets_total=len(job.sheets),
         rows_kept=job.rows_kept,

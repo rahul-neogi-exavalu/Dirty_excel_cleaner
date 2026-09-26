@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError, download, exportUrls } from "../api/client";
-import type { ColumnProfile, ConsistencyReport, JobResults, OutputSummary } from "../api/types";
+import type { BatchStatus, ColumnProfile, ConsistencyReport, JobResults, OutputSummary } from "../api/types";
 import { AppendMismatchModal, AppendOutcomeAlert, appendIncomplete } from "../components/AppendOutcome";
 import { ConsistencyView } from "../components/ConsistencyView";
 import { DataTable } from "../components/DataTable";
@@ -44,31 +44,32 @@ type Tab = "preview" | "columns" | "consistency";
 export function ResultsPage() {
   const flow = useWorkflow();
   const navigate = useNavigate();
+  const batch = flow.batch;
+  const succeeded = batch?.jobs.filter((job) => job.status === "succeeded") ?? [];
+  const jobId = succeeded.some((job) => job.id === flow.resultsJobId) ? flow.resultsJobId : succeeded[0]?.id ?? null;
 
   const header = (
     <PageHeader page="results" title="Review & Results" description="Review the cleaned data, rename headers, and export the final deliverables." />
   );
 
-  if (!flow.results) {
+  if (!jobId) {
     let body;
-    if (flow.resultsError) {
-      body = (
-        <EmptyState
-          icon={<ShieldAlert />}
-          title="Results couldn't be loaded"
-          description={flow.resultsError.body.advice ?? flow.resultsError.body.message}
-          action={<Button variant="primary" icon={<RefreshCw />} onClick={() => flow.reloadResults()}>Try again</Button>}
-        />
-      );
-    } else if (flow.job?.status === "succeeded") {
-      body = <ResultsSkeleton />;
-    } else if (flow.running) {
+    if (flow.running) {
       body = (
         <EmptyState
           icon={<Loader2 className="animate-spin" />}
           title="Cleaning in progress"
-          description="Results will appear here as soon as the job finishes."
+          description="Results will appear here as soon as the first file finishes."
           action={<Button variant="primary" iconRight={<ArrowRight />} onClick={() => navigate("run")}>View progress</Button>}
+        />
+      );
+    } else if (batch) {
+      body = (
+        <EmptyState
+          icon={<ShieldAlert />}
+          title="No file was cleaned successfully"
+          description="The Run page lists what went wrong for each file and what you can do about it."
+          action={<Button variant="primary" iconRight={<ArrowRight />} onClick={() => navigate("run")}>View run details</Button>}
         />
       );
     } else {
@@ -77,7 +78,7 @@ export function ResultsPage() {
           icon={<ClipboardList />}
           title="No results available"
           description="Run a cleaning job to generate cleaned data for review."
-          action={<Button variant="primary" icon={<PlayCircle />} onClick={() => navigate(flow.workbook ? "run" : "configuration")}>{flow.workbook ? "Go to Run" : "Go to Configuration"}</Button>}
+          action={<Button variant="primary" icon={<PlayCircle />} onClick={() => navigate(flow.files.length ? "run" : "configuration")}>{flow.files.length ? "Go to Run" : "Go to Configuration"}</Button>}
         />
       );
     }
@@ -89,11 +90,86 @@ export function ResultsPage() {
     );
   }
 
+  const results = flow.results[jobId];
+  const error = flow.resultsErrors[jobId];
+
   return (
     <>
       {header}
-      <ResultsContent results={flow.results} />
+      <div className="space-y-6">
+        {batch && batch.files_total > 1 && <FilePicker batch={batch} jobId={jobId} />}
+        {results ? (
+          <ResultsContent key={jobId} results={results} />
+        ) : (
+          <div className="card">
+            {error ? (
+              <EmptyState
+                icon={<ShieldAlert />}
+                title="Results couldn't be loaded"
+                description={error.body.advice ?? error.body.message}
+                action={<Button variant="primary" icon={<RefreshCw />} onClick={() => flow.reloadResults(jobId)}>Try again</Button>}
+              />
+            ) : (
+              <ResultsSkeleton />
+            )}
+          </div>
+        )}
+        {batch && batch.files_total > 1 && <BatchExport batch={batch} />}
+      </div>
     </>
+  );
+}
+
+/** Which file's results are shown. Files that didn't finish are listed, but can't be opened. */
+function FilePicker({ batch, jobId }: { batch: BatchStatus; jobId: string }) {
+  const flow = useWorkflow();
+  const options = batch.jobs.map((job) => {
+    const summary = flow.results[job.id]?.summary;
+    return {
+      value: job.id,
+      label: job.source_name,
+      icon: <FileSpreadsheet />,
+      disabled: job.status !== "succeeded",
+      description:
+        job.status === "succeeded"
+          ? summary
+            ? `${plural(summary.outputs, "table")} · ${formatNumber(summary.rows)} rows${summary.consistency_issues ? ` · ${plural(summary.consistency_issues, "issue")}` : ""}`
+            : "Loading…"
+          : job.status === "failed"
+            ? `Failed: ${job.error?.message ?? "see the Run page"}`
+            : job.status === "cancelled"
+              ? "Cancelled — not cleaned"
+              : "Still cleaning…",
+      meta:
+        job.status === "failed" ? (
+          <Badge tone="danger">Failed</Badge>
+        ) : job.status === "cancelled" ? (
+          <Badge tone="neutral">Cancelled</Badge>
+        ) : summary?.consistency_issues ? (
+          <Badge tone="danger">Issues</Badge>
+        ) : undefined,
+    };
+  });
+  const position = batch.jobs.findIndex((job) => job.id === jobId) + 1;
+
+  return (
+    <section className="card flex flex-col gap-4 p-5 md:flex-row md:items-end md:justify-between md:p-6" aria-labelledby="file-picker-title">
+      <div>
+        <h2 id="file-picker-title" className="text-section text-ink-900">Files</h2>
+        <p className="mt-0.5 text-body text-ink-600">
+          {batch.files_succeeded} of {plural(batch.files_total, "file")} cleaned. Pick a file to review its tables; header edits are saved per file.
+        </p>
+      </div>
+      <Select
+        value={jobId}
+        options={options}
+        onChange={flow.setResultsJobId}
+        label={`Excel file (${position} of ${batch.files_total})`}
+        icon={<FileSpreadsheet />}
+        className="w-full md:w-[420px]"
+        width={460}
+      />
+    </section>
   );
 }
 
@@ -104,7 +180,7 @@ function ResultsContent({ results }: { results: JobResults }) {
   const [appendDetails, setAppendDetails] = useState(false);
   const { summary, outputs, job } = results;
   const appendCheck = results.append_check;
-  const output = outputs.find((item) => item.id === flow.outputId) ?? outputs[0];
+  const output = outputs.find((item) => item.id === flow.outputIdFor(job.id)) ?? outputs[0];
 
   const options = outputs.map((item) => ({
     value: item.id,
@@ -119,6 +195,14 @@ function ResultsContent({ results }: { results: JobResults }) {
     meta: item.kind === "stacked" ? <Badge tone="brand">Appended</Badge> : undefined,
   }));
 
+  if (!output) {
+    return (
+      <div className="card">
+        <EmptyState icon={<Table2 />} title="This file produced no tables" description="None of its selected sheets held table-shaped data." />
+      </div>
+    );
+  }
+
   const consistency = results.consistency?.[output.id];
 
   return (
@@ -129,7 +213,7 @@ function ResultsContent({ results }: { results: JobResults }) {
           title="These results are from an earlier configuration"
           action={<Button size="sm" onClick={() => navigate("run")}>Run again</Button>}
         >
-          The sheet selection or append setting has changed since this job ran.
+          The files, sheet selections or append settings have changed since this job ran.
         </Alert>
       )}
 
@@ -174,9 +258,9 @@ function ResultsContent({ results }: { results: JobResults }) {
           <Select
             value={output.id}
             options={options}
-            onChange={flow.setOutputId}
-            label="Table"
-            icon={<FileSpreadsheet />}
+            onChange={(id) => flow.setOutputId(job.id, id)}
+            label={`Table (${outputs.length})`}
+            icon={<Table2 />}
             className="w-full lg:w-[380px]"
             width={420}
           />
@@ -209,7 +293,7 @@ function ResultsContent({ results }: { results: JobResults }) {
         </div>
         <div className="p-5 md:p-6">
           <TabPanel idPrefix="results" id="preview" active={tab === "preview"}>
-            <DataTable jobId={job.id} output={output} onOutputUpdated={flow.applyOutputUpdate} />
+            <DataTable jobId={job.id} output={output} onOutputUpdated={(updated) => flow.applyOutputUpdate(job.id, updated)} />
           </TabPanel>
           <TabPanel idPrefix="results" id="columns" active={tab === "columns"}>
             <ColumnProfileView jobId={job.id} output={output} />
@@ -220,7 +304,14 @@ function ResultsContent({ results }: { results: JobResults }) {
         </div>
       </section>
 
-      <ExportSection jobId={job.id} output={output} outputs={outputs} consistency={results.consistency} onReview={() => setTab("consistency")} />
+      <ExportSection
+        jobId={job.id}
+        sourceName={summary.source_name}
+        output={output}
+        outputs={outputs}
+        consistency={results.consistency}
+        onReview={() => setTab("consistency")}
+      />
     </div>
   );
 }
@@ -395,12 +486,14 @@ function useDownload() {
 
 function ExportSection({
   jobId,
+  sourceName,
   output,
   outputs,
   consistency,
   onReview,
 }: {
   jobId: string;
+  sourceName: string;
   output: OutputSummary;
   outputs: OutputSummary[];
   consistency: JobResults["consistency"];
@@ -419,24 +512,26 @@ function ExportSection({
   };
   return (
     <section className="card p-5 md:p-6" aria-labelledby="export-title">
-      <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
-        <div className="flex items-start gap-3 lg:w-[320px]">
+      <div className="flex flex-col gap-5 xl:flex-row xl:items-start">
+        <div className="flex items-start gap-3 xl:w-[320px] xl:shrink-0">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-600" aria-hidden>
             <Download className="h-5 w-5" />
           </div>
           <div>
             <h2 id="export-title" className="text-section text-ink-900">Export deliverables</h2>
-            <p className="mt-0.5 text-body text-ink-600">Files are generated when you download them, so saved header changes are always included.</p>
+            <p className="mt-0.5 text-body text-ink-600">
+              For <span className="font-medium text-ink-800">{sourceName}</span>. Files are generated when you download them, so saved header changes are always included.
+            </p>
           </div>
         </div>
 
-        <div className="flex-1 space-y-3">
+        <div className="min-w-0 flex-1 space-y-3">
         {issues > 0 && (
           <Alert tone="error" title={`This table failed ${plural(issues, "consistency check")}`} action={<Button size="sm" onClick={onReview}>Review checks</Button>}>
             Review the issues before loading it anywhere. You can still download it to inspect the evidence.
           </Alert>
         )}
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-2">
           <ExportCard
             icon={<FileSpreadsheet />}
             title="Cleaned data (CSV)"
@@ -475,7 +570,7 @@ function ExportSection({
           <ExportCard
             icon={<Archive />}
             title="Everything (.zip)"
-            description={`All ${plural(outputs.length, "table")} as CSV with metadata, plus the audit report.`}
+            description={`All ${plural(outputs.length, "table")} of ${sourceName} as CSV with metadata, plus the audit report.`}
             action={
               <Button icon={<Archive />} state={states.zip} loadingText="Packaging…" successText="Downloaded" errorText="Failed — retry" onClick={() => guarded("zip", exportUrls.zip(jobId), "Package", failedTables)}>
                 Download all
@@ -522,16 +617,93 @@ function ExportSection({
 
 function ExportCard({ icon, title, description, action }: { icon: React.ReactNode; title: string; description: React.ReactNode; action: React.ReactNode }) {
   return (
-    <div className="flex flex-col justify-between gap-3 rounded-lg border border-ink-200 p-4">
+    <div className="flex min-w-0 flex-col justify-between gap-3 rounded-lg border border-ink-200 p-4">
       <div className="flex gap-3">
         <span className="mt-0.5 text-ink-500 [&>svg]:h-5 [&>svg]:w-5" aria-hidden>{icon}</span>
-        <div>
+        <div className="min-w-0 [overflow-wrap:anywhere]">
           <p className="text-body font-semibold text-ink-900">{title}</p>
           <p className="text-caption text-ink-600">{description}</p>
         </div>
       </div>
       <div>{action}</div>
     </div>
+  );
+}
+
+/** One zip for every cleaned file, a folder per file. */
+function BatchExport({ batch }: { batch: BatchStatus }) {
+  const flow = useWorkflow();
+  const { states, run } = useDownload();
+  const [confirm, setConfirm] = useState(false);
+  const succeeded = batch.jobs.filter((job) => job.status === "succeeded");
+  const failing = succeeded.flatMap((job) => {
+    const results = flow.results[job.id];
+    if (!results) return [];
+    return results.outputs
+      .filter((output) => (results.consistency?.[output.id]?.issues ?? 0) > 0)
+      .map((output) => ({ key: `${job.id}:${output.id}`, file: job.source_name, table: output.name, issues: results.consistency[output.id].issues }));
+  });
+  const skipped = batch.files_total - succeeded.length;
+  const go = () => void run("batch", exportUrls.batchZip(batch.id), "All files");
+
+  return (
+    <section className="card flex flex-col gap-4 p-5 md:flex-row md:items-center md:p-6" aria-labelledby="batch-export-title">
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-600" aria-hidden>
+        <Archive className="h-5 w-5" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <h2 id="batch-export-title" className="text-card text-ink-900">Download every file (.zip)</h2>
+        <p className="text-body text-ink-600">
+          {plural(succeeded.length, "cleaned file")}, one folder each, with every table's CSV and metadata plus its audit report.
+          {skipped > 0 && ` ${plural(skipped, "file")} that did not finish ${skipped === 1 ? "is" : "are"} left out.`}
+        </p>
+      </div>
+      <Button
+        variant="primary"
+        icon={<Archive />}
+        state={states.batch}
+        loadingText="Packaging…"
+        successText="Downloaded"
+        errorText="Failed — retry"
+        disabled={!succeeded.length}
+        onClick={() => (failing.length ? setConfirm(true) : go())}
+      >
+        Download all files
+      </Button>
+      <Modal
+        open={confirm}
+        onClose={() => setConfirm(false)}
+        title="Download data that failed consistency checks?"
+        description="These tables did not pass every consistency check. Loading them as-is may carry missing or misplaced rows."
+        footer={
+          <>
+            <Button onClick={() => setConfirm(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              icon={<Download />}
+              onClick={() => {
+                setConfirm(false);
+                go();
+              }}
+            >
+              Download anyway
+            </Button>
+          </>
+        }
+      >
+        <ul className="space-y-1.5">
+          {failing.map((item) => (
+            <li key={item.key} className="flex items-center justify-between gap-3 rounded-md bg-brand-50 px-3 py-2 text-body">
+              <span className="min-w-0">
+                <span className="block truncate font-medium text-ink-900">{item.table}</span>
+                <span className="block truncate text-caption text-ink-600">{item.file}</span>
+              </span>
+              <Badge tone="danger">{plural(item.issues, "issue")}</Badge>
+            </li>
+          ))}
+        </ul>
+      </Modal>
+    </section>
   );
 }
 

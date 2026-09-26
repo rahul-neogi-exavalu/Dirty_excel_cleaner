@@ -8,6 +8,8 @@ compiled UI in ``frontend/dist`` is served from the same origin.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,9 +18,17 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config
 from .errors import ApiError, api_error_handler, validation_error_handler
-from .routes import exports, jobs, workbooks
+from .routes import batches, exports, jobs, workbooks
+from .services import sheet_pool
 
-app = FastAPI(title="Exavalu Data Cleaning Studio API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    # Cleaning worker processes outlive requests; stop them with the service.
+    sheet_pool.shutdown()
+
+
+app = FastAPI(title="Exavalu Data Cleaning Studio API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,11 +43,14 @@ app.add_exception_handler(RequestValidationError, validation_error_handler)
 app.include_router(workbooks.router)
 app.include_router(jobs.router)
 app.include_router(exports.router)
+app.include_router(batches.router)
 
 
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "max_upload_mb": config.MAX_UPLOAD_MB,
+            "max_batch_files": config.MAX_BATCH_FILES,
+            "clean_workers": config.CLEAN_WORKERS,
             "accepted": sorted(config.ALLOWED_SUFFIXES)}
 
 

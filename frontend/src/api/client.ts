@@ -1,5 +1,7 @@
 import type {
   ApiErrorBody,
+  BatchFileRequest,
+  BatchStatus,
   ColumnProfile,
   JobResults,
   JobStatus,
@@ -103,6 +105,11 @@ export const api = {
       body: JSON.stringify({ workbook_id, sheets, append }),
     }),
   getJob: (id: string) => request<JobStatus>(`/api/jobs/${id}`),
+
+  startBatch: (files: BatchFileRequest[]) =>
+    request<BatchStatus>("/api/batches", { method: "POST", body: JSON.stringify({ files }) }),
+  getBatch: (id: string) => request<BatchStatus>(`/api/batches/${id}`),
+  cancelBatch: (id: string) => request<BatchStatus>(`/api/batches/${id}/cancel`, { method: "POST" }),
   cancelJob: (id: string) => request<JobStatus>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   getResults: (id: string) => request<JobResults>(`/api/jobs/${id}/results`),
 
@@ -137,6 +144,7 @@ export const exportUrls = {
   metadata: (jobId: string, outputId: string) => `/api/jobs/${jobId}/outputs/${outputId}/export/metadata`,
   audit: (jobId: string) => `/api/jobs/${jobId}/export/audit`,
   zip: (jobId: string) => `/api/jobs/${jobId}/export/zip`,
+  batchZip: (batchId: string) => `/api/batches/${batchId}/export/zip`,
 };
 
 /** Fetch a file and hand it to the browser, so the UI can show preparing/done/error. */

@@ -83,10 +83,13 @@ def _row_conservation(result) -> list[Violation]:
     # Only drops that fall inside the body are subtracted. Banner rows sit *above* the
     # header and are already excluded by skipping past it, so counting them here would
     # subtract them twice and report a loss that never happened.
+    # Lines logged from outside every region (a stray title, an error-only row) were
+    # never part of this region's rows, so they are not subtracted from its body either.
     body_drops = [
         row
         for row in trace.get("dropped_rows", [])
-        if row.get("region_row") is None or row["region_row"] > header_index + header_rows - 1
+        if not row.get("outside_region")
+        and (row.get("region_row") is None or row["region_row"] > header_index + header_rows - 1)
     ]
     expected = body - len(body_drops)
 

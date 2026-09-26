@@ -207,6 +207,8 @@ export function usePopover() {
   return { open, setOpen, anchor, panel };
 }
 
+const UNPLACED: React.CSSProperties = { position: "fixed", top: 0, left: 0, visibility: "hidden" };
+
 export function PopoverPanel({
   open,
   anchor,
@@ -230,14 +232,20 @@ export function PopoverPanel({
   id?: string;
   labelledBy?: string;
 }) {
-  const [style, setStyle] = useState<React.CSSProperties>({});
+  // Out of the page flow and invisible until placed: an unplaced panel sits at the end of
+  // <body>, and scrolling its selected option into view would scroll the whole page there.
+  const [style, setStyle] = useState<React.CSSProperties>(UNPLACED);
   useLayoutEffect(() => {
-    if (!open || !anchor.current) return;
+    if (!open || !anchor.current) {
+      setStyle(UNPLACED);
+      return;
+    }
     const place = () => {
       const rect = anchor.current!.getBoundingClientRect();
       const panelWidth = width === "anchor" ? rect.width : width ?? 240;
       let left = align === "left" ? rect.left : rect.right - panelWidth;
-      left = Math.max(8, Math.min(left, window.innerWidth - panelWidth - 8));
+      // clientWidth, not innerWidth: the page's vertical scrollbar is not usable space.
+      left = Math.max(8, Math.min(left, document.documentElement.clientWidth - panelWidth - 8));
       const below = window.innerHeight - rect.bottom;
       const top = below < 280 && rect.top > below ? undefined : rect.bottom + 4;
       const bottom = top === undefined ? window.innerHeight - rect.top + 4 : undefined;

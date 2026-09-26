@@ -35,6 +35,20 @@ class JobCreate(BaseModel):
         return sheets
 
 
+class BatchCreate(BaseModel):
+    """Several uploaded files cleaned in one go: each with its own sheets and append mode."""
+
+    files: list[JobCreate] = Field(min_length=1)
+
+    @field_validator("files")
+    @classmethod
+    def _one_entry_per_file(cls, files: list[JobCreate]) -> list[JobCreate]:
+        ids = [item.workbook_id for item in files]
+        if len(set(ids)) != len(ids):
+            raise ValueError("each file can only be included once")
+        return files
+
+
 class JobError(BaseModel):
     kind: str
     message: str
@@ -47,6 +61,7 @@ class JobError(BaseModel):
 
 class JobStatus(BaseModel):
     id: str
+    batch_id: str | None = None
     workbook_id: str
     source_name: str
     sheets: list[str]
@@ -57,6 +72,8 @@ class JobStatus(BaseModel):
     progress: float
     message: str
     current_sheet: str | None
+    active_sheets: list[str] = []
+    parallel_workers: int = 0
     sheets_done: int
     sheets_total: int
     rows_kept: int
@@ -66,6 +83,24 @@ class JobStatus(BaseModel):
     finished_at: float | None
     elapsed_seconds: float | None
     error: JobError | None = None
+
+
+class BatchStatus(BaseModel):
+    id: str
+    # queued | running | succeeded | partial | failed | cancelled
+    status: str
+    progress: float
+    files_total: int
+    files_done: int
+    files_succeeded: int
+    files_failed: int
+    files_cancelled: int
+    current_job_id: str | None
+    jobs: list[JobStatus]
+    created_at: float
+    started_at: float | None
+    finished_at: float | None
+    elapsed_seconds: float | None
 
 
 class OutputSummary(BaseModel):

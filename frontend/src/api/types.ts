@@ -28,6 +28,7 @@ export interface JobError {
 
 export interface JobStatus {
   id: string;
+  batch_id: string | null;
   workbook_id: string;
   source_name: string;
   sheets: string[];
@@ -38,6 +39,10 @@ export interface JobStatus {
   progress: number;
   message: string;
   current_sheet: string | null;
+  /** Sheets being read and cleaned right now; several when they run in parallel. */
+  active_sheets: string[];
+  /** Worker processes this job's sheets are spread over; 0 when cleaned in-process. */
+  parallel_workers: number;
   sheets_done: number;
   sheets_total: number;
   rows_kept: number;
@@ -47,6 +52,33 @@ export interface JobStatus {
   finished_at: number | null;
   elapsed_seconds: number | null;
   error: JobError | null;
+}
+
+export type BatchState = "queued" | "running" | "succeeded" | "partial" | "failed" | "cancelled";
+
+/** Several files cleaned together: one job per file, run one after another. */
+export interface BatchStatus {
+  id: string;
+  status: BatchState;
+  progress: number;
+  files_total: number;
+  files_done: number;
+  files_succeeded: number;
+  files_failed: number;
+  files_cancelled: number;
+  current_job_id: string | null;
+  /** In the order the files were submitted. */
+  jobs: JobStatus[];
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  elapsed_seconds: number | null;
+}
+
+export interface BatchFileRequest {
+  workbook_id: string;
+  sheets: string[];
+  append: boolean;
 }
 
 export interface OutputSummary {

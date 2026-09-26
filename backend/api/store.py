@@ -27,6 +27,8 @@ CANCELLED = "cancelled"
 # The pipeline's stages in order, as the UI's stepper shows them.
 STAGES = ["read", "clean", "append", "validate", "write"]
 
+ACTIVE = (QUEUED, RUNNING)
+
 
 @dataclass
 class Upload:
@@ -78,6 +80,10 @@ class Job:
     progress: float = 0.0
     message: str = "Queued"
     current_sheet: str | None = None
+    # Sheets being read and cleaned right now (several when they run in parallel).
+    active_sheets: list[str] = field(default_factory=list)
+    # Worker processes this job's sheets are spread over; 0 when cleaned in-process.
+    parallel_workers: int = 0
     sheets_done: int = 0
     rows_kept: int = 0
     rows_removed: int = 0
@@ -96,6 +102,7 @@ class Job:
     summary: dict[str, Any] = field(default_factory=dict)
     audit_path: Path | None = None
     directory: Path | None = None
+    batch_id: str | None = None
 
     def output(self, output_id: str) -> OutputRecord:
         for record in self.outputs:
@@ -104,11 +111,28 @@ class Job:
         raise not_found("That cleaned table")
 
 
+@dataclass
+class Batch:
+    """Several files cleaned together: one job per file, run one after another.
+
+    Each job stays a complete, independent run -- its own results, exports and audit --
+    so a file that fails never takes the others down with it.
+    """
+
+    id: str
+    job_ids: list[str]
+    created_at: float = field(default_factory=time.time)
+    started_at: float | None = None
+    finished_at: float | None = None
+    cancel_requested: bool = False
+
+
 class Store:
     def __init__(self):
         self._lock = threading.Lock()
         self._uploads: dict[str, Upload] = {}
         self._jobs: dict[str, Job] = {}
+        self._batches: dict[str, Batch] = {}
 
     @staticmethod
     def new_id() -> str:
@@ -146,6 +170,24 @@ class Store:
     def jobs_for(self, upload_id: str) -> list[Job]:
         with self._lock:
             return [job for job in self._jobs.values() if job.workbook_id == upload_id]
+
+    def add_batch(self, batch: Batch, jobs: list[Job]) -> None:
+        """Register a batch and its jobs together, so pollers never see half of it."""
+        with self._lock:
+            for job in jobs:
+                self._jobs[job.id] = job
+            self._batches[batch.id] = batch
+
+    def batch(self, batch_id: str) -> Batch:
+        with self._lock:
+            found = self._batches.get(batch_id)
+        if found is None:
+            raise not_found("That cleaning batch")
+        return found
+
+    def batch_jobs(self, batch: Batch) -> list[Job]:
+        with self._lock:
+            return [self._jobs[job_id] for job_id in batch.job_ids if job_id in self._jobs]
 
 
 store = Store()

@@ -19,17 +19,17 @@ import time
 import traceback
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 from ahi_clean import audit, contracts, failures, metadata, orchestrate
-from ahi_clean.extract import extract_sheet
-from ahi_clean.reader import count_embedded_images, read_workbook
+from ahi_clean.reader import count_embedded_images
 
 from .. import config
 from ..errors import ApiError, conflict
-from ..schemas import JobCreate
-from . import append_report, consistency_service
+from ..schemas import BatchCreate, JobCreate
+from . import append_report, consistency_service, sheet_pool
 from ..store import (
-    CANCELLED, FAILED, QUEUED, RUNNING, SUCCEEDED, Job, OutputRecord, store,
+    ACTIVE, CANCELLED, FAILED, QUEUED, RUNNING, SUCCEEDED, Batch, Job, OutputRecord, store,
 )
 
 # Share of the progress bar each stage occupies; cleaning sheets is the long part.
@@ -42,12 +42,17 @@ _SPAN = {
 }
 
 _STAGE_MESSAGES = {
-    "read": "Reading workbook",
-    "clean": "Cleaning sheets",
+    "read": "Opening workbook",
+    "clean": "Reading and cleaning sheets",
     "append": "Matching cleaned headers",
     "validate": "Checking output contracts",
     "write": "Writing cleaned files",
 }
+
+
+# Guards a queued job's first transition -- to running or to cancelled -- so a cancel
+# arriving just as the batch picks the job up cannot be lost.
+_transition = threading.Lock()
 
 
 class _Cancelled(Exception):
@@ -58,7 +63,8 @@ class _NoTable(Exception):
     pass
 
 
-def start_job(request: JobCreate) -> Job:
+def _prepare(request: JobCreate, batch_id: str | None = None) -> Job:
+    """Validate one file's request and build its job, without starting it."""
     upload = store.upload(request.workbook_id)
     known = [sheet["name"] for sheet in upload.sheets]
     unknown = [name for name in request.sheets if name not in known]
@@ -70,10 +76,10 @@ def start_job(request: JobCreate) -> Job:
             "Refresh the sheet list and select again.",
             field="sheets",
         )
-    active = [job for job in store.jobs_for(upload.id) if job.status in (QUEUED, RUNNING)]
+    active = [job for job in store.jobs_for(upload.id) if job.status in ACTIVE]
     if active:
         raise conflict(
-            "A cleaning job for this workbook is already running.",
+            f"A cleaning job for {upload.filename} is already running.",
             "Wait for it to finish or cancel it before starting another.",
         )
 
@@ -84,9 +90,16 @@ def start_job(request: JobCreate) -> Job:
         workbook_id=upload.id,
         source_name=upload.filename,
         sheets=ordered,
-        append=request.append,
+        # Appending needs two tables to compare; with one sheet there is nothing to do.
+        append=request.append and len(ordered) > 1,
+        batch_id=batch_id,
     )
     job.directory = config.JOB_DIR / job.id
+    return job
+
+
+def start_job(request: JobCreate) -> Job:
+    job = _prepare(request)
     store.add_job(job)
     threading.Thread(target=_run, args=(job,), name=f"clean-{job.id}", daemon=True).start()
     return job
@@ -94,11 +107,121 @@ def start_job(request: JobCreate) -> Job:
 
 def cancel_job(job_id: str) -> Job:
     job = store.job(job_id)
-    if job.status not in (QUEUED, RUNNING):
+    if job.status not in ACTIVE:
         raise conflict("This job has already finished and can't be cancelled.")
+    with _transition:
+        if job.status == QUEUED and job.batch_id:
+            # Still waiting its turn in a batch: it never starts.
+            _mark_cancelled(job, "Cancelled before it started")
+            return job
     job.cancel_requested = True
     job.message = "Cancelling after the current sheet"
     return job
+
+
+# --------------------------------------------------------------------------- #
+# Batches: several files, one job each, run one after another
+# --------------------------------------------------------------------------- #
+
+
+def start_batch(request: BatchCreate) -> Batch:
+    if len(request.files) > config.MAX_BATCH_FILES:
+        raise ApiError(
+            422,
+            "too_many_files",
+            f"A batch can hold up to {config.MAX_BATCH_FILES} files; {len(request.files)} were sent.",
+            "Remove some files, or clean them in more than one batch.",
+            field="files",
+        )
+    batch_id = store.new_id()
+    # Every file is validated before any job exists, so a bad selection in the last
+    # file never leaves the first ones running on their own.
+    jobs = [_prepare(item, batch_id) for item in request.files]
+    batch = Batch(id=batch_id, job_ids=[job.id for job in jobs])
+    store.add_batch(batch, jobs)
+    threading.Thread(target=_run_batch, args=(batch, jobs), name=f"batch-{batch.id}", daemon=True).start()
+    return batch
+
+
+def cancel_batch(batch_id: str) -> Batch:
+    batch = store.batch(batch_id)
+    jobs = store.batch_jobs(batch)
+    if not any(job.status in ACTIVE for job in jobs):
+        raise conflict("This batch has already finished and can't be cancelled.")
+    with _transition:
+        batch.cancel_requested = True
+        for job in jobs:
+            if job.status == QUEUED:
+                _mark_cancelled(job, "Cancelled before it started")
+            elif job.status == RUNNING:
+                job.cancel_requested = True
+                job.message = "Cancelling after the current sheet"
+    return batch
+
+
+def batch_state(batch: Batch, jobs: list[Job]) -> str:
+    if any(job.status in ACTIVE for job in jobs) or batch.finished_at is None:
+        return RUNNING if batch.started_at else QUEUED
+    succeeded = sum(1 for job in jobs if job.status == SUCCEEDED)
+    if batch.cancel_requested:
+        return CANCELLED
+    if succeeded == len(jobs):
+        return SUCCEEDED
+    if succeeded == 0:
+        return FAILED if any(job.status == FAILED for job in jobs) else CANCELLED
+    return "partial"
+
+
+def _mark_cancelled(job: Job, message: str) -> None:
+    job.status = CANCELLED
+    job.message = message
+    job.finished_at = time.time()
+
+
+def _run_batch(batch: Batch, jobs: list[Job]) -> None:
+    """Run a batch's files, up to ``BATCH_FILE_CONCURRENCY`` at a time, in submitted order.
+
+    The files' sheets all go to the same worker pool, so two files in flight do not mean
+    twice the CPU: they keep the pool fed while one file is opened or written, and let a
+    batch of single-sheet files use more than one core.
+    """
+    batch.started_at = time.time()
+    try:
+        with ThreadPoolExecutor(
+            max_workers=min(config.BATCH_FILE_CONCURRENCY, len(jobs)) or 1,
+            thread_name_prefix=f"batch-{batch.id}",
+        ) as files:
+            # Submitted in order and started in order, so the first file finishes first
+            # when files are alike -- and the list on screen fills from the top.
+            for job in jobs:
+                files.submit(_run_batch_file, batch, job)
+    finally:
+        batch.finished_at = time.time()
+
+
+def _run_batch_file(batch: Batch, job: Job) -> None:
+    with _transition:
+        if job.status != QUEUED:
+            return  # cancelled while it waited
+        if batch.cancel_requested:
+            _mark_cancelled(job, "Cancelled before it started")
+            return
+        job.status = RUNNING
+    try:
+        _run(job)
+    except Exception as error:  # noqa: BLE001 - one file must not stop the rest
+        job.status = FAILED
+        job.error = {
+            "kind": "internal",
+            "message": f"{job.source_name} could not be processed.",
+            "detail": str(error),
+            "advice": "Upload the file again and retry.",
+            "stage": job.stage,
+            "sheet": job.current_sheet,
+            "technical": "".join(traceback.format_exception(type(error), error, error.__traceback__)),
+        }
+        job.message = "Cleaning could not be completed"
+        job.finished_at = time.time()
 
 
 # --------------------------------------------------------------------------- #
@@ -114,27 +237,27 @@ def _enter(job: Job, stage: str, fraction: float = 0.0, message: str | None = No
 
 
 def _run(job: Job) -> None:
-    upload = store.upload(job.workbook_id)
+    try:
+        upload = store.upload(job.workbook_id)
+    except ApiError:
+        job.status = FAILED
+        job.error = {
+            "kind": "not_found",
+            "message": f"{job.source_name} is no longer available.",
+            "detail": "The uploaded file was removed before it could be cleaned.",
+            "advice": "Upload the file again and rerun.",
+            "stage": None, "sheet": None, "technical": None,
+        }
+        job.message = "Cleaning could not be completed"
+        job.finished_at = time.time()
+        return
     source = upload.path
     stem = source.stem
     job.status = RUNNING
     job.started_at = time.time()
     try:
-        _enter(job, "read", message=f"Reading {upload.filename}")
-        wanted = set(job.sheets)
-        grids = [grid for grid in read_workbook(source) if grid.name in wanted]
-
-        # One pass: every selected sheet is read once and cleaned once, here.
-        results = []
-        for index, grid in enumerate(grids):
-            job.current_sheet = grid.name
-            _enter(job, "clean", index / max(len(grids), 1), f"Cleaning {grid.name}")
-            sheet_results = extract_sheet(grid)
-            results.extend(sheet_results)
-            job.sheets_done = index + 1
-            job.rows_kept += sum(len(result.frame) for result in sheet_results)
-            job.rows_removed += sum(len(result.trace.get("dropped_rows", [])) for result in sheet_results)
-        job.current_sheet = None
+        _enter(job, "read", message=f"Opening {upload.filename}")
+        grids, results = _clean_sheets(job, source)
 
         live = [result for result in results if not result.frame.is_empty()]
         if not live:
@@ -171,7 +294,7 @@ def _run(job: Job) -> None:
         job.stage = "write"
         job.message = "Cleaning completed"
         job.status = SUCCEEDED
-    except _Cancelled:
+    except (_Cancelled, sheet_pool.Cancelled):
         job.status = CANCELLED
         job.message = "Job cancelled"
     except _NoTable:
@@ -188,6 +311,10 @@ def _run(job: Job) -> None:
         }
         job.message = "Cleaning could not be completed"
     except Exception as error:  # noqa: BLE001 - the job must always end in a state
+        if isinstance(error, sheet_pool.SheetFailed):
+            # Parallel sheets finish in any order: name the one that actually failed.
+            job.current_sheet = error.sheet
+            error = error.__cause__ or error
         failure = failures.classify(source, error)
         where = f"the {job.current_sheet} sheet" if job.current_sheet else upload.filename
         job.status = FAILED
@@ -202,7 +329,48 @@ def _run(job: Job) -> None:
         }
         job.message = "Cleaning could not be completed"
     finally:
+        job.active_sheets = []
         job.finished_at = time.time()
+
+
+def _clean_sheets(job: Job, source):
+    """Read and clean every selected sheet -- each exactly once -- in workbook order.
+
+    Sheets are independent until the append step, so they are spread over the worker
+    pool; a small file stays in this process, where there is no hand-off to pay for.
+    """
+    parallel = sheet_pool.use_parallel(source)
+    job.parallel_workers = min(config.CLEAN_WORKERS, len(job.sheets)) if parallel else 0
+    total = max(len(job.sheets), 1)
+    _enter(job, "clean", 0.0)
+
+    def on_start(active: list[str]) -> None:
+        job.active_sheets = active
+        job.current_sheet = active[0] if active else None
+        if len(active) > 1:
+            job.message = f"Cleaning {len(active)} sheets in parallel · {job.sheets_done} of {total} done"
+        elif active:
+            job.message = f"Cleaning {active[0]}"
+
+    def on_done(name: str, grid, sheet_results) -> None:
+        job.sheets_done += 1
+        job.rows_kept += sum(len(result.frame) for result in sheet_results)
+        job.rows_removed += sum(len(result.trace.get("dropped_rows", [])) for result in sheet_results)
+        start, end = _SPAN["clean"]
+        job.progress = round(start + (end - start) * job.sheets_done / total, 4)
+
+    pairs = sheet_pool.run_sheets(
+        source,
+        job.sheets,
+        parallel=parallel,
+        cancelled=lambda: job.cancel_requested,
+        on_start=on_start,
+        on_done=on_done,
+    )
+    job.current_sheet = None
+    job.active_sheets = []
+    grids = [grid for grid, _ in pairs]
+    return grids, [result for _, sheet_results in pairs for result in sheet_results]
 
 
 def _plan(results, stem: str, append: bool):

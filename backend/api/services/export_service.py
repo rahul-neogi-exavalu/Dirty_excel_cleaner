@@ -11,8 +11,9 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from ..errors import ApiError
-from ..store import Job, OutputRecord
+from .. import config
+from ..errors import ApiError, conflict
+from ..store import SUCCEEDED, Batch, Job, OutputRecord
 from . import results_service
 
 
@@ -50,8 +51,40 @@ def bundle(job: Job) -> Path:
     stem = Path(job.source_name).stem
     path = _export_dir(job) / f"{stem}_cleaned_{job.id}.zip"
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for record in job.outputs:
-            archive.write(csv_file(job, record), record.file)
-            archive.write(metadata_file(job, record), record.metadata_file)
-        archive.write(audit_file(job), job.audit_path.name)
+        _add_job(archive, job, "")
     return path
+
+
+def batch_bundle(batch: Batch, jobs: list[Job]) -> Path:
+    """Every successfully cleaned file of a batch, one folder per source file.
+
+    Files that failed or were cancelled have nothing to export and are left out; two
+    uploads with the same name get distinct folders so neither overwrites the other.
+    """
+    done = [job for job in jobs if job.status == SUCCEEDED]
+    if not done:
+        raise conflict(
+            "No file in this batch was cleaned successfully, so there is nothing to export.",
+            "Fix the files that failed and run the batch again.",
+        )
+    folder = config.JOB_DIR / f"batch-{batch.id}"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"cleaned_batch_{batch.id}.zip"
+    used: set[str] = set()
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for job in done:
+            name = base = Path(job.source_name).stem or "file"
+            counter = 2
+            while name.casefold() in used:
+                name = f"{base} ({counter})"
+                counter += 1
+            used.add(name.casefold())
+            _add_job(archive, job, f"{name}/")
+    return path
+
+
+def _add_job(archive: zipfile.ZipFile, job: Job, prefix: str) -> None:
+    for record in job.outputs:
+        archive.write(csv_file(job, record), prefix + record.file)
+        archive.write(metadata_file(job, record), prefix + record.metadata_file)
+    archive.write(audit_file(job), prefix + job.audit_path.name)

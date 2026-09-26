@@ -1,65 +1,78 @@
 import clsx from "clsx";
 import { BetweenHorizontalEnd, Info, Lock, Table2, Wand2 } from "lucide-react";
 import type { ReactNode } from "react";
-import { SectionCard } from "../components/layout/Layout";
 import { Badge } from "../components/ui/Badge";
-import { useWorkflow } from "../state/workflow";
+import { appendUnavailableReason, useWorkflow, type FileEntry } from "../state/workflow";
 
 /**
- * Section 3: how selected sheets are combined. Nothing is cleaned here -- a sheet's real
+ * How one file's selected sheets are combined. Nothing is cleaned here -- a sheet's real
  * header is only known once the job cleans it, so which sheets actually append is
- * decided (once) during the run and reported with the results.
+ * decided (once) during the run and reported with the results. Files never append
+ * into each other: each is cleaned on its own.
  */
-export function AppendSection() {
+export function AppendModeOptions({ entry }: { entry: FileEntry }) {
   const flow = useWorkflow();
-  const disabled = !flow.appendAvailable || flow.running;
+  const reason = appendUnavailableReason(entry);
+  const disabled = Boolean(reason) || flow.running;
+  const id = entry.workbook.id;
 
   return (
-    <SectionCard
-      id="section-append"
-      step={3}
-      icon={<BetweenHorizontalEnd />}
-      title="Append matching sheets"
-      description="Choose whether selected sheets with identical cleaned columns are combined into one table."
-    >
-      {!flow.appendAvailable && (
-        <div className="mb-4 flex items-start gap-3 rounded-lg border border-ink-200 bg-ink-50 px-4 py-3" role="note">
+    <div id="section-append" className="scroll-mt-40">
+      <div className="mb-3 flex items-start gap-2.5">
+        <span className="mt-0.5 text-ink-500 [&>svg]:h-4 [&>svg]:w-4" aria-hidden>
+          <BetweenHorizontalEnd />
+        </span>
+        <div className="min-w-0">
+          <h3 className="text-card text-ink-900">Append matching sheets</h3>
+          <p className="text-caption text-ink-600">
+            For <span className="font-medium text-ink-800">{entry.workbook.filename}</span>: choose whether its selected sheets with identical cleaned
+            columns are combined into one table. Sheets from different files are never combined.
+          </p>
+        </div>
+      </div>
+
+      {reason && (
+        <div className="mb-3 flex items-start gap-3 rounded-lg border border-ink-200 bg-ink-50 px-4 py-3" role="note">
           <Lock className="mt-0.5 h-4 w-4 shrink-0 text-ink-500" aria-hidden />
           <div>
-            <p className="text-body font-medium text-ink-800">Appending is not available</p>
-            <p className="text-caption text-ink-600">{flow.appendUnavailableReason} Each sheet will be exported as its own table.</p>
+            <p className="text-body font-medium text-ink-800">Appending is not available for this file</p>
+            <p className="text-caption text-ink-600">{reason} Each sheet will be exported as its own table.</p>
           </div>
         </div>
       )}
 
-      <div role="radiogroup" aria-label="How to combine sheets" className={clsx("grid gap-3 md:grid-cols-2", disabled && "opacity-60")}>
+      <div
+        role="radiogroup"
+        aria-label={`How to combine sheets in ${entry.workbook.filename}`}
+        className={clsx("grid gap-3 md:grid-cols-2", disabled && "opacity-60")}
+      >
         <ModeCard
-          checked={flow.append}
+          checked={entry.append}
           disabled={disabled}
-          onSelect={() => flow.setAppend(true)}
+          onSelect={() => flow.setAppend(id, true)}
           icon={<Wand2 />}
           title="Auto-detect & append"
           badge={<Badge tone="brand">Recommended</Badge>}
           description="While cleaning, each sheet's real header is detected. Sheets whose columns match exactly are appended into one table with a source_sheet column; the rest stay separate."
         />
         <ModeCard
-          checked={!flow.append}
+          checked={!entry.append}
           disabled={disabled}
-          onSelect={() => flow.setAppend(false)}
+          onSelect={() => flow.setAppend(id, false)}
           icon={<Table2 />}
           title="Keep sheets separate"
           description="Every selected sheet becomes its own table, even when two sheets share the same columns."
         />
       </div>
 
-      {flow.append && flow.appendAvailable && (
-        <p className="mt-4 flex animate-fade-in items-start gap-2 text-caption text-ink-600">
+      {entry.append && !reason && (
+        <p className="mt-3 flex animate-fade-in items-start gap-2 text-caption text-ink-600">
           <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-400" aria-hidden />
           Matching is decided while the job cleans the sheets, in a single pass. If some sheets turn out to have different columns,
           you'll see exactly which ones, and why, when the run finishes. Nothing is lost: they are exported as separate tables.
         </p>
       )}
-    </SectionCard>
+    </div>
   );
 }
 
@@ -115,4 +128,3 @@ function ModeCard({
     </button>
   );
 }
-

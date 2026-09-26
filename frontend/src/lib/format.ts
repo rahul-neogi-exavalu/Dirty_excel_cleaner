@@ -44,6 +44,7 @@ export function humanize(code: string): string {
     GRAND_TOTAL: "Grand totals",
     UNVERIFIED_TOTAL: "Unverified totals",
     REPEATED_HEADER: "Repeated headers",
+    EXCEL_ERROR: "Excel error rows",
   };
   if (known[code]) return known[code];
   const text = code.replace(/_/g, " ").toLowerCase();

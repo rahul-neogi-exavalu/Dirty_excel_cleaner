@@ -11,15 +11,15 @@ import shutil
 import zipfile
 from pathlib import Path
 
-import openpyxl
 from fastapi import UploadFile
 from fastapi.concurrency import run_in_threadpool
 
-from ahi_clean import failures
+from ahi_clean import failures, reader
 
 from .. import config
-from ..errors import ApiError
-from ..store import Upload, store
+from ..errors import ApiError, conflict
+from ..store import ACTIVE, Upload, store
+from . import sheet_pool
 
 _CHUNK = 1024 * 1024
 # Rows scanned to decide whether a sheet holds anything at all.
@@ -48,7 +48,7 @@ def validate_filename(filename: str | None) -> str:
         415,
         failures.UNSUPPORTED_FORMAT,
         f"{name} is not a supported file type.",
-        "Upload an .xlsx or .xlsm workbook, or a .csv / .tsv file.",
+        "Upload an .xlsx workbook, or a .csv / .tsv file.",
     )
 
 
@@ -83,6 +83,10 @@ async def save_upload(file: UploadFile) -> Upload:
     kind = "delimited" if path.suffix.lower() in config.DELIMITED_SUFFIXES else "workbook"
     upload = Upload(upload_id, name, path, size, kind, sheets)
     store.add_upload(upload)
+    # A run usually follows an upload: start the cleaning workers now, off the clock --
+    # only for a file big enough to be cleaned by them.
+    if size >= config.PARALLEL_MIN_BYTES:
+        sheet_pool.warm()
     return upload
 
 
@@ -96,21 +100,20 @@ def inspect(path: Path) -> list[dict]:
         failure = failures.classify(path, zipfile.BadZipFile("File is not a zip file"))
         raise _unreadable(path.name, failure)
     try:
-        workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        # Opens the structure only: listing sheets must not parse every sheet's cells.
+        with reader.open_workbook(path) as workbook:
+            sheets = [
+                {
+                    "name": worksheet.title,
+                    "hidden": getattr(worksheet, "sheet_state", "visible") != "visible",
+                    "has_content": _has_content(worksheet),
+                }
+                for worksheet in workbook.worksheets
+            ]
+    except ApiError:
+        raise
     except Exception as error:  # noqa: BLE001 - classified below
         raise _unreadable(path.name, failures.classify(path, error)) from error
-
-    try:
-        sheets = [
-            {
-                "name": worksheet.title,
-                "hidden": getattr(worksheet, "sheet_state", "visible") != "visible",
-                "has_content": _has_content(worksheet),
-            }
-            for worksheet in workbook.worksheets
-        ]
-    finally:
-        workbook.close()
     if not sheets:
         raise ApiError(422, failures.NO_TABLE, f"{path.name} has no worksheets.",
                        "Upload a workbook that contains at least one sheet.")
@@ -139,5 +142,11 @@ def _unreadable(name: str, failure: failures.Failure) -> ApiError:
 
 
 def delete_upload(upload_id: str) -> None:
+    upload = store.upload(upload_id)
+    if any(job.status in ACTIVE for job in store.jobs_for(upload_id)):
+        raise conflict(
+            f"{upload.filename} is being cleaned right now.",
+            "Wait for the run to finish, or cancel it, before removing the file.",
+        )
     upload = store.remove_upload(upload_id)
     shutil.rmtree(upload.path.parent, ignore_errors=True)

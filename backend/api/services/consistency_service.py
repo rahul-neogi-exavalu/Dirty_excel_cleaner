@@ -122,9 +122,18 @@ def _account(grid, results: list) -> dict:
     lines = [list(column) for column in zip(*grid.rows)] if sheet_flipped else grid.rows
     axis = "columns" if sheet_flipped else "rows"
 
-    blank = {index for index, line in enumerate(lines) if all(is_blank(cell) for cell in line)}
+    # A line holding only Excel errors reads as empty once the errors are nulled, but it
+    # held something: it is accounted for as a removal (EXCEL_ERROR), not as blank.
+    errors = grid.error_lines(transposed=sheet_flipped) if hasattr(grid, "error_lines") else {}
+    blank = {
+        index for index, line in enumerate(lines)
+        if index not in errors and all(is_blank(cell) for cell in line)
+    }
     header = sum(_header_lines(result) for result in results if not result.frame.is_empty())
-    dropped = [row for result in results for row in result.trace.get("dropped_rows", [])]
+    dropped = sorted(
+        (row for result in results for row in result.trace.get("dropped_rows", [])),
+        key=lambda row: row.get("sheet_row") or 0,
+    )
     kept = sum(_kept_source_lines(result) for result in results)
     unaccounted = len(lines) - len(blank) - header - len(dropped) - kept
 
@@ -156,6 +165,8 @@ def _account(grid, results: list) -> dict:
 
     if unaccounted:
         covered = _covered(lines, blank, results)
+        # Lines logged from outside every region carry their own sheet position.
+        covered |= {row["sheet_row"] - 1 for row in dropped if row.get("outside_region") and row.get("sheet_row")}
         report["unaccounted_rows"] = [
             {
                 "sheet_row": index + 1,
