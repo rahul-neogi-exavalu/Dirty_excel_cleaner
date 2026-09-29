@@ -25,17 +25,18 @@ you that workbook and nothing else.
 pip install -r requirements.txt
 ```
 
-Run from the project root. `clean.py` puts `src/` on the path itself, so nothing needs
-setting first — this works the same in PowerShell, cmd and bash.
+Run from the project root. `clean.py` puts `backend/src/` on the path itself, so nothing
+needs setting first — this works the same in PowerShell, cmd and bash.
 
 ```bash
 python clean.py
 ```
 
-With no arguments it cleans every `.xlsx`, `.csv` and `.tsv` in `sample_files_uncleaned/`
-into `cleaned/` and `audit/`. That folder is git-ignored — the scenario corpus is expected
-to be swapped, so supply your own files there. (`legacy/` keeps the six original POC
-workbooks, which are tracked.) To point it at other files:
+With no arguments it cleans every `.xlsx`, `.csv` and `.tsv` in
+`backend/sample_files_uncleaned/` into `backend/cleaned/` and `backend/audit/`. That folder
+is git-ignored — the scenario corpus is expected to be swapped, so supply your own files
+there. (`backend/legacy/` keeps the six original POC workbooks, which are tracked.) Paths
+you pass are relative to where you run the command. To point it at other files:
 
 ```bash
 python clean.py "some_folder/*.xlsx" --out cleaned --audit audit
@@ -51,10 +52,10 @@ python clean.py "inbox/*.xlsx" --workers 8
 Score the cleaner against every scenario workbook:
 
 ```bash
-python tools/scorecard.py
+python backend/tools/scorecard.py
 ```
 
-Run the tests:
+Run the tests (from the project root; `pytest.ini` points at `backend/tests`):
 
 ```bash
 python -m pytest
@@ -63,12 +64,61 @@ python -m pytest
 Measure it, and check which signals the current corpus actually exercises:
 
 ```bash
-python tools/benchmark.py
+python backend/tools/benchmark.py
 ```
 
 ```bash
-python tools/ablation.py
+python backend/tools/ablation.py
 ```
+
+## Web app
+
+A browser UI over the same cleaner: upload a workbook, pick sheets, run, review, rename
+headers, export. The API (`backend/api/`) calls the `ahi_clean` functions in
+`backend/src/` directly and changes none of them. Run from the project root:
+
+```bash
+.venv\Scripts\python -m uvicorn api.main:app --app-dir backend --reload --port 8000
+```
+
+```bash
+npm --prefix frontend install
+```
+
+```bash
+npm --prefix frontend run dev
+```
+
+Open http://localhost:5173 (Vite proxies `/api` to port 8000). For a single-origin
+deployment, `npm --prefix frontend run build` and uvicorn then serves `frontend/dist` itself.
+
+What the UI can and cannot know, and when:
+
+- **Before a run** only sheet names are shown. A dirty sheet's raw extent — banners,
+  subtotals, blank rows — says nothing reliable about the table inside it, so row and
+  column counts are left to the cleaner.
+- **Appending** is a setting, not a prediction. With it on, sheets whose *cleaned*
+  headers match exactly are stacked (`orchestrate.plan_workbook`); with it off, each table
+  ships alone. Which sheets actually combined is reported after the run.
+- **Header renames** are stored per output and applied at export time, so a CSV or
+  metadata file downloaded after a rename always carries the new names. The metadata is
+  still built from the original frame, so appended tables stay described per sheet.
+
+Uploads, job outputs and exports go to `backend/.workspace/` (git-ignored). Jobs live in memory,
+so a server restart means uploading again.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/workbooks` | Upload; validates type, size and readability; lists sheets |
+| `POST /api/jobs` | Start cleaning `{workbook_id, sheets, append}` |
+| `GET /api/jobs/{id}` | Live status: stage, current sheet, rows kept/removed |
+| `POST /api/jobs/{id}/cancel` | Stop after the current sheet |
+| `GET /api/jobs/{id}/results` | Outputs, per-sheet report, append decisions, warnings |
+| `GET /api/jobs/{id}/outputs/{oid}/preview` | Paginated rows, server-side search/sort |
+| `GET /api/jobs/{id}/outputs/{oid}/columns` | Column profile (the metadata) |
+| `PUT /api/jobs/{id}/outputs/{oid}/headers` | Rename headers `{renames: {old: new}}` |
+| `GET /api/jobs/{id}/outputs/{oid}/export/csv` · `/metadata` | Downloads with current headers |
+| `GET /api/jobs/{id}/export/audit` · `/export/zip` | Audit report; everything zipped |
 
 ## Outputs
 
@@ -85,7 +135,8 @@ its metadata file. `<source>` is the input file's stem. A workbook that yields s
 tables produces one CSV and one metadata file per table, so n sheets with different
 headers give n CSVs and n metadata files. The audit lists each output under its final
 names (`file`, `metadata_file`, `job_id`, plus `table`, the cleaner's own name for it).
-`python clean.py` and `python -m ahi_clean` produce exactly the same files.
+`python clean.py` and `python -m ahi_clean` (with `backend/src` on the path) produce exactly
+the same files.
 
 ### The metadata file
 
@@ -369,8 +420,8 @@ Windows each process is a fresh interpreter that must re-import polars before do
 work, and for report-sized files that startup dwarfs the job. `--executor process` remains
 available for batches of genuinely large files.
 
-**170 tests with an empty corpus, in two suites.** `tests/test_scenarios.py` runs against
-whatever workbooks are in `sample_files_uncleaned/` and adds tests per workbook
+**170 tests with an empty corpus, in two suites.** `backend/tests/test_scenarios.py` runs against
+whatever workbooks are in `backend/sample_files_uncleaned/` and adds tests per workbook
 automatically. With that folder empty, the 16 tests that need real workbooks (there and in
 the orchestration and resilience suites) are skipped rather than failed. Everything else builds its sheets in
 memory and never names a file, so swapping the corpus cannot break what they pin.
@@ -378,29 +429,35 @@ memory and never names a file, so swapping the corpus cannot break what they pin
 ## Layout
 
 ```
-clean.py            entry point (no PYTHONPATH needed)
-legacy/             the original six POC workbooks
-sample_files_uncleaned/  the scenario corpus (git-ignored; supply your own)
-tools/scorecard.py  scores the cleaner against every scenario workbook
-tools/benchmark.py  single-sheet throughput and executor comparison
-tools/ablation.py   disables each signal in turn to show what is load-bearing
-src/ahi_clean/
-  signals.py        scoring primitives (fill, uniqueness, type profile, coverage, contrast)
-  typing_utils.py   fine-grained type inference
-  reader.py         workbook -> cell grid + formatting + formulas; nulls error cells
-  delimited.py      csv/tsv -> the same grid; sniffs delimiter and encoding
-  geometry.py       sheet -> table regions; all blank-gap handling
-  header.py         header scoring, the no-header path, column naming
-  rowclass.py       sparsity + arithmetic row classification
-  pivot.py          wide-matrix detection and the melt to long form
-  coerce.py         vectorised type decisions: one strategy per column, not per cell
-  contracts.py      checks that refuse, rather than merely report
-  failures.py       why a workbook could not be read, in actionable terms
-  extract.py        orientation, regions, realignment, types, validation
-  orchestrate.py    table roles, exact-header appends, one CSV per table otherwise
-  metadata.py       per-column metadata, from the typed table as it is written
-  audit.py          trace -> JSON report
-  cli.py            batch isolation, parallel workers, CSV + metadata writing, job ids
+clean.py                 entry point (no PYTHONPATH needed)
+requirements.txt         Python dependencies (cleaner + API)
+pytest.ini               runs backend/tests from the project root
+frontend/                React + Vite UI (Configuration → Run → Review & Results)
+backend/
+  api/                   FastAPI service: routes, validation, jobs, exports
+  legacy/                the original six POC workbooks
+  sample_files_uncleaned/  the scenario corpus (git-ignored; supply your own)
+  tests/                 cleaner and API test suites
+  tools/scorecard.py     scores the cleaner against every scenario workbook
+  tools/benchmark.py     single-sheet throughput and executor comparison
+  tools/ablation.py      disables each signal in turn to show what is load-bearing
+  src/ahi_clean/
+    signals.py        scoring primitives (fill, uniqueness, type profile, coverage, contrast)
+    typing_utils.py   fine-grained type inference
+    reader.py         workbook -> cell grid + formatting + formulas; nulls error cells
+    delimited.py      csv/tsv -> the same grid; sniffs delimiter and encoding
+    geometry.py       sheet -> table regions; all blank-gap handling
+    header.py         header scoring, the no-header path, column naming
+    rowclass.py       sparsity + arithmetic row classification
+    pivot.py          wide-matrix detection and the melt to long form
+    coerce.py         vectorised type decisions: one strategy per column, not per cell
+    contracts.py      checks that refuse, rather than merely report
+    failures.py       why a workbook could not be read, in actionable terms
+    extract.py        orientation, regions, realignment, types, validation
+    orchestrate.py    table roles, exact-header appends, one CSV per table otherwise
+    metadata.py       per-column metadata, from the typed table as it is written
+    audit.py          trace -> JSON report
+    cli.py            batch isolation, parallel workers, CSV + metadata writing, job ids
 ```
 
 ## Known limits
@@ -422,4 +479,4 @@ src/ahi_clean/
 - The decimal mark is decided per column from the values (`1.234,56` or `99,5` settles
   European; `1,234.56` or `10.5` settles US). A column whose values fit both, such as
   `1,234` only, is read as US and flagged.
-- `tools/scorecard.py` scores `.xlsx` only; delimited files are covered by the tests.
+- `backend/tools/scorecard.py` scores `.xlsx` only; delimited files are covered by the tests.
