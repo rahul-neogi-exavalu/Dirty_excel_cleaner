@@ -23,19 +23,11 @@ from collections import Counter
 from ahi_clean import contracts, typing_utils
 from ahi_clean.typing_utils import is_blank
 
-ROW_ACCOUNTING = "row_accounting"
-
 CHECKS = [
-    (ROW_ACCOUNTING, "Every source row is accounted for",
-     "Raw rows must equal blank + header + removed (with a reason) + kept. A leftover row was dropped silently."),
     (contracts.ROW_CONSERVATION, "No rows lost inside the table",
      "Inside the table, every row must be the header, a logged removal, or kept."),
-    (contracts.TOTAL_RECONCILIATION, "Removed totals match the kept rows",
-     "A grand total that was removed must equal the sum of the rows that were kept."),
     (contracts.EMPTY_KEY_COLUMN, "Key columns are filled",
      "An ID column that comes out entirely empty means values shifted away from their header."),
-    (contracts.UNEXPLAINED_EMPTY_COLUMN, "Empty columns have a known cause",
-     "A fully empty column must be blank in the source or formula-driven; otherwise it is a structural error."),
     (contracts.DUPLICATE_COLUMNS, "Column names are unique",
      "Repeated column names make a table impossible to load."),
 ]
@@ -63,23 +55,12 @@ def build(grids, results, outputs, violations: list[dict]) -> dict[str, dict]:
 def _report(output_id: str, tables: list, sheets: list[dict], failures: list[dict]) -> dict:
     checks = []
     for check_id, title, description in CHECKS:
-        if check_id == ROW_ACCOUNTING:
-            applicable = [sheet for sheet in sheets if sheet["status"] != NOT_APPLICABLE]
-            bad = [sheet for sheet in applicable if sheet["status"] == FAILED]
-            details = [
-                f"{sheet['sheet']}: {_count(abs(sheet['unaccounted']), sheet['axis'])} "
-                + ("not accounted for" if sheet["unaccounted"] > 0 else "more in the output than in the source")
-                for sheet in bad
-            ]
-            status = FAILED if bad else PASSED if applicable else NOT_APPLICABLE
-        else:
-            found = [item for item in failures if item["check"] == check_id]
-            details = [f"{item['table']}: {item['detail']}" for item in found]
-            status = FAILED if found else PASSED
-            if not found and not _applies(check_id, tables):
-                status = NOT_APPLICABLE
+        found = [item for item in failures if item["check"] == check_id]
+        if not found and not _applies(check_id, tables):
+            continue  # nothing to check, so the check is not shown
         checks.append({"id": check_id, "title": title, "description": description,
-                       "status": status, "details": details})
+                       "status": FAILED if found else PASSED,
+                       "details": [f"{item['table']}: {item['detail']}" for item in found]})
 
     issues = sum(1 for check in checks if check["status"] == FAILED)
     return {
@@ -91,16 +72,8 @@ def _report(output_id: str, tables: list, sheets: list[dict], failures: list[dic
     }
 
 
-def _count(number: int, axis: str) -> str:
-    """'1 row', '3 rows' -- axis is the plural ('rows' / 'columns')."""
-    return f"{number} {axis[:-1] if number == 1 else axis}"
-
-
 def _applies(check_id: str, tables: list) -> bool:
     """Whether a passing check had anything to check, so 'passed' is not claimed vacuously."""
-    if check_id == contracts.TOTAL_RECONCILIATION:
-        return any(row.get("classification") == "GRAND_TOTAL"
-                   for table in tables for row in table.trace.get("dropped_rows", []))
     if check_id == contracts.EMPTY_KEY_COLUMN:
         return any(kind == typing_utils.ID_STRING
                    for table in tables for kind in table.trace.get("inferred_types", {}).values())

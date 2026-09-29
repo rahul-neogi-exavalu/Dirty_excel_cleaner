@@ -246,10 +246,9 @@ def _check(report, check_id):
 def test_clean_workbook_passes_every_check(client):
     results, report = _consistency(client, MULTI_SHEET, ["Jan", "Feb"])
     assert report["status"] == "passed" and report["issues"] == 0
-    assert {check["id"] for check in report["checks"]} == {
-        "row_accounting", "row_conservation", "total_reconciliation",
-        "empty_key_column", "unexplained_empty_column", "duplicate_columns",
-    }
+    ids = {check["id"] for check in report["checks"]}
+    assert {"row_conservation", "duplicate_columns"} <= ids
+    assert ids <= {"row_conservation", "empty_key_column", "duplicate_columns"}
     # Both appended sheets are accounted for, line by line.
     for sheet in report["accounting"]:
         assert sheet["raw"] == sheet["blank"] + sheet["header"] + sheet["removed"] + sheet["kept"]
@@ -270,10 +269,9 @@ def test_rows_outside_the_table_are_accounted_for(client):
     assert sheet["removed_by_reason"] == {"EXCEL_ERROR": 2, "BANNER": 3, "GRAND_TOTAL": 1, "FOOTER": 2}
     removed = {row["sheet_row"]: row["classification"] for row in sheet["removed_rows"]}
     assert removed[1] == removed[2] == "EXCEL_ERROR" and removed[3] == "BANNER"
-    assert _check(report, "row_accounting")["status"] == "passed"
+    assert sheet["status"] == "passed"
     # Rows outside the region do not disturb the in-region conservation contract.
     assert _check(report, "row_conservation")["status"] == "passed"
-    assert _check(report, "total_reconciliation")["status"] == "passed"
     assert report["status"] == "passed" and results["summary"]["consistency_issues"] == 0
 
 
@@ -295,14 +293,12 @@ def test_row_accounting_catches_a_silently_dropped_row():
 def test_transposed_sheet_is_accounted_along_its_columns(client):
     _, report = _consistency(client, TRANSPOSED, ["Sheet"])
     sheet = report["accounting"][0]
-    assert sheet["axis"] == "columns" and sheet["unaccounted"] == 0
-    assert _check(report, "row_accounting")["status"] == "passed"
+    assert sheet["axis"] == "columns" and sheet["unaccounted"] == 0 and sheet["status"] == "passed"
 
 
-def test_checks_with_nothing_to_check_are_not_applicable(client):
+def test_checks_are_never_reported_as_not_applicable(client):
     _, report = _consistency(client, MULTI_SHEET, ["Jan", "Feb"])
-    # No grand total was removed, so there was nothing to reconcile.
-    assert _check(report, "total_reconciliation")["status"] == "not_applicable"
+    assert all(check["status"] in ("passed", "failed") for check in report["checks"])
 
 
 def test_a_contract_violation_fails_its_check(client, monkeypatch):

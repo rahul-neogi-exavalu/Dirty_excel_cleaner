@@ -33,7 +33,7 @@ export function ConsistencyView({ report }: { report: ConsistencyReport | undefi
           <p className="text-caption text-ink-700">
             {failed
               ? "The file was still produced so you can inspect the evidence, but loading it as-is may carry missing or misplaced data."
-              : "Every source row is accounted for and the cleaned table reconciles with the source."}
+              : "The cleaned table reconciles with the source."}
           </p>
         </div>
       </div>
