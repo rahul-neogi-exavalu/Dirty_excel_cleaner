@@ -4,7 +4,7 @@
 # Keeping them tracked also makes every run show up as a large, noisy diff.
 cleaned/
 audit/
-
+__pycache__/
 # --- Excel lock files ------------------------------------------------------
 # Excel writes these beside a workbook while it is open. They are transient and
 # machine-specific, and they are what makes a CSV refuse to be overwritten
@@ -14,7 +14,6 @@ audit/
 ~$*.xlsm
 
 # --- Python ----------------------------------------------------------------
-__pycache__/
 *.py[cod]
 *$py.class
 *.so
