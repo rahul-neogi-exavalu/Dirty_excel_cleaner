@@ -12,7 +12,7 @@ import { Button } from "./ui/Button";
  */
 export function ConsistencyView({ report }: { report: ConsistencyReport | undefined }) {
   if (!report) {
-    return <p className="text-body text-ink-600">No consistency report is available for this table.</p>;
+    return <p className="text-body text-ink-500">No report for this table.</p>;
   }
   const failed = report.status === "failed";
 
@@ -22,24 +22,20 @@ export function ConsistencyView({ report }: { report: ConsistencyReport | undefi
         role={failed ? "alert" : "status"}
         className={clsx(
           "flex items-start gap-3 rounded-lg border px-4 py-3",
-          failed ? "border-brand-200 bg-brand-50" : "border-emerald-200 bg-emerald-50",
+          failed ? "border-danger-200 bg-danger-50" : "border-emerald-200 bg-emerald-50",
         )}
       >
-        {failed ? <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-brand-600" aria-hidden /> : <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" aria-hidden />}
+        {failed ? <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-danger-600" aria-hidden /> : <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" aria-hidden />}
         <div>
-          <p className={clsx("text-body font-semibold", failed ? "text-brand-800" : "text-emerald-800")}>
-            {failed ? `${plural(report.issues, "consistency issue")} — review before loading this table` : "All consistency checks passed — safe to load"}
+          <p className={clsx("text-body font-semibold", failed ? "text-danger-800" : "text-emerald-800")}>
+            {failed ? `${plural(report.issues, "issue")} found` : "All checks passed"}
           </p>
-          <p className="text-caption text-ink-700">
-            {failed
-              ? "The file was still produced so you can inspect the evidence, but loading it as-is may carry missing or misplaced data."
-              : "The cleaned table reconciles with the source."}
-          </p>
+          <p className="text-caption text-ink-700">{failed ? "Review before loading." : "Reconciles with the source."}</p>
         </div>
       </div>
 
       <section aria-labelledby="checks-title">
-        <h3 id="checks-title" className="mb-2 text-card text-ink-900">Checks</h3>
+        <h3 id="checks-title" className="label-caps mb-2">Checks</h3>
         <ul className="divide-y divide-ink-100 rounded-lg border border-ink-200">
           {report.checks.map((check) => (
             <CheckRow key={check.id} check={check} />
@@ -48,10 +44,7 @@ export function ConsistencyView({ report }: { report: ConsistencyReport | undefi
       </section>
 
       <section aria-labelledby="accounting-title">
-        <h3 id="accounting-title" className="text-card text-ink-900">Row accounting</h3>
-        <p className="mb-3 text-caption text-ink-600">
-          Every row of the source sheet must end up somewhere: blank, header, removed with a reason, or kept. Anything else is unaccounted for.
-        </p>
+        <h3 id="accounting-title" className="label-caps mb-3">Row accounting</h3>
         <div className="space-y-4">
           {report.accounting.map((sheet) => (
             <AccountingCard key={sheet.sheet} sheet={sheet} />
@@ -64,26 +57,26 @@ export function ConsistencyView({ report }: { report: ConsistencyReport | undefi
 
 function StatusIcon({ status }: { status: ConsistencyCheck["status"] }) {
   if (status === "passed") return <CircleCheck className="h-5 w-5 shrink-0 text-emerald-600" aria-label="Passed" />;
-  if (status === "failed") return <CircleX className="h-5 w-5 shrink-0 text-brand-600" aria-label="Failed" />;
+  if (status === "failed") return <CircleX className="h-5 w-5 shrink-0 text-danger-600" aria-label="Failed" />;
   return <CircleMinus className="h-5 w-5 shrink-0 text-ink-400" aria-label="Not applicable" />;
 }
 
 function CheckRow({ check }: { check: ConsistencyCheck }) {
   return (
-    <li className={clsx("flex gap-3 px-4 py-3", check.status === "failed" && "bg-brand-50/40")}>
+    <li className={clsx("flex gap-3 px-4 py-3", check.status === "failed" && "bg-danger-50/40")}>
       <StatusIcon status={check.status} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-body font-medium text-ink-900">{check.title}</p>
           <Badge tone={check.status === "passed" ? "success" : check.status === "failed" ? "danger" : "neutral"}>
-            {check.status === "passed" ? "Passed" : check.status === "failed" ? "Failed" : "Not applicable"}
+            {check.status === "passed" ? "Passed" : check.status === "failed" ? "Failed" : "N/A"}
           </Badge>
         </div>
         <p className="text-caption text-ink-600">{check.description}</p>
         {check.details.length > 0 && (
           <ul className="mt-1.5 space-y-0.5">
             {check.details.map((detail, index) => (
-              <li key={index} className="text-caption font-medium text-brand-700">{detail}</li>
+              <li key={index} className="text-caption font-medium text-danger-700">{detail}</li>
             ))}
           </ul>
         )}
@@ -105,14 +98,14 @@ function AccountingCard({ sheet }: { sheet: RowAccounting }) {
   ];
 
   return (
-    <div className={clsx("rounded-lg border", failed ? "border-brand-200" : "border-ink-200")}>
+    <div className={clsx("rounded-lg border", failed ? "border-danger-200" : "border-ink-200")}>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-ink-100 px-4 py-2.5">
         <p className="flex items-center gap-2 text-body font-semibold text-ink-900">
           {sheet.sheet}
-          {sheet.axis === "columns" && <Badge tone="info">Turned upright — counted by column</Badge>}
+          {sheet.axis === "columns" && <Badge tone="info">By column</Badge>}
         </p>
         <Badge tone={sheet.status === "passed" ? "success" : failed ? "danger" : "neutral"}>
-          {sheet.status === "passed" ? "Balanced" : failed ? `${formatNumber(Math.abs(sheet.unaccounted))} unaccounted` : "Checked inside the table"}
+          {sheet.status === "passed" ? "Balanced" : failed ? `${formatNumber(Math.abs(sheet.unaccounted))} unaccounted` : "In-table"}
         </Badge>
       </div>
 
@@ -129,7 +122,7 @@ function AccountingCard({ sheet }: { sheet: RowAccounting }) {
         {sheet.unaccounted !== 0 && (
           <>
             {sheet.unaccounted > 0 ? <span className="text-ink-400">+</span> : <Minus className="h-4 w-4 text-ink-400" />}
-            <Term label="Unaccounted" value={Math.abs(sheet.unaccounted)} className="text-brand-700" />
+            <Term label="Unaccounted" value={Math.abs(sheet.unaccounted)} className="text-danger-700" />
           </>
         )}
       </div>
@@ -147,10 +140,10 @@ function AccountingCard({ sheet }: { sheet: RowAccounting }) {
       )}
 
       {sheet.unaccounted_rows.length > 0 && (
-        <div className="mx-4 mb-3 overflow-x-auto rounded-md border border-brand-200 scroll-thin">
+        <div className="mx-4 mb-3 overflow-x-auto rounded-md border border-danger-200 scroll-thin">
           <table className="w-full min-w-[480px] text-caption">
-            <caption className="bg-brand-50 px-3 py-1.5 text-left font-semibold text-brand-800">
-              {unit === "rows" ? "Rows" : "Columns"} neither kept nor removed with a reason
+            <caption className="bg-danger-50 px-3 py-1.5 text-left font-semibold text-danger-800">
+              Unaccounted {unit}
             </caption>
             <thead className="bg-ink-50 text-left text-ink-600">
               <tr>
@@ -189,7 +182,7 @@ function AccountingCard({ sheet }: { sheet: RowAccounting }) {
                 <thead className="bg-ink-50 text-left text-ink-600">
                   <tr>
                     <th scope="col" className="w-24 px-3 py-1.5 font-semibold">Sheet row</th>
-                    <th scope="col" className="w-40 px-3 py-1.5 font-semibold">Removed as</th>
+                    <th scope="col" className="w-40 px-3 py-1.5 font-semibold">Reason</th>
                     <th scope="col" className="px-3 py-1.5 font-semibold">Content</th>
                   </tr>
                 </thead>
@@ -205,7 +198,7 @@ function AccountingCard({ sheet }: { sheet: RowAccounting }) {
               </table>
               {sheet.removed > sheet.removed_rows.length && (
                 <p className="border-t border-ink-100 px-3 py-1.5 text-caption text-ink-500">
-                  Showing {sheet.removed_rows.length} of {formatNumber(sheet.removed)}. The audit report lists every removed row.
+                  Showing {sheet.removed_rows.length} of {formatNumber(sheet.removed)} · full list in audit report
                 </p>
               )}
             </div>

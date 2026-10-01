@@ -115,7 +115,7 @@ export const TextInput = forwardRef<
         "h-9 w-full rounded border bg-white px-3 text-body text-ink-900 placeholder:text-ink-400 transition-shadow",
         "focus:outline-none focus:shadow-focus read-only:bg-ink-50 read-only:text-ink-600",
         "disabled:cursor-not-allowed disabled:bg-ink-50 disabled:text-ink-400",
-        invalid ? "border-brand-500 focus:border-brand-600" : valid ? "border-emerald-500" : "border-ink-300 focus:border-brand-500",
+        invalid ? "border-danger-500 focus:border-danger-600" : valid ? "border-emerald-500" : "border-ink-300 focus:border-brand-500",
         className,
       )}
       {...rest}

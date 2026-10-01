@@ -7,7 +7,7 @@ const tones: Record<Tone, string> = {
   neutral: "bg-ink-100 text-ink-700 ring-ink-200",
   success: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   warning: "bg-amber-50 text-amber-800 ring-amber-200",
-  danger: "bg-brand-50 text-brand-700 ring-brand-200",
+  danger: "bg-danger-50 text-danger-700 ring-danger-200",
   info: "bg-sky-50 text-sky-700 ring-sky-200",
   brand: "bg-brand-50 text-brand-700 ring-brand-200",
 };
@@ -16,7 +16,7 @@ const dots: Record<Tone, string> = {
   neutral: "bg-ink-400",
   success: "bg-emerald-500",
   warning: "bg-amber-500",
-  danger: "bg-brand-600",
+  danger: "bg-danger-600",
   info: "bg-sky-500",
   brand: "bg-brand-600",
 };

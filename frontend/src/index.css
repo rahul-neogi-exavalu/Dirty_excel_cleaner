@@ -5,23 +5,50 @@
 @layer base {
   html {
     -webkit-font-smoothing: antialiased;
-    font-feature-settings: "cv11", "ss01";
+    font-feature-settings: "ss02";
   }
   body {
     @apply bg-ink-50 text-body text-ink-800;
+    background-image: radial-gradient(1200px 520px at 100% -10%, rgba(42, 140, 85, 0.06), transparent 60%);
+    background-attachment: fixed;
+  }
+  h1,
+  h2,
+  h3 {
+    @apply font-display;
+  }
+  ::selection {
+    background: #d9efe1;
+    color: #0f1e17;
   }
   :focus-visible {
-    outline: 2px solid #c8102e;
+    outline: 2px solid #1d7a46;
     outline-offset: 2px;
   }
   .num {
     font-variant-numeric: tabular-nums;
   }
+  h1,
+  h2 {
+    letter-spacing: -0.01em;
+  }
 }
 
 @layer components {
   .card {
-    @apply rounded-lg border border-ink-200 bg-white shadow-card;
+    @apply rounded-xl border border-ink-200/80 bg-white shadow-card;
+  }
+  .eyebrow {
+    @apply font-display text-[12px] font-semibold uppercase tracking-[0.14em] text-brand-600;
+  }
+  /* Faint spreadsheet grid, used behind drop zones and empty states. */
+  .bg-grid {
+    background-color: #fbfcfb;
+    background-image:
+      linear-gradient(to right, rgba(29, 122, 70, 0.07) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(29, 122, 70, 0.07) 1px, transparent 1px);
+    background-size: 28px 28px;
+    background-position: -1px -1px;
   }
   .label-caps {
     @apply text-caption font-semibold uppercase tracking-wider text-ink-500;
@@ -36,7 +63,7 @@
   }
   .scroll-thin {
     scrollbar-width: thin;
-    scrollbar-color: #cbd5e1 transparent;
+    scrollbar-color: #c8d3cc transparent;
   }
 }
 

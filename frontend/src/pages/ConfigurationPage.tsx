@@ -2,6 +2,7 @@ import clsx from "clsx";
 import {
   ArrowRight,
   BetweenHorizontalEnd,
+  Check,
   CheckCircle2,
   EyeOff,
   FileSpreadsheet,
@@ -55,15 +56,15 @@ export function ConfigurationPage() {
     <>
       <PageHeader
         page="configuration"
-        title="Configure data"
-        description="Upload one or more Excel workbooks, choose the sheets to clean in each, and decide how matching sheets are combined."
+        title="Configure"
+        description="Upload workbooks, pick sheets, set append mode."
       />
       <SectionNav
         label="Configuration sections"
         sections={[
-          { id: "section-upload", label: "Upload workbooks", shortLabel: "Upload", icon: <FileSpreadsheet />, done: flow.files.length > 0 },
-          { id: "section-sheets", label: "Sheet selection", shortLabel: "Sheets", icon: <Table2 />, done: allSelected },
-          { id: "section-append", label: "Append matching sheets", shortLabel: "Append", icon: <BetweenHorizontalEnd />, done: allSelected },
+          { id: "section-upload", label: "Upload", icon: <FileSpreadsheet />, done: flow.files.length > 0 },
+          { id: "section-sheets", label: "Sheets", icon: <Table2 />, done: allSelected },
+          { id: "section-append", label: "Append", icon: <BetweenHorizontalEnd />, done: allSelected },
         ]}
       />
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
@@ -87,11 +88,11 @@ export function ConfigurationPage() {
 function rejectReason(file: File): { message: string; advice: string } | null {
   const suffix = file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).toLowerCase() : "";
   if (suffix === ".xls" || suffix === ".xlsb" || suffix === ".ods")
-    return { message: `${file.name} is in a format the cleaner can't open.`, advice: "Open it in Excel and re-save it as .xlsx, then upload again." };
-  if (!ACCEPT.includes(suffix)) return { message: `${file.name} is not a supported file type.`, advice: "Upload an .xlsx workbook, or a .csv / .tsv file." };
+    return { message: `${file.name}: unsupported format`, advice: "Re-save as .xlsx and retry." };
+  if (!ACCEPT.includes(suffix)) return { message: `${file.name}: unsupported file type`, advice: "Use .xlsx, .csv or .tsv." };
   if (file.size > MAX_MB * 1024 * 1024)
-    return { message: `${file.name} is larger than ${MAX_MB} MB.`, advice: "Remove sheets you don't need, or split the workbook, and try again." };
-  if (file.size === 0) return { message: `${file.name} is empty.`, advice: "Check the file and upload it again." };
+    return { message: `${file.name}: over ${MAX_MB} MB`, advice: "Split the workbook or remove unused sheets." };
+  if (file.size === 0) return { message: `${file.name}: empty file`, advice: "Check the file and retry." };
   return null;
 }
 
@@ -191,9 +192,9 @@ function UploadSection() {
     }
     if (added.length) setQueue((items) => [...items, ...added]);
     if (duplicates.length)
-      toast({ severity: "info", title: duplicates.length === 1 ? "File already added" : "Some files were already added", description: duplicates.join(", ") });
+      toast({ severity: "info", title: duplicates.length === 1 ? "Already added" : "Some files already added", description: duplicates.join(", ") });
     if (overflow)
-      toast({ severity: "warning", title: `Up to ${MAX_FILES} files per run`, description: `${plural(overflow, "file")} ${overflow === 1 ? "was" : "were"} not added.` });
+      toast({ severity: "warning", title: `Limit: ${MAX_FILES} files`, description: `${plural(overflow, "file")} skipped.` });
   };
 
   const browse = () => !locked && input.current?.click();
@@ -217,11 +218,10 @@ function UploadSection() {
       id="section-upload"
       step={1}
       icon={<FileSpreadsheet />}
-      title="Upload workbooks"
-      description="Add one or more files. Each file keeps its own sheet selection and append mode, and is cleaned on its own."
+      title="Upload"
       actions={
-        <span className="hidden rounded-full bg-ink-100 px-3 py-1 text-caption text-ink-600 md:inline">
-          .xlsx · .csv · up to {MAX_MB} MB each · max {MAX_FILES} files
+        <span className="num hidden rounded-full bg-ink-100 px-2.5 py-0.5 text-caption text-ink-600 md:inline">
+          .xlsx · .csv · {MAX_MB} MB · {MAX_FILES} files max
         </span>
       }
     >
@@ -276,17 +276,17 @@ function UploadSection() {
             }}
             {...dropHandlers}
             className={clsx(
-              "flex items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-3 text-body transition-colors",
+              "flex items-center justify-center gap-2 rounded-xl border-2 border-dashed px-4 py-3.5 text-body transition-colors",
               "focus-visible:outline-none focus-visible:shadow-focus",
               locked
                 ? "cursor-not-allowed border-ink-200 text-ink-400"
                 : dragging
                   ? "cursor-copy border-brand-500 bg-brand-50 text-brand-700"
-                  : "cursor-pointer border-ink-300 text-ink-600 hover:border-brand-300 hover:bg-brand-50/30",
+                  : "cursor-pointer border-ink-200 bg-grid text-ink-600 hover:border-brand-300 hover:text-brand-700",
             )}
           >
             <FilePlus2 className="h-4 w-4" aria-hidden />
-            {locked ? "Files can't be added while cleaning is running" : dragging ? "Drop to add" : "Drop more files here, or click to browse"}
+            {locked ? "Locked while cleaning" : dragging ? "Drop to add" : "Add files"}
           </div>
         </div>
       ) : (
@@ -303,19 +303,19 @@ function UploadSection() {
           }}
           {...dropHandlers}
           className={clsx(
-            "flex cursor-pointer flex-col gap-4 rounded-lg border-2 border-dashed px-5 py-6 transition-colors sm:flex-row sm:items-center md:px-6",
+            "flex cursor-pointer flex-col items-center gap-4 rounded-xl border-2 border-dashed px-5 py-12 text-center transition-colors md:py-16",
             "focus-visible:outline-none focus-visible:shadow-focus",
-            dragging ? "border-brand-500 bg-brand-50" : "border-ink-300 bg-ink-50/60 hover:border-brand-300 hover:bg-brand-50/30",
+            dragging ? "border-brand-500 bg-brand-50" : "border-ink-200 bg-grid hover:border-brand-300",
           )}
         >
-          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-white text-brand-600 ring-1 ring-ink-200" aria-hidden>
+          <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-brand-100 text-brand-700 ring-8 ring-brand-50" aria-hidden>
             <Upload className="h-5 w-5" />
           </div>
           <div className="min-w-0 flex-1">
-            <p className="text-card text-ink-900">{dragging ? "Drop to upload" : "Drag and drop Excel workbooks here"}</p>
-            <p className="mt-0.5 text-body text-ink-600">or browse from your device. You can add several files at once; your source files are never modified.</p>
+            <p className="font-display text-[18px] font-semibold text-ink-900">{dragging ? "Drop to upload" : "Drop workbooks here"}</p>
+            <p className="mt-1 text-body text-ink-500">Source files stay unchanged.</p>
           </div>
-          <Button variant="primary" icon={<FolderOpen />} onClick={(event) => (event.stopPropagation(), browse())}>
+          <Button variant="primary" size="lg" icon={<FolderOpen />} onClick={(event) => (event.stopPropagation(), browse())}>
             Browse files
           </Button>
         </div>
@@ -367,13 +367,13 @@ function LoadedFileRow({ entry }: { entry: FileEntry }) {
           <span className={none ? "font-medium text-amber-700" : undefined}>
             {entry.selected.length} selected
           </span>
-          {effectiveAppend(entry) ? " · auto-append" : ""}
+          {effectiveAppend(entry) ? " · append" : ""}
         </span>
       </button>
       <div className="hidden shrink-0 sm:block">
-        {fileStatus(flow, entry) ?? (none ? <Badge tone="warning" icon={<TriangleAlert />}>No sheets selected</Badge> : <Badge tone="neutral" dot>Ready</Badge>)}
+        {fileStatus(flow, entry) ?? (none ? <Badge tone="warning" icon={<TriangleAlert />}>No sheets</Badge> : <Badge tone="neutral" dot>Ready</Badge>)}
       </div>
-      <Tooltip content={flow.running ? "Wait for the running job to finish before removing files." : `Remove ${workbook.filename}`}>
+      <Tooltip content={flow.running ? "Locked while cleaning" : "Remove"}>
         <button
           type="button"
           aria-label={`Remove ${workbook.filename}`}
@@ -388,7 +388,7 @@ function LoadedFileRow({ entry }: { entry: FileEntry }) {
         open={confirm}
         onClose={() => setConfirm(false)}
         title="Remove this file?"
-        description={`${workbook.filename} will be removed from this workspace, along with its sheet selection. Files you already downloaded are not affected.`}
+        description={`${workbook.filename} and its selection leave this workspace. Downloads are unaffected.`}
         footer={
           <>
             <Button onClick={() => setConfirm(false)}>Keep file</Button>
@@ -425,10 +425,10 @@ function QueueRow({
   const { file } = item;
   if (item.phase === "error") {
     return (
-      <li className="flex animate-fade-in items-start gap-3 rounded-lg border border-brand-200 bg-brand-50/50 px-4 py-3" role="alert">
-        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-brand-600" aria-hidden />
+      <li className="flex animate-fade-in items-start gap-3 rounded-lg border border-danger-200 bg-danger-50/50 px-4 py-3" role="alert">
+        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-danger-600" aria-hidden />
         <div className="min-w-0 flex-1">
-          <p className="text-body font-medium text-brand-800">{item.message}</p>
+          <p className="text-body font-medium text-danger-800">{item.message}</p>
           {item.advice && <p className="text-caption text-ink-700">{item.advice}</p>}
         </div>
         {canRetry && (
@@ -436,13 +436,13 @@ function QueueRow({
             Retry
           </Button>
         )}
-        <button type="button" aria-label={`Dismiss error for ${file.name}`} onClick={onDismiss} className="rounded p-1 text-ink-500 hover:bg-brand-100">
+        <button type="button" aria-label={`Dismiss error for ${file.name}`} onClick={onDismiss} className="rounded p-1 text-ink-500 hover:bg-danger-100">
           <X className="h-4 w-4" />
         </button>
       </li>
     );
   }
-  const label = item.phase === "waiting" ? "Waiting" : item.phase === "uploading" ? "Uploading" : "Reading sheets in";
+  const label = item.phase === "waiting" ? "Queued" : item.phase === "uploading" ? "Uploading" : "Reading";
   return (
     <li className="flex animate-fade-in items-center gap-3 rounded-lg border border-ink-200 bg-ink-50/60 px-4 py-3">
       <Upload className="h-4 w-4 shrink-0 text-brand-600" aria-hidden />
@@ -452,7 +452,7 @@ function QueueRow({
             {label} <span className="font-medium">{file.name}</span>
           </p>
           <span className="num shrink-0 text-caption font-medium text-ink-700">
-            {item.phase === "uploading" ? `${Math.round(item.fraction * 100)}%` : item.phase === "processing" ? "Almost done" : formatBytes(file.size)}
+            {item.phase === "uploading" ? `${Math.round(item.fraction * 100)}%` : item.phase === "processing" ? "Reading…" : formatBytes(file.size)}
           </span>
         </div>
         <ProgressBar
@@ -501,13 +501,13 @@ function SheetSection() {
 
   if (!entry || !workbook) {
     return (
-      <SectionCard id="section-sheets" step={2} icon={<Table2 />} title="Sheet selection" description="Choose the sheets to clean in each file.">
+      <SectionCard id="section-sheets" step={2} icon={<Table2 />} title="Sheets">
         <div id="section-append" className="rounded-lg border border-dashed border-ink-200">
           <EmptyState
             compact
             icon={<Sheet />}
-            title="No workbook uploaded yet"
-            description="Upload one or more Excel workbooks to see their sheets and choose which ones to clean."
+            title="No workbook yet"
+            description="Upload a workbook to list its sheets."
           />
         </div>
       </SectionCard>
@@ -537,10 +537,10 @@ function SheetSection() {
     description: (
       <>
         {item.selected.length} of {plural(item.workbook.sheets.length, "sheet")} selected ·{" "}
-        {effectiveAppend(item) ? "auto-append" : "sheets kept separate"}
+        {effectiveAppend(item) ? "append" : "separate"}
       </>
     ),
-    meta: item.selected.length === 0 ? <Badge tone="warning">None selected</Badge> : undefined,
+    meta: item.selected.length === 0 ? <Badge tone="warning">None</Badge> : undefined,
   }));
 
   return (
@@ -548,12 +548,8 @@ function SheetSection() {
       id="section-sheets"
       step={2}
       icon={<Table2 />}
-      title="Sheet selection"
-      description={
-        flow.files.length > 1
-          ? "Pick a file to see its sheets. Selections and append mode are kept per file."
-          : "Choose the sheets to clean. Select all applies to every sheet that matches the search."
-      }
+      title="Sheets"
+      description={flow.files.length > 1 ? "Settings are kept per file." : undefined}
     >
       <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-end">
         <Select
@@ -566,16 +562,16 @@ function SheetSection() {
           width={460}
         />
         {sheets.length > 6 && (
-          <SearchInput value={query} onChange={setQuery} placeholder="Search sheets…" label="Search sheets" className="w-full lg:w-60" />
+          <SearchInput value={query} onChange={setQuery} placeholder="Search" label="Search sheets" className="w-full lg:w-60" />
         )}
       </div>
 
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <StatTile icon={<Layers />} label="Sheets in this file" value={formatNumber(sheets.length)} tone="info" />
-        <StatTile icon={<ListChecks />} label="Selected for cleaning" value={`${selected.size} of ${sheets.length}`} tone="brand" />
+        <StatTile icon={<Layers />} label="Sheets" value={formatNumber(sheets.length)} tone="info" />
+        <StatTile icon={<ListChecks />} label="Selected" value={`${selected.size} / ${sheets.length}`} tone="brand" />
         <StatTile
           icon={attention ? <TriangleAlert /> : <CheckCircle2 />}
-          label={attention ? "Hidden or empty sheets" : "All sheets have data"}
+          label={attention ? "Hidden or empty" : "All have data"}
           value={attention ? formatNumber(attention) : "None"}
           tone={attention ? "warning" : "success"}
         />
@@ -583,7 +579,7 @@ function SheetSection() {
 
       {locked && (
         <Alert tone="info" className="mb-3">
-          Selection is locked while a cleaning job is running.
+          Locked while cleaning.
         </Alert>
       )}
 
@@ -602,12 +598,12 @@ function SheetSection() {
                     disabled={locked || !visible.length}
                   />
                 </th>
-                <th scope="col" className="px-2 py-2.5">Sheet name</th>
+                <th scope="col" className="px-2 py-2.5">Sheet</th>
                 <th scope="col" className="px-4 py-2.5 text-right">
                   <span className="inline-flex items-center gap-1">
-                    Cleaned rows
-                    <Tooltip content="Measured by the cleaner after titles, subtotals, blank and repeated-header rows are removed. Shown after a run.">
-                      <Info className="h-3.5 w-3.5 text-ink-400" aria-label="About cleaned rows" tabIndex={0} />
+                    Rows
+                    <Tooltip content="Rows after cleaning. Shown after a run.">
+                      <Info className="h-3.5 w-3.5 text-ink-400" aria-label="About rows" tabIndex={0} />
                     </Tooltip>
                   </span>
                 </th>
@@ -639,22 +635,22 @@ function SheetSection() {
                       </span>
                     </td>
                     <td className="num px-4 py-2.5 text-right text-ink-700">
-                      {size ? formatNumber(size.rows) : <span className="text-ink-400">After cleaning</span>}
+                      {size ? formatNumber(size.rows) : <span className="text-ink-300">—</span>}
                     </td>
                     <td className="num px-4 py-2.5 text-right text-ink-700">
                       {size ? formatNumber(size.columns) : <span className="text-ink-400">—</span>}
                     </td>
                     <td className="px-4 py-2.5">
                       {sheet.hidden ? (
-                        <Badge tone="info" icon={<EyeOff />}>Hidden sheet</Badge>
+                        <Badge tone="info" icon={<EyeOff />}>Hidden</Badge>
                       ) : !sheet.has_content ? (
-                        <Badge tone="warning" icon={<TriangleAlert />}>No data found</Badge>
+                        <Badge tone="warning" icon={<TriangleAlert />}>Empty</Badge>
                       ) : size && size.tables === 0 ? (
-                        <Badge tone="warning" icon={<TriangleAlert />}>No table found</Badge>
+                        <Badge tone="warning" icon={<TriangleAlert />}>No table</Badge>
                       ) : size ? (
                         <Badge tone="success" icon={<CheckCircle2 />}>Cleaned</Badge>
                       ) : (
-                        <Badge tone="neutral" dot>Ready to clean</Badge>
+                        <Badge tone="neutral" dot>Ready</Badge>
                       )}
                     </td>
                   </tr>
@@ -663,7 +659,7 @@ function SheetSection() {
               {!visible.length && (
                 <tr>
                   <td colSpan={5}>
-                    <EmptyState compact icon={<Sheet />} title="No sheets match your search" description={`Nothing matches “${query}”.`} action={<Button size="sm" onClick={() => setQuery("")}>Clear search</Button>} />
+                    <EmptyState compact icon={<Sheet />} title="No matches" description={`Nothing matches “${query}”.`} action={<Button size="sm" onClick={() => setQuery("")}>Clear</Button>} />
                   </td>
                 </tr>
               )}
@@ -673,7 +669,7 @@ function SheetSection() {
       </div>
       {selected.size === 0 && (
         <p className="mt-3 flex items-center gap-1.5 text-caption text-amber-700" role="status">
-          <TriangleAlert className="h-3.5 w-3.5" aria-hidden /> Select at least one sheet in {workbook.filename} to continue, or remove the file.
+          <TriangleAlert className="h-3.5 w-3.5" aria-hidden /> Select at least one sheet.
         </p>
       )}
 
@@ -697,7 +693,7 @@ function SummaryPanel({ onContinue }: { onContinue: () => void }) {
 
   const rows: { label: string; value: React.ReactNode; ok: boolean }[] = [
     {
-      label: count > 1 ? "Workbooks" : "Workbook",
+      label: count > 1 ? "Files" : "File",
       value: count ? (
         count === 1 ? (
           <span className="block truncate" title={flow.files[0].workbook.filename}>{flow.files[0].workbook.filename}</span>
@@ -705,51 +701,50 @@ function SummaryPanel({ onContinue }: { onContinue: () => void }) {
           plural(count, "file")
         )
       ) : (
-        "Not uploaded"
+        "None"
       ),
       ok: count > 0,
     },
     {
-      label: "Sheets selected",
-      value: count ? `${flow.totalSelected} of ${flow.totalSheets}${count > 1 ? ` across ${plural(count, "file")}` : ""}` : "—",
+      label: "Sheets",
+      value: count ? `${flow.totalSelected} of ${flow.totalSheets} selected` : "—",
       ok: count > 0 && missing.length === 0,
     },
     {
-      label: "Append mode",
+      label: "Append",
       value: !count
         ? "—"
         : appending === 0
-          ? "Sheets kept separate"
+          ? "Off"
           : count === 1
-            ? "Auto-detect & append — matching sheets combine during the run"
-            : `Auto-detect & append in ${appending} of ${plural(count, "file")}`,
+            ? "Auto-detect"
+            : `Auto-detect · ${appending} of ${count} files`,
       ok: true,
     },
-    { label: "Output", value: "Cleaned CSV per table, column metadata and an audit report — per file", ok: true },
+    { label: "Output", value: "CSV · metadata · audit", ok: true },
   ];
 
   return (
-    <section className="card p-5" aria-labelledby="summary-title">
-      <h2 id="summary-title" className="text-card text-ink-900">Configuration summary</h2>
-      <p className="mt-0.5 text-caption text-ink-500">Check these before you run.</p>
-      <dl className="mt-4 space-y-3">
+    <section className="card p-6" aria-labelledby="summary-title">
+      <h2 id="summary-title" className="label-caps">Summary</h2>
+      <dl className="mt-5 space-y-4">
         {rows.map((row) => (
           <div key={row.label} className="flex gap-3">
             <span
-              className={clsx("mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full", row.ok ? "bg-emerald-100 text-emerald-600" : "bg-ink-100 text-ink-400")}
+              className={clsx("mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full", row.ok ? "bg-brand-600 text-white" : "bg-ink-100 text-ink-400")}
               aria-hidden
             >
-              {row.ok ? <CheckCircle2 className="h-3 w-3" /> : <span className="h-1.5 w-1.5 rounded-full bg-ink-400" />}
+              {row.ok ? <Check className="h-3 w-3" strokeWidth={3} /> : <span className="h-1.5 w-1.5 rounded-full bg-ink-400" />}
             </span>
             <div className="min-w-0 flex-1">
-              <dt className="text-caption text-ink-500">{row.label}</dt>
-              <dd className={clsx("text-body", row.ok ? "font-medium text-ink-900" : "text-ink-500")}>{row.value}</dd>
+              <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-500">{row.label}</dt>
+              <dd className={clsx("mt-0.5 text-body", row.ok ? "font-medium text-ink-900" : "text-ink-500")}>{row.value}</dd>
             </div>
           </div>
         ))}
       </dl>
       {missing.length > 0 && (
-        <Alert tone="warning" className="mt-4" title={missing.length === 1 ? "A file has no sheets selected" : `${missing.length} files have no sheets selected`}>
+        <Alert tone="warning" className="mt-4" title={missing.length === 1 ? "No sheets selected" : `${missing.length} files without sheets`}>
           <ul className="mt-1 space-y-0.5">
             {missing.map((entry) => (
               <li key={entry.workbook.id}>
@@ -763,13 +758,13 @@ function SummaryPanel({ onContinue }: { onContinue: () => void }) {
       )}
       {flow.stale && flow.batch && !flow.running && (
         <Alert tone="warning" className="mt-4">
-          The configuration changed since the last run. Run again to update the results.
+          Changed since last run.
         </Alert>
       )}
-      <div className="mt-5 border-t border-ink-200 pt-4">
+      <div className="mt-6 border-t border-ink-200 pt-5">
         <Tooltip content={reason} className="w-full">
           <Button variant="primary" size="lg" className="w-full" iconRight={<ArrowRight />} disabled={Boolean(reason)} onClick={onContinue}>
-            Continue to Run
+            Continue
           </Button>
         </Tooltip>
         {reason && (

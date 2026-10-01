@@ -1,7 +1,7 @@
 /** Exavalu Data Cleaning Studio design tokens.
  *
- * Brand red is reserved for the primary action, the active step and focus; everything
- * else sits on a neutral slate scale so status colours stay meaningful.
+ * Forest green marks the primary action, the active step and focus; errors use the
+ * separate danger scale, and everything else sits on a green-tinted neutral scale.
  * Spacing uses Tailwind's 4px scale restricted in practice to 1,2,3,4,6,8,10,12
  * (4/8/12/16/24/32/40/48 px).
  */
@@ -11,32 +11,48 @@ export default {
   theme: {
     extend: {
       colors: {
+        // Forest green: primary action, active step, focus and selection.
         brand: {
-          50: "#FDF3F4",
-          100: "#FBE4E7",
-          200: "#F5C3CA",
-          300: "#EC95A2",
-          500: "#D72A44",
-          600: "#C8102E",
-          700: "#A30D25",
-          800: "#7F0A1D",
+          50: "#EEF7F1",
+          100: "#D9EFE1",
+          200: "#B4DEC2",
+          300: "#82C59B",
+          400: "#4FA872",
+          500: "#2A8C55",
+          600: "#1D7A46",
+          700: "#17623A",
+          800: "#124D2E",
+          900: "#0D3A23",
         },
+        // Errors and failed states only.
+        danger: {
+          50: "#FEF3F2",
+          100: "#FEE4E2",
+          200: "#FECDCA",
+          300: "#FDA29B",
+          500: "#E5483D",
+          600: "#D92D20",
+          700: "#B42318",
+          800: "#912018",
+        },
+        // Neutrals with a faint green cast so greys sit comfortably beside the brand.
         ink: {
-          900: "#0F172A",
-          800: "#1E293B",
-          700: "#334155",
-          600: "#475569",
-          500: "#64748B",
-          400: "#94A3B8",
-          300: "#CBD5E1",
-          200: "#E2E8F0",
-          100: "#F1F5F9",
-          50: "#F8FAFC",
+          900: "#0F1E17",
+          800: "#1B2B23",
+          700: "#33433A",
+          600: "#4B5A52",
+          500: "#67766D",
+          400: "#97A59C",
+          300: "#C8D3CC",
+          200: "#E1E8E3",
+          100: "#EEF2EF",
+          50: "#F5F8F6",
         },
-        nav: { DEFAULT: "#111827", raised: "#1B2332", line: "#273142" },
+        nav: { DEFAULT: "#0E2A1D", raised: "#173B29", line: "#21483A" },
       },
       fontFamily: {
-        sans: ["Inter", "ui-sans-serif", "system-ui", "Segoe UI", "sans-serif"],
+        display: ["IBM Plex Sans", "ui-sans-serif", "system-ui", "Segoe UI", "sans-serif"],
+        sans: ["IBM Plex Sans", "ui-sans-serif", "system-ui", "Segoe UI", "sans-serif"],
         mono: ["JetBrains Mono", "ui-monospace", "Consolas", "monospace"],
       },
       fontSize: {
@@ -45,14 +61,14 @@ export default {
         table: ["13px", { lineHeight: "20px" }],
         body: ["14px", { lineHeight: "20px" }],
         card: ["15px", { lineHeight: "22px", fontWeight: "600" }],
-        section: ["17px", { lineHeight: "24px", fontWeight: "600" }],
-        page: ["24px", { lineHeight: "32px", fontWeight: "650" }],
+        section: ["18px", { lineHeight: "26px", fontWeight: "600" }],
+        page: ["28px", { lineHeight: "36px", fontWeight: "600", letterSpacing: "-0.01em" }],
       },
-      borderRadius: { DEFAULT: "6px", md: "6px", lg: "8px", xl: "10px" },
+      borderRadius: { DEFAULT: "6px", md: "8px", lg: "10px", xl: "14px", "2xl": "18px" },
       boxShadow: {
-        card: "0 1px 2px rgba(15, 23, 42, 0.04)",
-        pop: "0 8px 24px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(15, 23, 42, 0.06)",
-        focus: "0 0 0 3px rgba(200, 16, 46, 0.25)",
+        card: "0 1px 2px rgba(15, 30, 23, 0.03), 0 4px 16px -8px rgba(15, 30, 23, 0.06)",
+        pop: "0 12px 32px rgba(15, 30, 23, 0.14), 0 2px 6px rgba(15, 30, 23, 0.06)",
+        focus: "0 0 0 3px rgba(29, 122, 70, 0.25)",
       },
       keyframes: {
         "fade-in": { from: { opacity: 0, transform: "translateY(4px)" }, to: { opacity: 1, transform: "none" } },

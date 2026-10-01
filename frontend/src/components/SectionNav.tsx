@@ -70,9 +70,9 @@ export function SectionNav({ sections, label }: { sections: NavSection[]; label:
   };
 
   return (
-    <nav ref={nav} aria-label={label} className="sticky top-14 z-20 -mx-4 mb-6 bg-ink-50/95 px-4 py-2 backdrop-blur md:-mx-8 md:px-8">
-      <ol className="card flex gap-1 overflow-x-auto p-1.5 scroll-thin">
-        {sections.map((section, index) => {
+    <nav ref={nav} aria-label={label} className="sticky top-14 z-20 -mx-4 mb-6 bg-ink-50/90 px-4 py-3 backdrop-blur-md md:-mx-10 md:px-10">
+      <ol className="flex gap-1 overflow-x-auto rounded-xl border border-ink-200/80 bg-white/80 p-1 shadow-card scroll-thin">
+        {sections.map((section) => {
           const selected = section.id === active;
           return (
             <li key={section.id} className="min-w-0 flex-1">
@@ -81,31 +81,24 @@ export function SectionNav({ sections, label }: { sections: NavSection[]; label:
                 onClick={() => go(section.id)}
                 aria-current={selected ? "location" : undefined}
                 className={clsx(
-                  "relative flex w-full items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 py-2.5 text-body font-medium transition-colors",
+                  "relative flex w-full items-center justify-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-body font-medium transition-colors",
                   "focus-visible:outline-none focus-visible:shadow-focus",
-                  selected ? "bg-brand-50 text-brand-700" : "text-ink-700 hover:bg-ink-100 hover:text-ink-900",
+                  selected ? "bg-brand-600 text-white shadow-sm" : "text-ink-600 hover:bg-ink-100 hover:text-ink-900",
                 )}
               >
-                <span className={clsx("[&>svg]:h-[18px] [&>svg]:w-[18px]", selected ? "text-brand-600" : "text-ink-500")} aria-hidden>
+                <span className={clsx("[&>svg]:h-[18px] [&>svg]:w-[18px]", selected ? "text-brand-100" : "text-ink-400")} aria-hidden>
                   {section.icon}
                 </span>
                 <span className="truncate">
-                  {index + 1}. <span className="hidden lg:inline">{section.label}</span>
+                  <span className="hidden lg:inline">{section.label}</span>
                   <span className="lg:hidden">{section.shortLabel ?? section.label}</span>
                 </span>
                 {section.done && !section.attention && (
-                  <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-600" aria-label="complete">
+                  <span className={clsx("hidden h-4 w-4 shrink-0 items-center sm:flex justify-center rounded-full", selected ? "bg-white/20 text-white" : "bg-brand-100 text-brand-600")} aria-label="complete">
                     <Check className="h-3 w-3" strokeWidth={3} />
                   </span>
                 )}
                 {section.attention && <span className="h-2 w-2 shrink-0 rounded-full bg-amber-500" aria-label="needs attention" />}
-                <span
-                  aria-hidden
-                  className={clsx(
-                    "absolute inset-x-3 -bottom-1.5 h-0.5 rounded-full bg-brand-600 transition-opacity duration-200",
-                    selected ? "opacity-100" : "opacity-0",
-                  )}
-                />
               </button>
             </li>
           );

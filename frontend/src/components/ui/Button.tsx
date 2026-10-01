@@ -19,12 +19,12 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const variants: Record<Variant, string> = {
   primary:
-    "bg-brand-600 text-white hover:bg-brand-700 active:bg-brand-800 disabled:bg-ink-200 disabled:text-ink-400 shadow-sm",
+    "bg-brand-600 text-white hover:bg-brand-700 active:bg-brand-800 disabled:bg-ink-200 disabled:text-ink-400 shadow-[0_1px_0_rgba(255,255,255,0.15)_inset,0_1px_2px_rgba(16,58,36,0.25)]",
   secondary:
-    "bg-white text-ink-800 border border-ink-300 hover:bg-ink-50 hover:border-ink-400 active:bg-ink-100 disabled:text-ink-400 disabled:bg-ink-50 disabled:border-ink-200",
+    "bg-white text-ink-800 border border-ink-200 hover:bg-ink-50 hover:border-ink-300 active:bg-ink-100 disabled:text-ink-400 disabled:bg-ink-50 disabled:border-ink-200",
   ghost: "text-ink-700 hover:bg-ink-100 active:bg-ink-200 disabled:text-ink-400",
   danger:
-    "bg-white text-brand-700 border border-brand-200 hover:bg-brand-50 active:bg-brand-100 disabled:text-ink-400 disabled:border-ink-200",
+    "bg-white text-danger-700 border border-danger-200 hover:bg-danger-50 active:bg-danger-100 disabled:text-ink-400 disabled:border-ink-200",
   link: "text-brand-700 hover:text-brand-800 underline-offset-4 hover:underline px-0 disabled:text-ink-400",
 };
 
@@ -78,7 +78,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         sizes[size],
         state === "success" && variant === "primary" && "!bg-emerald-600",
         state === "success" && variant !== "primary" && "!border-emerald-300 !text-emerald-700",
-        state === "error" && "!border-brand-300 !text-brand-700",
+        state === "error" && "!border-danger-300 !text-danger-700",
         className,
       )}
       {...rest}
