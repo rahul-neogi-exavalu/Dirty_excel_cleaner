@@ -1,8 +1,9 @@
 """FastAPI application.
 
-    .venv\\Scripts\\python -m uvicorn api.main:app --reload --port 8000
+    .venv\\Scripts\\python -m uvicorn api.main:app --reload --port 8080
 
-In development the Vite dev server proxies ``/api`` here. After ``npm run build`` the
+Run from ``backend/`` (or add ``--app-dir backend`` from the project root). In
+development the Vite dev server proxies ``/api`` here (or to ``VITE_API_TARGET``). After ``npm run build`` the
 compiled UI in ``frontend/dist`` is served from the same origin.
 """
 
@@ -16,9 +17,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config
+from . import config, db
 from .errors import ApiError, api_error_handler, validation_error_handler
-from .routes import batches, exports, jobs, workbooks
+from .routes import batches, bronze, exports, jobs, silver, workbooks
 from .services import sheet_pool
 
 @asynccontextmanager
@@ -26,6 +27,7 @@ async def lifespan(_: FastAPI):
     yield
     # Cleaning worker processes outlive requests; stop them with the service.
     sheet_pool.shutdown()
+    db.close()
 
 
 app = FastAPI(title="Exavalu Data Cleaning Studio API", version="1.0.0", lifespan=lifespan)
@@ -44,6 +46,8 @@ app.include_router(workbooks.router)
 app.include_router(jobs.router)
 app.include_router(exports.router)
 app.include_router(batches.router)
+app.include_router(bronze.router)
+app.include_router(silver.router)
 
 
 @app.get("/api/health")

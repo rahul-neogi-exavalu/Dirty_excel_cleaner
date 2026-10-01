@@ -1,0 +1,12 @@
+silver_column_name,drt_column_name,data_type,business_key,description
+profit_center_name,Profit Center Name,text,n,"Name of the profit center / office (legacy office name, branch, zone)"
+profit_center_number,Profit Center Number,text,y,"Four-digit profit center code (PC number, office number, branch code)"
+insurance_company_name,Insurance Company Name,text,y,"Insurance carrier that writes the policy (carrier, insurer, underwriter, company)"
+producer_name,Producer Name,text,n,"Producer or agency that sold the policy (agent, agency, broker, writing agency)"
+policy_number,Policy Number,text,y,"Policy identifier (policy no, policy id, policy reference)"
+premium,Premium,decimal,n,"Premium amount (written premium, premium amount, gross premium)"
+commission,Commission,decimal,n,"Commission amount or rate paid to the producer"
+accounting_effective_date,Accounting Effective Date,date,n,"Date the transaction is booked for accounting (posting date, accounting date)"
+policy_effective_date,Policy Effective Date,date,n,"Date the policy coverage starts (inception date, effective date)"
+transaction_effective_date,Transaction Effective Date,date,y,"Date the policy transaction takes effect (transaction date)"
+line_of_business,Line of Business,text,n,"Product line or line of business (LOB, product, coverage type)"

@@ -274,3 +274,234 @@ export interface ConsistencyReport {
   checks: ConsistencyCheck[];
   accounting: RowAccounting[];
 }
+
+/* ---- Bronze ingestion ---------------------------------------------------- */
+
+export type IngestAction = "create" | "append" | "reorder" | "evolve" | "replace" | "new_table" | "skip";
+
+export interface BronzeStatus {
+  enabled: boolean;
+  configured: boolean;
+  reachable: boolean;
+  host: string | null;
+  database: string | null;
+  bronze_schema: string;
+  error: string | null;
+}
+
+export interface PeriodCandidate {
+  source: string;
+  column: string | null;
+  start: string | null;
+  end: string | null;
+  rows: number | null;
+  months?: number[];
+}
+
+export interface PlanFile {
+  job_id: string;
+  file_name: string;
+  source_system: string | null;
+  detected_source_system: string | null;
+  period_start: string | null;
+  period_end: string | null;
+  detected_period_start: string | null;
+  detected_period_end: string | null;
+  period_source: string | null;
+  period_candidates: PeriodCandidate[];
+}
+
+export interface PlanReplaceRef {
+  id: string;
+  file_name: string;
+  period_start: string | null;
+  period_end: string | null;
+}
+
+export interface PlanItem {
+  key: string;
+  file_name: string;
+  source_system: string | null;
+  sheet_names: string[];
+  rows: number;
+  period_start: string | null;
+  period_end: string | null;
+  suggested_table: string;
+  table_name: string;
+  action: IngestAction;
+  allowed_actions: IngestAction[];
+  comparison: { kind: "identical" | "reordered" | "evolved" | "different"; added: string[]; missing: string[] } | null;
+  columns_after: string[];
+  columns_before: string[] | null;
+  replaces: PlanReplaceRef[];
+  rebuild: boolean;
+  requires_confirmation: boolean;
+  reasons: string[];
+  blockers: string[];
+}
+
+export interface IngestPlan {
+  id: string;
+  batch_id: string | null;
+  status: "draft" | "running" | "succeeded" | "failed";
+  progress: number;
+  message: string;
+  error: { message: string; advice?: string | null; technical?: string | null } | null;
+  reviewed_by: string | null;
+  files: PlanFile[];
+  items: PlanItem[];
+  blockers: string[];
+  results: Record<string, { ingestion_id: string; rows_loaded: number; table_name: string }>;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+export interface BronzeIngestion {
+  id: string;
+  file_name: string;
+  period_start: string | null;
+  period_end: string | null;
+  action: IngestAction;
+  rows_loaded: number;
+  status: "ingested" | "superseded" | "skipped";
+  reviewed_by: string | null;
+  created_at: number;
+  superseded_by: string | null;
+}
+
+export interface BronzeTable {
+  table_name: string;
+  schema_name: string;
+  source_system: string;
+  columns: { name: string; datatype: string | null }[];
+  rows: number;
+  period_start: string | null;
+  period_end: string | null;
+  created_at: number;
+  updated_at: number;
+  ingestions: BronzeIngestion[];
+}
+
+/* ---- Silver ---------------------------------------------------------------- */
+
+/** A matching method; each one votes independently on every bronze column. */
+export type MatchMethod = "saved" | "exact" | "fuzzy" | "semantic" | "ai";
+/** How the current choice was made: pre-selected from the votes, by the reviewer, or not yet. */
+export type MappingSelection = "recommended" | "manual" | "none";
+
+export interface SilverVote {
+  method: MatchMethod;
+  score: number;
+  reason: string;
+  /** The AI's second choice: offered, not counted. */
+  second_choice: boolean;
+}
+
+export interface SilverCandidate {
+  /** null: do not load the column (Ignore). */
+  silver_column: string | null;
+  recommended: boolean;
+  /** Number of methods that voted for it. */
+  support: number;
+  votes: SilverVote[];
+}
+
+export interface SilverColumnDef {
+  name: string;
+  drt_name: string;
+  data_type: "text" | "date" | "decimal";
+  business_key: boolean;
+  description: string;
+}
+
+export interface SilverCatalog {
+  file: string;
+  columns: SilverColumnDef[];
+  semantic: boolean;
+  ai: boolean;
+  /** Provider and model, e.g. "Azure OpenAI · gpt-4.1-mini"; empty when off. */
+  ai_label: string;
+}
+
+export interface EligibleLoad {
+  ingestion_id: string;
+  table_name: string;
+  file_name: string;
+  source_system: string | null;
+  period_start: string | null;
+  period_end: string | null;
+  rows: number;
+  ingested_at: number;
+  silver_status: string | null;
+}
+
+export interface CleanupLoad {
+  ingestion_id: string;
+  table_name: string;
+  file_name: string;
+  pc_id: string | null;
+}
+
+export interface SilverMappingRow {
+  bronze_column: string;
+  silver_column: string | null;
+  ignored: boolean;
+  selection: MappingSelection;
+  /** Methods that voted for the current choice. */
+  methods: MatchMethod[];
+  /** Methods disagree. */
+  split: boolean;
+  reason: string;
+  samples: string[];
+  /** Best first. */
+  candidates: SilverCandidate[];
+}
+
+export interface SilverQuality {
+  rows: number;
+  invalid_values: Record<string, number>;
+  profit_center: Record<string, number>;
+  unmapped_silver_columns: string[];
+}
+
+export interface SilverTableReview {
+  table_name: string;
+  source_system: string | null;
+  pc_id: string | null;
+  loads: { ingestion_id: string; file_name: string; rows: number; period_start: string | null; period_end: string | null }[];
+  quality: SilverQuality;
+  mapping: SilverMappingRow[];
+}
+
+export interface SilverRun {
+  id: string;
+  status: "draft" | "running" | "succeeded" | "failed";
+  progress: number;
+  message: string;
+  error: { message: string; advice?: string | null } | null;
+  reviewed_by: string | null;
+  notes: string[];
+  cleanup: CleanupLoad[];
+  lotl_rows: number;
+  blockers: string[];
+  result: { rows_loaded?: number; rows_removed?: number };
+  tables: SilverTableReview[];
+}
+
+export interface SavedMapping {
+  pc_id: string;
+  bronze_table_name: string;
+  bronze_column_name: string;
+  drt_column_name: string | null;
+  silver_column_name: string | null;
+}
+
+export interface SilverSummaryRow {
+  pc_id: string;
+  profit_center_number: string | null;
+  profit_center_name: string | null;
+  accounting_month: string | null;
+  row_count: number;
+  premium_total: number | null;
+}

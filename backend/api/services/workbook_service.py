@@ -7,6 +7,7 @@ it, so row and column counts are left to the cleaner and shown after the run.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import zipfile
 from pathlib import Path
@@ -60,10 +61,12 @@ async def save_upload(file: UploadFile) -> Upload:
     path = folder / name
 
     size = 0
+    digest = hashlib.sha256()
     try:
         with open(path, "wb") as handle:
             while chunk := await file.read(_CHUNK):
                 size += len(chunk)
+                digest.update(chunk)
                 if size > config.MAX_UPLOAD_BYTES:
                     raise ApiError(
                         413,
@@ -81,7 +84,7 @@ async def save_upload(file: UploadFile) -> Upload:
         raise
 
     kind = "delimited" if path.suffix.lower() in config.DELIMITED_SUFFIXES else "workbook"
-    upload = Upload(upload_id, name, path, size, kind, sheets)
+    upload = Upload(upload_id, name, path, size, kind, sheets, sha256=digest.hexdigest())
     store.add_upload(upload)
     # A run usually follows an upload: start the cleaning workers now, off the clock --
     # only for a file big enough to be cleaned by them.

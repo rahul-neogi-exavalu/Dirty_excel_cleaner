@@ -125,8 +125,8 @@ export function DataTable({
       {/* Toolbar */}
       <div className="flex flex-col gap-3 border-b border-ink-200 px-4 py-3 lg:flex-row lg:items-center">
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <p className="text-body font-medium text-ink-900">Editable headers</p>
-          <Tooltip content="Select the pencil beside a column name to rename it. Saved names are used in every export.">
+          <p className="text-body font-medium text-ink-900">Preview</p>
+          <Tooltip content="Click the pencil on a header to rename it. Used in all exports.">
             <span tabIndex={0} className="rounded text-ink-400 hover:text-ink-600" aria-label="About editable headers">
               <Pencil className="h-3.5 w-3.5" />
             </span>
@@ -138,7 +138,7 @@ export function DataTable({
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <SearchInput value={query} onChange={setQuery} placeholder="Search in this table…" label="Search rows" className="w-full sm:w-64" />
+          <SearchInput value={query} onChange={setQuery} placeholder="Search rows" label="Search rows" className="w-full sm:w-64" />
           <ColumnMenu columns={data?.columns ?? []} hidden={hidden} onChange={setHidden} />
           <div className="flex items-center gap-2">
             <span className="hidden text-caption text-ink-500 sm:inline">Rows</span>
@@ -159,22 +159,22 @@ export function DataTable({
         <span className="num">
           {data ? (
             <>
-              Previewing rows <strong className="text-ink-900">{formatNumber(firstRow)}–{formatNumber(lastRow)}</strong> of{" "}
+              Rows <strong className="text-ink-900">{formatNumber(firstRow)}–{formatNumber(lastRow)}</strong> of{" "}
               <strong className="text-ink-900">{formatNumber(total)}</strong>
-              {filtered && <> matching “{debouncedQuery}” (of {formatNumber(data.total_unfiltered)} total)</>}
-              {hidden.size > 0 && <> · {hidden.size} column{hidden.size > 1 ? "s" : ""} hidden</>}
+              {filtered && <> matching “{debouncedQuery}” (of {formatNumber(data.total_unfiltered)})</>}
+              {hidden.size > 0 && <> · {hidden.size} hidden</>}
             </>
           ) : (
             "Loading rows…"
           )}
         </span>
-        <span>Sorting and search run on the full table, not just this page.</span>
+        <span className="hidden sm:inline">Sort & search apply to the full table</span>
       </div>
 
       {/* Body */}
       {error ? (
         <div className="p-4">
-          <Alert tone="error" title="The preview couldn't be loaded" action={<Button size="sm" onClick={() => setReload((n) => n + 1)}>Retry</Button>}>
+          <Alert tone="error" title="Preview failed to load" action={<Button size="sm" onClick={() => setReload((n) => n + 1)}>Retry</Button>}>
             {error.body.message}
           </Alert>
         </div>
@@ -241,13 +241,13 @@ export function DataTable({
             <EmptyState
               compact
               icon={filtered ? <SearchX /> : <TableProperties />}
-              title={filtered ? "No matching rows" : "This table has no rows"}
-              description={filtered ? `No rows contain “${debouncedQuery}”. Try a different search.` : "The cleaner kept the headers but found no data rows."}
+              title={filtered ? "No matching rows" : "No rows"}
+              description={filtered ? `Nothing matches “${debouncedQuery}”.` : "Headers only, no data rows."}
               action={filtered ? <Button size="sm" onClick={() => setQuery("")}>Clear search</Button> : undefined}
             />
           )}
           {columns.length === 0 && data.columns.length > 0 && (
-            <EmptyState compact icon={<Columns3 />} title="All columns are hidden" description="Choose columns to show from the Columns menu." action={<Button size="sm" onClick={() => setHidden(new Set())}>Show all columns</Button>} />
+            <EmptyState compact icon={<Columns3 />} title="All columns hidden" description="Pick columns from the Columns menu." action={<Button size="sm" onClick={() => setHidden(new Set())}>Show all</Button>} />
           )}
         </div>
       )}
@@ -398,11 +398,11 @@ function HeaderCell({
             }}
             className={clsx(
               "h-8 w-full rounded border bg-white px-2 text-table font-medium text-ink-900 focus:outline-none focus:shadow-focus",
-              errorText ? "border-brand-500" : "border-ink-300 focus:border-brand-500",
+              errorText ? "border-danger-500" : "border-ink-300 focus:border-brand-500",
             )}
           />
           {errorText && (
-            <p id={`rename-err-${column.original}`} role="alert" className="mt-1 text-[11px] font-normal text-brand-700">
+            <p id={`rename-err-${column.original}`} role="alert" className="mt-1 text-[11px] font-normal text-danger-700">
               {errorText}
             </p>
           )}
@@ -441,7 +441,7 @@ function HeaderCell({
         </div>
       )}
       {serverError && !editing && (
-        <p role="alert" className="mt-1 flex items-center gap-1 text-[11px] font-normal text-brand-700">
+        <p role="alert" className="mt-1 flex items-center gap-1 text-[11px] font-normal text-danger-700">
           <AlertOctagon className="h-3 w-3" /> {serverError}
         </p>
       )}

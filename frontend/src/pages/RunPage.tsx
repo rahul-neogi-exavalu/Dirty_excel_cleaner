@@ -40,16 +40,16 @@ import { formatBytes, formatDuration, formatNumber, formatTimestamp, plural } fr
 import { appendUnavailableReason, effectiveAppend, useNavigate, useWorkflow } from "../state/workflow";
 
 const STAGES: { id: Stage; label: string; description: string; icon: ReactNode }[] = [
-  { id: "read", label: "Open workbook", description: "Open the file and check the selected sheets are there.", icon: <FileSearch /> },
+  { id: "read", label: "Open", description: "Load workbook and sheets.", icon: <FileSearch /> },
   {
     id: "clean",
-    label: "Read & clean sheets",
-    description: "Read each sheet, find its table and header, remove titles, subtotals and blank rows, and type every column. Large files are cleaned several sheets at a time.",
+    label: "Clean",
+    description: "Detect headers, drop noise rows, type columns.",
     icon: <Sparkles />,
   },
-  { id: "append", label: "Match & append", description: "Compare the cleaned headers; with auto-detect on, sheets with identical columns are combined.", icon: <BetweenHorizontalEnd /> },
-  { id: "validate", label: "Validate", description: "Check that no rows were lost and removed totals reconcile.", icon: <ShieldCheck /> },
-  { id: "write", label: "Prepare output", description: "Write cleaned tables, column metadata and the audit report.", icon: <Save /> },
+  { id: "append", label: "Append", description: "Merge sheets with matching columns.", icon: <BetweenHorizontalEnd /> },
+  { id: "validate", label: "Validate", description: "Reconcile rows and totals.", icon: <ShieldCheck /> },
+  { id: "write", label: "Export", description: "Write CSV, metadata, audit.", icon: <Save /> },
 ];
 
 const isActive = (job: JobStatus) => job.status === "queued" || job.status === "running";
@@ -66,9 +66,9 @@ export function RunPage() {
       <div className="card">
         <EmptyState
           icon={<FileSpreadsheet />}
-          title="No workbook uploaded yet"
-          description="Upload one or more Excel workbooks and choose their sheets before running a cleaning job."
-          action={<Button variant="primary" icon={<ArrowLeft />} onClick={() => navigate("configuration")}>Go to Configuration</Button>}
+          title="No workbook yet"
+          description="Upload and configure files first."
+          action={<Button variant="primary" icon={<ArrowLeft />} onClick={() => navigate("configuration")}>Configure</Button>}
         />
       </div>
     );
@@ -79,7 +79,7 @@ export function RunPage() {
 
   return (
     <>
-      <PageHeader page="run" title="Run cleaning job" description="Review what will happen, then start the job with one controlled action." />
+      <PageHeader page="run" title="Run" description="Review the plan and start cleaning." />
       {body}
     </>
   );
@@ -98,7 +98,7 @@ function useStart() {
     } catch (err) {
       const apiError = err instanceof ApiError ? err : new ApiError(0, { code: "unknown", message: String(err) });
       setError(apiError);
-      toast({ severity: "error", title: "The job could not be started", description: apiError.body.message });
+      toast({ severity: "error", title: "Couldn't start", description: apiError.body.message });
     } finally {
       setState("idle");
     }
@@ -119,16 +119,13 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
   return (
     <div className="space-y-6">
       {cancelled && (
-        <Alert tone="info" title="The previous job was cancelled">
-          {cleanedBeforeCancel
-            ? `${plural(cleanedBeforeCancel, "file")} finished before the cancel; their results are still available in Review & Results. `
-            : "No output was produced. "}
-          Start the job again when you're ready.
+        <Alert tone="info" title="Previous run cancelled">
+          {cleanedBeforeCancel ? `${plural(cleanedBeforeCancel, "file")} finished; results are kept.` : "No output produced."}
         </Alert>
       )}
       {flow.stale && flow.batch && (
-        <Alert tone="warning" title="Configuration changed since the last run">
-          The current results were produced from different files, sheet selections or append settings. Run again to update them.
+        <Alert tone="warning" title="Configuration changed">
+          Run again to refresh results.
         </Alert>
       )}
       {error && (
@@ -140,11 +137,11 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
       <div className="grid items-stretch gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(320px,1fr)]">
         <section className="card flex h-full flex-col p-5 md:p-6" aria-labelledby="plan-title">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200" aria-hidden>
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-ink-50 text-ink-600" aria-hidden>
               {count > 1 ? <Files className="h-6 w-6" /> : <FileSpreadsheet className="h-6 w-6" />}
             </div>
             <div className="min-w-0 flex-1">
-              <p className="text-caption text-ink-500">{count > 1 ? "Input workbooks" : "Input workbook"}</p>
+              <p className="label-caps">Input</p>
               <h2 id="plan-title" className="truncate text-section text-ink-900" title={count === 1 ? flow.files[0].workbook.filename : undefined}>
                 {count === 1 ? flow.files[0].workbook.filename : plural(count, "file")}
               </h2>
@@ -153,7 +150,7 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
               </p>
             </div>
             <Button size="sm" icon={<SlidersHorizontal />} onClick={() => navigate("configuration")}>
-              Edit configuration
+              Edit
             </Button>
           </div>
 
@@ -166,8 +163,8 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
                     <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
                       <th scope="col" className="w-10 px-3 py-2 text-right">#</th>
                       <th scope="col" className="px-3 py-2">File</th>
-                      <th scope="col" className="px-3 py-2">Sheets to clean</th>
-                      <th scope="col" className="px-3 py-2">Append mode</th>
+                      <th scope="col" className="px-3 py-2">Sheets</th>
+                      <th scope="col" className="px-3 py-2">Append</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -192,10 +189,7 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
                             </div>
                           </td>
                           <td className="px-3 py-2.5">
-                            <p className="font-medium text-ink-900">{reason ? "Not applicable" : effectiveAppend(entry) ? "Auto-detect & append" : "Keep sheets separate"}</p>
-                            <p className="text-caption text-ink-500">
-                              {reason ? (entry.workbook.sheets.length < 2 ? "Single sheet" : "One sheet selected") : effectiveAppend(entry) ? "Reported after the run" : "One table per sheet"}
-                            </p>
+                            <p className="font-medium text-ink-900">{reason ? "—" : effectiveAppend(entry) ? "Auto-detect" : "Separate"}</p>
                           </td>
                         </tr>
                       );
@@ -204,25 +198,23 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
                 </table>
               </div>
             </div>
-            <p className="mt-3 flex items-start gap-2 text-caption text-ink-600">
-              <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-violet-600" aria-hidden />
-              Output per file: cleaned CSV per table, column metadata, and an audit report of every removed row.
+            <p className="mt-3 flex items-center gap-2 text-caption text-ink-500">
+              <FileText className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              Output: CSV · metadata · audit report
             </p>
           </div>
         </section>
 
         <aside className="flex">
           <section className="card flex w-full flex-col overflow-hidden" aria-labelledby="ready-title">
-            <div className="border-b border-brand-100 bg-brand-50/60 p-5">
+            <div className="border-b border-ink-200 bg-ink-50 p-5">
               <div className="flex items-start gap-3">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-600 text-white" aria-hidden>
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-ink-900 text-white" aria-hidden>
                   <Play className="h-5 w-5" fill="currentColor" />
                 </div>
                 <div>
-                  <h2 id="ready-title" className="text-card text-brand-800">Ready for cleaning</h2>
-                  <p className="text-caption text-ink-600">
-                    Your source files are never modified. {count > 1 ? "Files are cleaned side by side; if one fails, the others still finish." : "The cleaning job will run based on the current configuration."}
-                  </p>
+                  <h2 id="ready-title" className="text-card text-ink-900">Ready</h2>
+                  <p className="text-caption text-ink-600">Source files stay unchanged.</p>
                 </div>
               </div>
             </div>
@@ -234,20 +226,20 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
                   className="w-full sm:w-auto sm:flex-1 xl:w-full xl:flex-none"
                   icon={<Play fill="currentColor" />}
                   state={state}
-                  loadingText="Starting job…"
+                  loadingText="Starting…"
                   disabled={!flow.canRun}
                   onClick={start}
                 >
-                  {flow.batch ? "Run cleaning job again" : count > 1 ? `Clean ${count} files` : "Run cleaning job"}
+                  {flow.batch ? "Run again" : count > 1 ? `Clean ${count} files` : "Start cleaning"}
                 </Button>
                 <Button variant="ghost" className="w-full sm:w-auto xl:w-full" icon={<ArrowLeft />} onClick={() => navigate("configuration")}>
-                  Back to Configuration
+                  Back
                 </Button>
               </div>
               {flow.runBlockedReason && <p className="text-center text-caption text-ink-500">{flow.runBlockedReason}</p>}
-              <p className="flex gap-2 rounded-md border border-ink-200 bg-ink-50 px-3 py-2.5 text-caption text-ink-600">
-                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-                You can move between pages while the job runs; progress stays visible in the top bar.
+              <p className="flex items-center justify-center gap-1.5 text-caption text-ink-500">
+                <Info className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                Runs in the background
               </p>
             </div>
           </section>
@@ -255,12 +247,8 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
       </div>
 
       <section className="card p-5 md:p-6" aria-labelledby="steps-title">
-        <h2 id="steps-title" className="text-section text-ink-900">What will happen{count > 1 ? " to each file" : ""}</h2>
-        <p className="mt-0.5 text-body text-ink-600">
-          Each selected sheet is read and cleaned once. Sizes, and which sheets match for appending, are known once cleaning finishes.
-          {count > 1 && " Sheets are only ever appended within the same file."}
-        </p>
-        <ol className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        <h2 id="steps-title" className="label-caps">Pipeline</h2>
+        <ol className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           {STAGES.map((stage, index) => (
             <li key={stage.id} className="flex gap-3 rounded-lg border border-ink-200 p-3 sm:flex-col sm:gap-2">
               <span className="flex items-center gap-2">
@@ -312,7 +300,7 @@ function StageList({ job }: { job: JobStatus }) {
                 "relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors duration-300",
                 state === "done" && "bg-emerald-600 text-white",
                 state === "active" && "bg-brand-600 text-white ring-4 ring-brand-100",
-                state === "failed" && "bg-brand-700 text-white",
+                state === "failed" && "bg-danger-700 text-white",
                 state === "pending" && "border border-ink-300 bg-white text-ink-400",
               )}
               aria-hidden
@@ -326,9 +314,9 @@ function StageList({ job }: { job: JobStatus }) {
               </p>
               {state === "active" && job.stage === "clean" && <ActiveSheets job={job} />}
               {state === "done" && stage.id === "clean" && job.parallel_workers > 1 && (
-                <p className="text-caption text-ink-500">Cleaned in parallel on {job.parallel_workers} workers</p>
+                <p className="text-caption text-ink-500">{job.parallel_workers} workers</p>
               )}
-              {state === "failed" && job.error?.sheet && <p className="text-caption text-brand-700">Stopped at {job.error.sheet}</p>}
+              {state === "failed" && job.error?.sheet && <p className="text-caption text-danger-700">Stopped at {job.error.sheet}</p>}
             </div>
           </li>
         );
@@ -349,8 +337,8 @@ function ActiveSheets({ job }: { job: JobStatus }) {
         {active.length > shown.length && ` +${active.length - shown.length} more`}
       </p>
       <p className="text-ink-500">
-        {job.sheets_done} of {job.sheets_total} sheets done
-        {job.parallel_workers > 1 && ` · ${active.length} at once on ${job.parallel_workers} workers`}
+        {job.sheets_done}/{job.sheets_total} sheets
+        {job.parallel_workers > 1 && ` · ${job.parallel_workers} workers`}
       </p>
     </div>
   );
@@ -366,7 +354,7 @@ function JobStateIcon({ job }: { job: JobStatus }) {
     );
   if (job.status === "failed")
     return (
-      <span className={clsx(base, "bg-brand-700 text-white")} aria-hidden>
+      <span className={clsx(base, "bg-danger-700 text-white")} aria-hidden>
         <XCircle className="h-4 w-4" />
       </span>
     );
@@ -423,24 +411,24 @@ function RunningView({ batch }: { batch: BatchStatus }) {
             <div className="min-w-0">
               <Badge tone="info" dot className="mb-2">{batch.status === "queued" ? "Queued" : "Running"}</Badge>
               <h2 id="running-title" className="truncate text-section text-ink-900">
-                {runningFiles.length > 1 ? `Cleaning ${runningFiles.length} files at once` : current?.message ?? "Starting"}
+                {runningFiles.length > 1 ? `Cleaning ${runningFiles.length} files` : current?.message ?? "Starting"}
               </h2>
               <p className="truncate text-body text-ink-600">
                 {runningFiles.length > 1
-                  ? `${batch.files_done} of ${batch.files_total} files done · ${runningFiles.map((job) => job.source_name).join(", ")}`
+                  ? `${batch.files_done}/${batch.files_total} done · ${runningFiles.map((job) => job.source_name).join(", ")}`
                   : `${multi ? `File ${position} of ${batch.files_total} · ` : ""}${
                       current?.status === "running" ? `Step ${stepIndex} of ${STAGES.length} · ` : ""
                     }${current?.source_name ?? ""}`}
               </p>
             </div>
             <Button variant="danger" icon={<Ban />} onClick={() => setConfirm(true)} disabled={cancelling}>
-              {cancelling ? "Cancelling…" : multi ? "Cancel all" : "Cancel job"}
+              {cancelling ? "Cancelling…" : multi ? "Cancel all" : "Cancel"}
             </Button>
           </div>
 
           <div className="mt-6" aria-live="polite">
             <div className="mb-2 flex items-baseline justify-between">
-              <span className="text-caption font-medium text-ink-600">Overall progress</span>
+              <span className="label-caps">Progress</span>
               <span className="num text-[20px] font-semibold text-ink-900">{percent}%</span>
             </div>
             <ProgressBar
@@ -450,27 +438,27 @@ function RunningView({ batch }: { batch: BatchStatus }) {
               indeterminate={!multi && (current?.stage === "read" || current?.status === "queued")}
             />
             {current?.stage === "read" && current.status === "running" && (
-              <p className="mt-1.5 text-caption text-ink-500">Opening {current.source_name}. Large files can take a little while before sheet-by-sheet progress starts.</p>
+              <p className="mt-1.5 text-caption text-ink-500">Opening {current.source_name}…</p>
             )}
           </div>
 
           <div className={clsx("mt-6 grid grid-cols-2 gap-3", multi ? "sm:grid-cols-3 2xl:grid-cols-5" : "lg:grid-cols-4")}>
-            {multi && <StatTile icon={<Files />} label="Files processed" value={`${batch.files_done} / ${batch.files_total}`} tone="brand" />}
-            <StatTile icon={<Layers />} label="Sheets processed" value={`${sheetsDone} / ${sheetsTotal}`} tone="info" />
+            {multi && <StatTile icon={<Files />} label="Files" value={`${batch.files_done} / ${batch.files_total}`} tone="brand" />}
+            <StatTile icon={<Layers />} label="Sheets" value={`${sheetsDone} / ${sheetsTotal}`} tone="info" />
             <StatTile icon={<Rows3 />} label="Rows kept" value={formatNumber(rowsKept)} tone="success" />
-            <StatTile icon={<Trash2 />} label="Rows removed" value={formatNumber(rowsRemoved)} tone="warning" />
+            <StatTile icon={<Trash2 />} label="Rows removed" value={formatNumber(rowsRemoved)} />
             <StatTile icon={<Clock />} label="Elapsed" value={formatDuration(elapsed)} />
           </div>
 
           <p className="mt-5 flex items-center gap-2 text-caption text-ink-500">
-            <Info className="h-3.5 w-3.5" aria-hidden /> Processing continues if you leave this page. Your source files are not modified.
+            <Info className="h-3.5 w-3.5" aria-hidden /> Safe to leave this page.
           </p>
         </section>
 
         {multi && (
           <section className="card" aria-labelledby="files-title">
             <h2 id="files-title" className="px-5 pt-5 text-card text-ink-900 md:px-6">Files</h2>
-            <p className="px-5 text-caption text-ink-500 md:px-6">Files are cleaned side by side, their sheets in parallel. Select a file to follow its steps.</p>
+            <p className="px-5 text-caption text-ink-500 md:px-6">Select a file to follow its steps.</p>
             <ul className="mt-3 divide-y divide-ink-100 border-t border-ink-200">
               {batch.jobs.map((job) => (
                 <li
@@ -517,11 +505,11 @@ function RunningView({ batch }: { batch: BatchStatus }) {
       <Modal
         open={confirm}
         onClose={() => setConfirm(false)}
-        title={multi ? "Cancel all remaining files?" : "Cancel this cleaning job?"}
+        title={multi ? "Cancel remaining files?" : "Cancel cleaning?"}
         description={
           multi
-            ? "The file being cleaned stops after its current sheet, and files still waiting are skipped. Files that already finished keep their results."
-            : "The job stops after the sheet currently being cleaned. No output is produced, and you can run it again at any time."
+            ? "Queued files are skipped. Finished files keep their results."
+            : "Stops after the current sheet. No output is produced."
         }
         footer={
           <>
@@ -534,7 +522,7 @@ function RunningView({ batch }: { batch: BatchStatus }) {
                 await flow.cancelBatch();
               }}
             >
-              {multi ? "Cancel all" : "Cancel job"}
+              {multi ? "Cancel all" : "Cancel"}
             </Button>
           </>
         }
@@ -579,12 +567,12 @@ function DoneView({ batch }: { batch: BatchStatus }) {
   const tone = batch.status === "succeeded" ? "success" : batch.status === "partial" ? "warning" : batch.status === "cancelled" ? "neutral" : "error";
   const headline =
     batch.status === "succeeded"
-      ? "Cleaning completed successfully"
+      ? "Completed"
       : batch.status === "partial"
         ? `${batch.files_succeeded} of ${plural(batch.files_total, "file")} cleaned`
         : batch.status === "cancelled"
-          ? `Cleaning cancelled · ${batch.files_succeeded} of ${plural(batch.files_total, "file")} cleaned before it stopped`
-          : "Cleaning could not be completed";
+          ? `Cancelled · ${batch.files_succeeded} of ${plural(batch.files_total, "file")} cleaned`
+          : "Failed";
   const single = batch.jobs[0];
 
   return (
@@ -601,7 +589,7 @@ function DoneView({ batch }: { batch: BatchStatus }) {
             <div
               className={clsx(
                 "flex h-14 w-14 shrink-0 items-center justify-center rounded-full text-white",
-                tone === "warning" ? "bg-amber-500" : tone === "neutral" ? "bg-ink-500" : "bg-brand-600",
+                tone === "warning" ? "bg-amber-500" : tone === "neutral" ? "bg-ink-500" : "bg-danger-600",
               )}
               aria-hidden
             >
@@ -612,7 +600,7 @@ function DoneView({ batch }: { batch: BatchStatus }) {
             <p
               className={clsx(
                 "text-caption font-medium",
-                tone === "success" ? "text-emerald-700" : tone === "warning" ? "text-amber-700" : tone === "neutral" ? "text-ink-600" : "text-brand-700",
+                tone === "success" ? "text-emerald-700" : tone === "warning" ? "text-amber-700" : tone === "neutral" ? "text-ink-600" : "text-danger-700",
               )}
             >
               {headline}
@@ -621,7 +609,7 @@ function DoneView({ batch }: { batch: BatchStatus }) {
               {multi ? plural(batch.files_total, "file") : single.source_name}
             </h2>
             <p className="text-caption text-ink-500">
-              Finished {formatTimestamp(batch.finished_at)} · took {formatDuration(batch.elapsed_seconds)}
+              {formatTimestamp(batch.finished_at)} · {formatDuration(batch.elapsed_seconds)}
               {batch.status === "partial" &&
                 ` · ${plural(batch.files_total - batch.files_succeeded, "file")} ${batch.files_total - batch.files_succeeded === 1 ? "needs" : "need"} attention`}
               {batch.status === "cancelled" && batch.files_cancelled > 0 && ` · ${plural(batch.files_cancelled, "file")} not cleaned`}
@@ -631,18 +619,18 @@ function DoneView({ batch }: { batch: BatchStatus }) {
 
         {succeeded.length > 0 && (
           <div className={clsx("mt-6 grid grid-cols-2 gap-3", multi ? "sm:grid-cols-3 2xl:grid-cols-5" : "lg:grid-cols-4")}>
-            {multi && <StatTile icon={<Files />} label="Files cleaned" value={`${batch.files_succeeded} / ${batch.files_total}`} tone={batch.files_succeeded === batch.files_total ? "success" : "warning"} />}
-            <StatTile loading={loading} icon={<Layers />} label="Sheets processed" value={sum((s) => s.sheets_selected)} tone="info" />
+            {multi && <StatTile icon={<Files />} label="Files" value={`${batch.files_succeeded} / ${batch.files_total}`} tone={batch.files_succeeded === batch.files_total ? "success" : "warning"} />}
+            <StatTile loading={loading} icon={<Layers />} label="Sheets" value={sum((s) => s.sheets_selected)} tone="info" />
             <StatTile
               loading={loading}
               icon={<Table2 />}
-              label="Cleaned tables"
+              label="Tables"
               value={sum((s) => s.outputs)}
               hint={sum((s) => s.appended_outputs) ? `${sum((s) => s.appended_outputs)} appended` : undefined}
               tone="brand"
             />
             <StatTile loading={loading} icon={<Rows3 />} label="Rows kept" value={formatNumber(sum((s) => s.rows))} tone="success" />
-            <StatTile loading={loading} icon={<Trash2 />} label="Rows removed" value={formatNumber(sum((s) => s.rows_removed))} tone="warning" />
+            <StatTile loading={loading} icon={<Trash2 />} label="Rows removed" value={formatNumber(sum((s) => s.rows_removed))} />
           </div>
         )}
 
@@ -653,19 +641,17 @@ function DoneView({ batch }: { batch: BatchStatus }) {
         )}
         {!loading && sum((s) => s.consistency_issues) > 0 && (
           <Alert tone="error" className="mt-5" title={`${plural(sum((s) => s.consistency_issues), "consistency check")} failed`}>
-            Some output does not fully reconcile with the source. Review the Consistency checks tab before loading the data.
+            Review before loading the data.
           </Alert>
         )}
         {!loading && sum((s) => s.flagged_columns) > 0 && (
-          <Alert tone="warning" className="mt-5" title="Some columns need a quick review">
-            {plural(sum((s) => s.flagged_columns), "column")} marked for a judgement check. Details are in Review & Results.
-          </Alert>
+          <Alert tone="warning" className="mt-5" title={`${plural(sum((s) => s.flagged_columns), "column")} to review`} />
         )}
         {failedResults.length > 0 && (
           <Alert
             tone="error"
             className="mt-5"
-            title="Some results couldn't be loaded"
+            title="Results failed to load"
             action={<Button size="sm" onClick={() => failedResults.forEach((job) => void flow.reloadResults(job.id))}>Retry</Button>}
           >
             {failedResults.map((job) => job.source_name).join(", ")}
@@ -681,7 +667,7 @@ function DoneView({ batch }: { batch: BatchStatus }) {
             {batch.status === "succeeded" ? "Run again" : "Retry"}
           </Button>
           <Button size="lg" variant="ghost" icon={<SlidersHorizontal />} onClick={() => navigate("configuration")}>
-            Change configuration
+            Configure
           </Button>
         </div>
       </section>
@@ -690,7 +676,7 @@ function DoneView({ batch }: { batch: BatchStatus }) {
         <section className="card" aria-labelledby="outcomes-title">
           <div className="px-5 pt-5 md:px-6">
             <h2 id="outcomes-title" className="text-section text-ink-900">Files</h2>
-            <p className="mt-0.5 text-body text-ink-600">Each file was cleaned on its own. Open one to review its tables.</p>
+            <p className="mt-0.5 text-caption text-ink-500">Open a file to review its tables.</p>
           </div>
           <ul className="mt-4 divide-y divide-ink-100 border-t border-ink-200">
             {batch.jobs.map((job) => (
@@ -736,18 +722,18 @@ function FileOutcome({ job, onReview, onAppendDetails }: { job: JobStatus; onRev
                   : "Loading results…"}
               </p>
             ) : job.status === "failed" ? (
-              <p className="text-caption text-brand-700">{job.error?.message ?? "The job stopped unexpectedly."}</p>
+              <p className="text-caption text-danger-700">{job.error?.message ?? "The job stopped unexpectedly."}</p>
             ) : (
               <p className="text-caption text-ink-500">{job.message || "Cancelled"}</p>
             )}
             <div className="mt-1.5 flex flex-wrap gap-1.5">
               {job.status === "succeeded" && results && appendIncomplete(results.append_check) && (
                 <button type="button" onClick={onAppendDetails} className="rounded focus-visible:outline-none focus-visible:shadow-focus">
-                  <Badge tone="warning" icon={<BetweenHorizontalEnd />}>Append incomplete · details</Badge>
+                  <Badge tone="warning" icon={<BetweenHorizontalEnd />}>Append partial</Badge>
                 </button>
               )}
               {job.status === "succeeded" && results?.append_check?.status === "all_match" && (
-                <Badge tone="success" icon={<BetweenHorizontalEnd />}>All sheets appended</Badge>
+                <Badge tone="success" icon={<BetweenHorizontalEnd />}>Appended</Badge>
               )}
               {issues > 0 && <Badge tone="danger">{plural(issues, "consistency issue")}</Badge>}
               {(summary?.flagged_columns ?? 0) > 0 && <Badge tone="warning">{plural(summary!.flagged_columns, "column")} to review</Badge>}
@@ -762,7 +748,7 @@ function FileOutcome({ job, onReview, onAppendDetails }: { job: JobStatus; onRev
           )}
           {job.status === "failed" && (
             <Button size="sm" iconRight={<ChevronDown className={clsx("transition-transform", open && "rotate-180")} />} aria-expanded={open} onClick={() => setOpen(!open)}>
-              {open ? "Hide details" : "Details"}
+              {open ? "Hide" : "Details"}
             </Button>
           )}
         </div>
@@ -777,33 +763,33 @@ function FailureDetails({ job, className }: { job: JobStatus; className?: string
   const error = job.error;
   const stage = STAGES.find((item) => item.id === error?.stage);
   return (
-    <div className={clsx("overflow-hidden rounded-lg border border-brand-200", className)}>
-      <dl className="grid gap-4 bg-brand-50/40 p-4 sm:grid-cols-2">
+    <div className={clsx("overflow-hidden rounded-lg border border-danger-200", className)}>
+      <dl className="grid gap-4 bg-danger-50/40 p-4 sm:grid-cols-2">
         <div>
-          <dt className="text-caption text-ink-500">What failed</dt>
+          <dt className="label-caps">Error</dt>
           <dd className="text-body font-medium text-ink-900">{error?.detail || error?.message || "An unexpected error"}</dd>
         </div>
         <div>
-          <dt className="text-caption text-ink-500">Where</dt>
+          <dt className="label-caps">Where</dt>
           <dd className="text-body font-medium text-ink-900">
             {stage ? stage.label : "Before processing"}
             {error?.sheet ? ` · ${error.sheet}` : ""}
           </dd>
         </div>
         <div className="sm:col-span-2">
-          <dt className="text-caption text-ink-500">What you can do</dt>
-          <dd className="text-body text-ink-900">{error?.advice ?? "Retry the job. If it fails again, go back and deselect the sheet named above."}</dd>
+          <dt className="label-caps">Fix</dt>
+          <dd className="text-body text-ink-900">{error?.advice ?? "Retry, or deselect the sheet above."}</dd>
         </div>
       </dl>
       {(error?.technical || error?.kind) && (
-        <div className="border-t border-brand-100">
+        <div className="border-t border-danger-100">
           <button
             type="button"
             aria-expanded={open}
             onClick={() => setOpen(!open)}
             className="flex w-full items-center justify-between px-4 py-2.5 text-body font-medium text-ink-700 hover:bg-ink-50"
           >
-            Technical details
+            Technical
             <ChevronDown className={clsx("h-4 w-4 transition-transform", open && "rotate-180")} aria-hidden />
           </button>
           {open && (

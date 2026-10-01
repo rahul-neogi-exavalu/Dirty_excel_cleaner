@@ -93,6 +93,7 @@ def _prepare(request: JobCreate, batch_id: str | None = None) -> Job:
         # Appending needs two tables to compare; with one sheet there is nothing to do.
         append=request.append and len(ordered) > 1,
         batch_id=batch_id,
+        source_sha256=upload.sha256,
     )
     job.directory = config.JOB_DIR / job.id
     return job

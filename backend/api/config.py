@@ -9,6 +9,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = ROOT.parent
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # optional: plain environment variables work without it
+    pass
+else:
+    # A real environment variable always wins over a file; backend/.env over the
+    # project root's .env (first loaded wins, since nothing is overridden).
+    load_dotenv(ROOT / ".env", override=False)
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
+
 # Uploads, job outputs and exports live here. Git-ignored; safe to delete between runs.
 WORK_DIR = Path(os.environ.get("AHI_WORK_DIR", ROOT / ".workspace"))
 UPLOAD_DIR = WORK_DIR / "uploads"
@@ -86,3 +96,85 @@ FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 CORS_ORIGINS = os.environ.get(
     "AHI_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
 ).split(",")
+
+# --- Bronze layer (Postgres) -------------------------------------------------
+# Cleaned tables are ingested into Postgres. Placeholders live in .env.example; the
+# Ingest step stays locked until host, database and user are all set.
+DB_HOST = os.environ.get("AHI_DB_HOST", "").strip()
+DB_PORT = int(os.environ.get("AHI_DB_PORT") or "5432")
+DB_NAME = os.environ.get("AHI_DB_NAME", "").strip()
+DB_USER = os.environ.get("AHI_DB_USER", "").strip()
+DB_PASSWORD = os.environ.get("AHI_DB_PASSWORD", "")
+DB_SSLMODE = os.environ.get("AHI_DB_SSLMODE", "prefer").strip()
+# Raw cleaned tables, and the registry / audit tables that describe them.
+BRONZE_SCHEMA = os.environ.get("AHI_BRONZE_SCHEMA", "bronze").strip()
+CONTROL_SCHEMA = os.environ.get("AHI_CONTROL_SCHEMA", "ingest").strip()
+# The team adds the source system to the file name as a suffix, e.g. ARR_pc0515.xlsx.
+# One capture group; the last match in the file stem wins.
+SOURCE_SYSTEM_PATTERN = os.environ.get(
+    "AHI_SOURCE_SYSTEM_PATTERN", r"(?:^|[_\-\s.])([a-z]{1,6}[_\-]?\d{2,6})(?=$|[_\-\s.])"
+)
+# Unfilled .env.example placeholders (<your-postgres-host>) count as not configured.
+DB_CONFIGURED = all(value and not value.startswith("<") for value in (DB_HOST, DB_NAME, DB_USER))
+INGEST_ENABLED = os.environ.get("AHI_INGEST_ENABLED", "true").lower() not in ("0", "false", "no")
+
+
+def _flag(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() not in ("0", "false", "no", "")
+
+
+# --- Silver layer --------------------------------------------------------------
+SILVER_SCHEMA = os.environ.get("AHI_SILVER_SCHEMA", "silver").strip()
+# The AHI doc's LOTL (pc_id -> legacy_office_name -> profit center number). Until the
+# real one exists this is a placeholder in the control schema, seeded for testing.
+LOTL_TABLE = os.environ.get("AHI_LOTL_TABLE", "").strip() or f"{CONTROL_SCHEMA}.lotl"
+# The Silver target columns (DRT). A draft ships; the business replaces it.
+SILVER_COLUMNS_FILE = Path(os.environ.get("AHI_SILVER_COLUMNS_FILE", ROOT / "config" / "silver_columns.csv"))
+# Thresholds for a fuzzy or word2vec vote.
+MATCH_FUZZY_MIN = float(os.environ.get("AHI_MATCH_FUZZY_MIN") or "85")
+MATCH_SEMANTIC_MIN = float(os.environ.get("AHI_MATCH_SEMANTIC_MIN") or "0.72")
+# word2vec vectors (text or binary word2vec format). Unset: no word2vec vote.
+WORD2VEC_PATH = os.environ.get("AHI_WORD2VEC_PATH", "").strip()
+if WORD2VEC_PATH.startswith("<"):  # the .env.example placeholder
+    WORD2VEC_PATH = ""
+elif WORD2VEC_PATH and not Path(WORD2VEC_PATH).is_absolute():
+    # Relative paths are relative to the project root, wherever the API is started from.
+    WORD2VEC_PATH = str(PROJECT_ROOT / WORD2VEC_PATH)
+
+
+def _setting(name: str, default: str = "") -> str:
+    """A value, or "" for an unfilled .env.example placeholder (<your-...>)."""
+    value = os.environ.get(name, default).strip()
+    return "" if value.startswith("<") or "<your" in value else value
+
+
+# The AI vote: Azure OpenAI (default) or Gemini. Samples stay local unless allowed.
+AZURE_OPENAI_API_KEY = _setting("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_ENDPOINT = _setting("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_VERSION = _setting("AZURE_OPENAI_API_VERSION") or "2024-10-21"
+AZURE_OPENAI_DEPLOYMENT = _setting("AZURE_OPENAI_DEPLOYMENT_NAME")
+GEMINI_API_KEY = _setting("GEMINI_API_KEY")
+GEMINI_MODEL = _setting("AHI_GEMINI_MODEL") or "gemini-2.5-flash"
+
+_AZURE_READY = bool(AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT)
+_GEMINI_READY = bool(GEMINI_API_KEY) and _flag("AHI_GEMINI_ENABLED", "true")
+AI_PROVIDER = (_setting("AHI_AI_PROVIDER").lower()
+               or ("azure_openai" if _AZURE_READY else "gemini" if _GEMINI_READY else ""))
+AI_ENABLED = _flag("AHI_AI_ENABLED", "true") and (
+    (AI_PROVIDER == "azure_openai" and _AZURE_READY) or (AI_PROVIDER == "gemini" and _GEMINI_READY))
+# What the UI shows: provider and model, never a key.
+AI_LABEL = (f"Azure OpenAI · {AZURE_OPENAI_DEPLOYMENT}" if AI_PROVIDER == "azure_openai"
+            else f"Gemini · {GEMINI_MODEL}" if AI_PROVIDER == "gemini" else "")
+# The older AHI_GEMINI_SEND_SAMPLES name is still honoured.
+AI_SEND_SAMPLES = _flag("AHI_AI_SEND_SAMPLES", os.environ.get("AHI_GEMINI_SEND_SAMPLES", "false"))
+
+
+def db_conninfo() -> str:
+    """libpq connection string for the bronze database."""
+    from psycopg.conninfo import make_conninfo
+
+    return make_conninfo(
+        host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER,
+        password=DB_PASSWORD or None, sslmode=DB_SSLMODE or None,
+        application_name="exavalu-cleaning-studio",
+    )

@@ -884,11 +884,162 @@ is labelled with its `sheet_name`.
 
 ---
 
-## 15. Known limits
+## 15. File → Bronze ingestion
+
+Full write-up, with every business requirement traced to code and tests: [enhancements/FILE_TO_BRONZE.md](enhancements/FILE_TO_BRONZE.md).
+
+The cleaned tables can be loaded into a Postgres **bronze** layer, following
+`enhancements/AHI-File-Bronze-Scenario-Doc.docx`. The split is deliberate: the rules are
+pure functions, and only the executor touches the database.
+
+| Layer | Where | Responsibility |
+|---|---|---|
+| Rules | `backend/src/ahi_bronze/` | `naming` (table names, source system), `periods` (which months a file covers), `schema_compare` (the four July cases), `planner` (one action per output) |
+| Service | `backend/api/services/bronze_service.py` | Builds plans from cleaned jobs, applies reviewer edits, runs approved plans |
+| Database | `backend/api/db.py`, `backend/migrations/` | Pool, control-table migrations, error mapping |
+
+**Identity of a load.** A load is identified by the file's SHA-256 (computed at upload) plus the sheets
+the output came from. That keeps each table of a multi-table workbook matched to its own earlier
+load, and loads a file sent twice in one batch only once.
+
+**Planning.** Candidates are planned oldest period first, against a running picture of the
+bronze layer. Files in the same batch therefore see each other: same columns share a table,
+different columns get one table each. A period that overlaps an existing load means
+REPLACE. A later period means APPEND, REORDER, EVOLVE (only when one column list
+contains the other, in order) or NEW_TABLE. The reviewer can override an action, but only
+to one of the item's `allowed_actions`, and every edit re-plans from scratch.
+
+**Human in the loop.** Missing source system or period is a blocker. REPLACE, EVOLVE, a
+NEW_TABLE next to an existing table, and any reviewer override need an explicit
+per-item confirmation. On approve, the plan is rebuilt once more. If any item's action,
+target, columns or replaced loads differ from what was confirmed, approval is refused
+(`plan_changed`).
+
+**Execution.** One transaction for the whole plan, serialized by an advisory lock:
+
+1. `CREATE TABLE` / `ALTER TABLE … ADD COLUMN`, or drop and recreate for a full replace.
+2. `DELETE … WHERE _ingestion_id = ANY(replaced)`.
+3. `COPY … FROM STDIN` in the table's column order.
+
+Rows are counted after the load and the transaction rolls back on any mismatch. Each table's
+columns are re-checked against the plan, so a table changed by another plan fails the load
+instead of corrupting it.
+
+**Storage.**
+
+- **Bronze columns:** stored as `text`, since typing belongs to Silver. Every row also carries `_ingestion_id`, `_source_file`, `_source_sheet` and `_ingested_at`.
+- **Registry:** `ingest.bronze_table` keeps each table's columns in order, with the cleaner's datatype.
+- **Audit:** `ingest.ingestion` is the audit table the Silver stage selects from (`status = 'ingested'`). Superseded and skipped loads stay as history.
+
+---
+
+## 16. Bronze → Silver
+
+Full write-up, with every business requirement traced to code and tests: [enhancements/BRONZE_TO_SILVER.md](enhancements/BRONZE_TO_SILVER.md).
+
+Follows `enhancements/AHI-Bronze-Silver-Scenario-Doc.docx`. Same split as §15: pure rules in
+`backend/src/ahi_silver/`, the database work in `backend/api/services/silver_service.py`.
+
+| Module | Responsibility |
+|---|---|
+| `normalize.py` | Column names as words: split on separators, `wordninja` for run-together names, a small dictionary of report abbreviations (`acct`, `eff`, `pc`, `no`, `amt`, `nm`, `cd`) |
+| `catalog.py` | The Silver target columns (DRT) from `backend/config/silver_columns.csv` |
+| `matching.py` | Independent votes: saved, exact, fuzzy, semantic and AI each vote on every column; candidates are pooled and ranked, the best is pre-selected, the reviewer decides |
+| `semantic.py` | word2vec vectors read with numpy (binary, text or gzipped), top 200k words, cached |
+| `llm.py` | The AI vote: Azure OpenAI (`openai` SDK, default) or Gemini (`google-genai`), one shared few-shot prompt (method, worked contrast examples, reviewer-approved precedents), structured JSON output |
+| `cleanse.py` | Trim, blanks to NULL, the document's date formats, decimals |
+| `profit_center.py` | The document's four LOTL scenarios and 4-digit numbers |
+| `hashing.py` | Business-key and row SHA-256 over normalised values |
+| `transform.py` | One table's bronze rows to Silver rows; used for the dry run *and* the load |
+
+**Eligibility** is the document's rule, read from the audit table:
+`ingest.ingestion.status = 'ingested' AND silver_status IS DISTINCT FROM 'succeeded'`.
+
+**Every method votes; none waits for another.** Saved, exact, fuzzy, semantic and the AI
+each look at every column and cast at most one vote (the AI may add a second choice, which is
+listed but not counted, or vote "nothing fits"). Votes for the same Silver column are pooled
+into a candidate, and candidates are ranked by:
+
+1. this table's own saved mapping (a reviewer's earlier decision);
+2. how many methods agree;
+3. the strongest vote, weighted by trust (saved and exact 1.0, AI 0.9, semantic 0.85, fuzzy 0.8).
+
+The top candidate is pre-selected as **Recommended**. The reviewer's dropdown lists every
+candidate with the methods behind it, then every other Silver column, then Ignore. A row where
+methods disagree is flagged **Split**. Within a table, when two columns' best candidates are
+the same Silver column, the better-supported column keeps it and the other falls back to its
+next candidate or is left open. A "nothing fits" vote never ignores a column by itself: only a
+reviewer, or a saved ignore, does that.
+
+**A vote must be decisive.** Fuzzy and semantic vote only above a minimum score and with a
+margin over the next-best target (5 points; 0.05 cosine). Fuzzy also needs a shared
+distinctive word, ignoring generic words (name, number, date, code, amount). Measured on the
+test files, "carrier name" scored 86 against both `profit_center_name` and
+`insurance_company_name` on the shared word "name" alone. A tie is no vote. Both also need the
+value *kind* to agree (a code is not a name, an id is not a date). word2vec does not vote on
+names that still hold an abbreviation it would misread (`acc` is a sports conference in news
+text), nor when any word is missing from its vocabulary. Those are the AI's to read.
+
+**The AI vote: Azure OpenAI by default.** `AHI_AI_PROVIDER` picks `azure_openai` or `gemini`;
+unset, Azure OpenAI is used when `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` and
+`AZURE_OPENAI_DEPLOYMENT_NAME` are set, else Gemini. Azure is called through the official
+`openai` SDK (`AzureOpenAI`, `chat.completions.parse` with a Pydantic `response_format`), so
+the answer is schema-validated, not scraped. The deployment must support structured outputs
+(gpt-4o, gpt-4.1 and later; API version 2024-08-01-preview or later). The UI shows the provider
+and deployment, never a key.
+
+**The AI prompt is few-shot** and the same for both providers. A system instruction teaches the method: split the name,
+expand insurance abbreviations, find the subject and the kind of value, then require both to
+match a target. Then come 21 worked examples, built as contrast pairs: `eff_dt` and
+`effective_date` get the same answer at the same confidence; `acc_eff_dt` and
+`accountingeffectivedate` both give accounting_effective_date; a carrier code is not a carrier
+name; the insured is not the insurer; an expiration date is not an effective date. Mappings
+reviewers have approved (renamed or ignored columns, up to 40) are added as precedents that
+outrank the examples. The column being asked about is never shown as its own precedent, so
+the AI's vote stays independent of the saved one. Examples whose target is not in the active
+Silver list are dropped, so the prompt survives the business replacing the DRT. Inputs sit in
+tagged blocks marked as data.
+
+**Approval is of the whole mapping.** Saved rows are pre-filled but appear in the review
+like every other row. Nothing is written to `column_mapping` until approval, and then every
+row is upserted. For each row, `ingest.silver_run` records how the choice was made
+(recommended or manual), the methods behind it, whether the vote was split, and every vote.
+None of this goes to the mapping table, which stays the five agreed fields.
+
+**Nothing stale is loaded.** `_still_valid` runs at approval, and again under the advisory lock
+inside the load. It refuses (`plan_changed`) if a selected load has since been replaced in
+Bronze or loaded by another run, if a bronze table's columns changed, or if an approved
+mapping points at a Silver column that has been removed from the catalog.
+
+**No connection is held during slow work.** `create_run` reads the bronze rows, the saved
+mapping and the LOTL, releases the connection, and only then consults word2vec (a cold
+load takes about 9 s) and the AI. Otherwise a few concurrent reviews could exhaust the
+4-connection pool. The rows stay on the run, so each mapping edit recomputes the dry run
+in memory; they are released when the run ends.
+
+**One transaction per run**, serialized by an advisory lock:
+
+1. Upsert the approved mapping.
+2. Delete Silver rows of bronze loads that have since been superseded, and mark them `removed`.
+3. For each selected load: delete any earlier attempt, transform, `COPY`, and check the counts against bronze.
+4. Rebuild `summary` for the affected `pc_id`s.
+5. Write `silver_run`.
+
+The Silver tables are created by the service (`CREATE … IF NOT EXISTS`), so a new
+`silver_column_name` in the catalog becomes an `ALTER TABLE ADD COLUMN`. Migration
+`002_silver.sql` only touches the control schema.
+
+**Profit center without a LOTL.** Rows are kept and flagged `lotl_unavailable`, never dropped
+or guessed. A name with a number but no LOTL entry is `no_match`. A number without a name is
+`name_missing`; the document does not cover that case, so it is flagged rather than filled.
+
+---
+
+## 17. Known limits
 
 | Limit | Consequence |
 |---|---|
-| Semantic mapping is out of scope | Unifying `Producer` and `Agent Name` into one target column needs a schema, config, LLM or human. |
+| Semantic mapping in the cleaner is out of scope | The cleaner keeps each file's own names. Unifying `Producer` and `Agent Name` is the Silver stage's job (§16), with a reviewer deciding. |
 | Leading zeros already lost in the source | A ZIP stored as the number 8085 is unrecoverable. |
 | Orientation needs ≥2 data rows | A 1-row table is genuinely ambiguous; flagged `confident: false`. |
 | Near-square tables | Decided by shape, not content. Correct on this corpus, always flagged. |
@@ -904,3 +1055,11 @@ is labelled with its `sheet_name`.
 | Pivot detection needs ≥3 value columns | A two-month matrix is indistinguishable from an ordinary table with two numeric columns. |
 | Header adoption needs an exact width match | A continuation sheet missing a column keeps positional names rather than guessing an alignment. |
 | The scorecard reads `.xlsx` only | Delimited inputs are covered by `backend/tests/test_delimited.py`, not by the oracle. |
+| Ingest plans live in memory | Like cleaning jobs, a server restart before approval means cleaning again. Everything already ingested is in Postgres. |
+| Period detection needs dates or month names | A file with neither is blocked until the reviewer enters its period. |
+| Bronze is untyped | Every bronze column is `text`; conversion to dates and decimals is the Silver stage's job. |
+| Silver runs live in memory until approved | A restart before approval means starting the run again; approved mappings and loaded rows are in Postgres. |
+| The Silver column list is a draft | `silver_columns.csv` holds the document's fields until the business provides the DRT. |
+| word2vec knows general English | Google News vectors match "carrier" to "insurer" but not house abbreviations. Those names get no word2vec vote; the AI and the reviewer read them. |
+| The AI is called for every column | One call per bronze table, also when every column is already saved, so its vote is always shown. Votes from the AI and word2vec are suggestions; nothing is loaded without approval. |
+| LOTL is a placeholder | Seeded from test data; profit-center corrections are only as good as the LOTL behind them. |

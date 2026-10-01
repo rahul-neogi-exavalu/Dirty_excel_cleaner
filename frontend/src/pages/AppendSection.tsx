@@ -23,11 +23,8 @@ export function AppendModeOptions({ entry }: { entry: FileEntry }) {
           <BetweenHorizontalEnd />
         </span>
         <div className="min-w-0">
-          <h3 className="text-card text-ink-900">Append matching sheets</h3>
-          <p className="text-caption text-ink-600">
-            For <span className="font-medium text-ink-800">{entry.workbook.filename}</span>: choose whether its selected sheets with identical cleaned
-            columns are combined into one table. Sheets from different files are never combined.
-          </p>
+          <h3 className="text-card text-ink-900">Append</h3>
+          <p className="text-caption text-ink-500">Combine sheets with identical columns.</p>
         </div>
       </div>
 
@@ -35,8 +32,8 @@ export function AppendModeOptions({ entry }: { entry: FileEntry }) {
         <div className="mb-3 flex items-start gap-3 rounded-lg border border-ink-200 bg-ink-50 px-4 py-3" role="note">
           <Lock className="mt-0.5 h-4 w-4 shrink-0 text-ink-500" aria-hidden />
           <div>
-            <p className="text-body font-medium text-ink-800">Appending is not available for this file</p>
-            <p className="text-caption text-ink-600">{reason} Each sheet will be exported as its own table.</p>
+            <p className="text-body font-medium text-ink-800">Not available</p>
+            <p className="text-caption text-ink-600">{reason}</p>
           </div>
         </div>
       )}
@@ -51,25 +48,24 @@ export function AppendModeOptions({ entry }: { entry: FileEntry }) {
           disabled={disabled}
           onSelect={() => flow.setAppend(id, true)}
           icon={<Wand2 />}
-          title="Auto-detect & append"
+          title="Auto-detect"
           badge={<Badge tone="brand">Recommended</Badge>}
-          description="While cleaning, each sheet's real header is detected. Sheets whose columns match exactly are appended into one table with a source_sheet column; the rest stay separate."
+          description="Matching sheets merge into one table with a source_sheet column."
         />
         <ModeCard
           checked={!entry.append}
           disabled={disabled}
           onSelect={() => flow.setAppend(id, false)}
           icon={<Table2 />}
-          title="Keep sheets separate"
-          description="Every selected sheet becomes its own table, even when two sheets share the same columns."
+          title="Separate"
+          description="One table per sheet."
         />
       </div>
 
       {entry.append && !reason && (
         <p className="mt-3 flex animate-fade-in items-start gap-2 text-caption text-ink-600">
           <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-400" aria-hidden />
-          Matching is decided while the job cleans the sheets, in a single pass. If some sheets turn out to have different columns,
-          you'll see exactly which ones, and why, when the run finishes. Nothing is lost: they are exported as separate tables.
+          Non-matching sheets are kept separate and reported after the run.
         </p>
       )}
     </div>
@@ -103,7 +99,7 @@ function ModeCard({
       className={clsx(
         "flex items-start gap-3 rounded-lg border p-4 text-left transition-colors",
         "focus-visible:outline-none focus-visible:shadow-focus disabled:cursor-not-allowed",
-        checked ? "border-brand-500 bg-brand-50/50 ring-1 ring-brand-500" : "border-ink-200 bg-white hover:border-ink-300 hover:bg-ink-50",
+        checked ? "border-brand-500 bg-brand-50 ring-1 ring-brand-500" : "border-ink-200 bg-white hover:border-brand-200 hover:bg-ink-50",
       )}
     >
       <span

@@ -5,17 +5,37 @@
 @layer base {
   html {
     -webkit-font-smoothing: antialiased;
-    font-feature-settings: "cv11", "ss01";
+    font-feature-settings: "ss02";
+    scroll-behavior: smooth;
   }
   body {
     @apply bg-ink-50 text-body text-ink-800;
   }
+  h1,
+  h2,
+  h3 {
+    @apply font-display;
+    text-wrap: balance;
+  }
+  h1,
+  h2 {
+    letter-spacing: -0.01em;
+  }
+  ::selection {
+    background: #dce6fb;
+    color: #14171c;
+  }
   :focus-visible {
-    outline: 2px solid #c8102e;
+    outline: 2px solid #2556c7;
     outline-offset: 2px;
   }
   .num {
     font-variant-numeric: tabular-nums;
+  }
+  /* One stroke weight for every icon: a touch lighter than Lucide's default reads
+     more refined at 14-18px next to IBM Plex. */
+  svg.lucide {
+    stroke-width: 1.75;
   }
 }
 
@@ -23,8 +43,22 @@
   .card {
     @apply rounded-lg border border-ink-200 bg-white shadow-card;
   }
+  /* "Step 01" above a page title: the one place small caps are used. */
+  .eyebrow {
+    @apply font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-ink-500;
+  }
+  /* Faint spreadsheet grid, used behind drop zones and empty states. */
+  .bg-grid {
+    background-color: #fafbfc;
+    background-image:
+      linear-gradient(to right, rgba(20, 23, 28, 0.045) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(20, 23, 28, 0.045) 1px, transparent 1px);
+    background-size: 28px 28px;
+    background-position: -1px -1px;
+  }
+  /* Group and field labels: sentence case, carried by weight rather than capitals. */
   .label-caps {
-    @apply text-caption font-semibold uppercase tracking-wider text-ink-500;
+    @apply text-caption font-semibold text-ink-600;
   }
   .skeleton {
     @apply relative overflow-hidden rounded bg-ink-100;
@@ -36,11 +70,14 @@
   }
   .scroll-thin {
     scrollbar-width: thin;
-    scrollbar-color: #cbd5e1 transparent;
+    scrollbar-color: #c8cdd5 transparent;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
   *,
   *::before,
   *::after {

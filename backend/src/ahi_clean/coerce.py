@@ -665,6 +665,16 @@ def _compact_dates(series: pl.Series) -> pl.Series:
     ).to_series()
 
 
+def clean_numeric(series: pl.Series, convention: str = US) -> pl.Series:
+    """Public form of the presentation stripping, for callers outside the cleaner."""
+    return _clean_numeric(series, convention)
+
+
+def compact_dates(series: pl.Series) -> pl.Series:
+    """Public form of the yyyyMMdd reader."""
+    return _compact_dates(series)
+
+
 def excel_serials(series: pl.Series) -> pl.Series:
     """Five-digit Excel serial day numbers as dates (1899-12-30 plus n); null otherwise."""
     value = pl.col("v").str.strip_chars()

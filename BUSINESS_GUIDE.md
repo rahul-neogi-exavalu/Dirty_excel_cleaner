@@ -507,11 +507,71 @@ Both numbers come from measurement rather than expectation, and one of them cont
 what we predicted: we expected that using separate processes would be faster than using
 threads, and measured the opposite by a wide margin. The default follows the measurement.
 
+## Loading into the bronze layer
+
+The last step, **Ingest**, puts the cleaned tables into the bronze database. It follows
+the same rules the team applied by hand (the AHI File → Bronze scenario document), but a
+person still approves every change that matters.
+
+**What the tool works out on its own:**
+
+- **Source system:** read from the file name's suffix (`ARR_pc0515.xlsx` → `pc0515`).
+- **Period:** which months the file covers, read from its accounting or transaction dates, or from month-named sheets.
+- **Table name:** `ext_pc0515_arr`, or `ext_pc0515_data` when sheets are named after months.
+- **What to do** with the file against what is already loaded:
+  - A first file creates the table.
+  - A July file with the same columns is appended. If the columns are only in a different order, they are put back in the table's order first.
+  - A July file with extra or missing columns widens the table. This needs your confirmation.
+  - A July file with a different layout goes to a table of its own. This needs your confirmation.
+  - A revised Jan–Jun file, or a Jan–Jul file, replaces the earlier load. This needs your confirmation and a final check.
+  - The very same file again is skipped.
+
+**What you decide:** the reviewer checks the source system and period, can rename a
+table or choose another action, ticks a confirmation for every risky item, and enters
+their name. Nothing is written until then.
+
+**What protects the data:**
+
+- **All or nothing:** the whole plan loads in one go. If anything fails, nothing is written.
+- **Row counts are checked** before the load is committed.
+- **Nothing is ever silently overwritten.** A replaced load is kept in the history as "superseded", with who approved its replacement and when.
+- **If something changes after you review it,** for example another load into the same table, the tool asks you to review again. It does not run a plan you didn't see.
+
+## Bringing files together in Silver
+
+Every source names its columns differently: one file says `Carrier`, another
+`Insurance Company Name`, a third `Carrier Name`. The last step, **Silver**, puts them all
+into one common table under the names the business has agreed (the DRT).
+
+**How a column finds its Silver name.** Five checks look at every column, each on its own, and each casts a vote:
+
+1. **What was approved before.** Next month's file reuses last month's decisions.
+2. **The same name.** `Acct Eff Date` is recognised as Accounting Effective Date.
+3. **A near spelling.** `Premium Amt` is recognised as Premium. A guess that rests only on a shared word like "name" is never made.
+4. **The same meaning,** from a language model of English words. `Carrier` is recognised as the insurance company and `Agency` as the producer.
+5. **AI (Azure OpenAI),** which reads report abbreviations: `acc_eff_dt` is the accounting effective date, `incp_dt` the policy start. Only the column names are sent, never the data.
+
+**You choose.** The answer most checks agree on is pre-selected and marked *Recommended*. Open a row's list to see every suggestion and which checks voted for it, for example "total_premium: Semantic + AI" and "premium: Fuzzy". Rows where the checks disagree are flagged *Split*, so look at those first. You can pick any suggestion, any other Silver column, or "Ignore".
+
+**Nothing is remembered until you approve.** Approving saves the whole mapping, including the rows the tool filled in from before, so the next file from that source maps itself.
+
+**What happens to the values:**
+
+- **Text:** spaces are trimmed, and empty cells become empty, not blank text.
+- **Dates:** read in every format the AHI document lists, including Excel's day numbers.
+- **Amounts:** `$1,200.50` and `(250.00)`, which means minus 250, are understood.
+- **Unreadable values** are left empty and counted, so you see how many there were before you approve.
+
+**Profit centers** are filled in and corrected from the LOTL reference table, exactly as the AHI document describes. A missing number is looked up from the name, a wrong number is corrected, and a row with neither gets the office of its source. Numbers are always four digits (`94` becomes `0094`). Rows the LOTL can't settle are kept and flagged, never dropped.
+
+**When a file is replaced in bronze** (a revised Jan–Jun file), its old rows are removed from Silver on the next run, so nothing is counted twice.
+
 ## What this tool does not do
 
 Stated plainly, because it affects what has to happen next.
 
-**It does not map columns onto your target table.** It will faithfully clean a file whose
+**It does not map columns onto your target table on its own.** The Silver step suggests a
+mapping, but a person approves every one; the rest of this point explains why. It will faithfully clean a file whose
 columns are called `Producer`, and another whose columns are called `Agent Name`. It will
 **not** decide that those two are the same field in your database.
 

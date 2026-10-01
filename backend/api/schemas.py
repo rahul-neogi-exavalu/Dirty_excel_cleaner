@@ -157,3 +157,59 @@ class HeaderUpdate(BaseModel):
 
 class HeaderReset(BaseModel):
     columns: list[str] | None = None
+
+
+# --- Bronze ingestion ----------------------------------------------------------
+
+
+class PlanCreate(BaseModel):
+    job_ids: list[str] = Field(min_length=1)
+    batch_id: str | None = None
+
+
+class PlanFileUpdate(BaseModel):
+    source_system: str | None = None
+    period_start: str | None = None
+    period_end: str | None = None
+
+
+class PlanItemUpdate(BaseModel):
+    table_name: str | None = None
+    action: str | None = None
+
+
+class PlanApprove(BaseModel):
+    reviewed_by: str = Field(min_length=2, max_length=120)
+    confirmed: list[str] = []
+
+
+class PlanFile(BaseModel):
+    job_id: str
+    file_name: str
+    source_system: str | None
+    detected_source_system: str | None
+    period_start: str | None
+    period_end: str | None
+    detected_period_start: str | None
+    detected_period_end: str | None
+    period_source: str | None
+    period_candidates: list[dict[str, Any]]
+
+
+class PlanOut(BaseModel):
+    id: str
+    batch_id: str | None
+    status: str
+    progress: float
+    message: str
+    error: dict[str, Any] | None
+    reviewed_by: str | None
+    files: list[PlanFile]
+    items: list[dict[str, Any]]
+    # What still stands between the plan and approval (blockers only; confirmations
+    # are the reviewer's to give).
+    blockers: list[str]
+    results: dict[str, Any]
+    created_at: float
+    started_at: float | None
+    finished_at: float | None
