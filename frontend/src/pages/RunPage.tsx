@@ -137,7 +137,7 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
       <div className="grid items-stretch gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(320px,1fr)]">
         <section className="card flex h-full flex-col p-5 md:p-6" aria-labelledby="plan-title">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200" aria-hidden>
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-ink-50 text-ink-600" aria-hidden>
               {count > 1 ? <Files className="h-6 w-6" /> : <FileSpreadsheet className="h-6 w-6" />}
             </div>
             <div className="min-w-0 flex-1">
@@ -207,13 +207,13 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
 
         <aside className="flex">
           <section className="card flex w-full flex-col overflow-hidden" aria-labelledby="ready-title">
-            <div className="border-b border-brand-100 bg-brand-50/60 p-5">
+            <div className="border-b border-ink-200 bg-ink-50 p-5">
               <div className="flex items-start gap-3">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-600 text-white" aria-hidden>
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-ink-900 text-white" aria-hidden>
                   <Play className="h-5 w-5" fill="currentColor" />
                 </div>
                 <div>
-                  <h2 id="ready-title" className="text-card text-brand-800">Ready</h2>
+                  <h2 id="ready-title" className="text-card text-ink-900">Ready</h2>
                   <p className="text-caption text-ink-600">Source files stay unchanged.</p>
                 </div>
               </div>
@@ -446,7 +446,7 @@ function RunningView({ batch }: { batch: BatchStatus }) {
             {multi && <StatTile icon={<Files />} label="Files" value={`${batch.files_done} / ${batch.files_total}`} tone="brand" />}
             <StatTile icon={<Layers />} label="Sheets" value={`${sheetsDone} / ${sheetsTotal}`} tone="info" />
             <StatTile icon={<Rows3 />} label="Rows kept" value={formatNumber(rowsKept)} tone="success" />
-            <StatTile icon={<Trash2 />} label="Rows removed" value={formatNumber(rowsRemoved)} tone="warning" />
+            <StatTile icon={<Trash2 />} label="Rows removed" value={formatNumber(rowsRemoved)} />
             <StatTile icon={<Clock />} label="Elapsed" value={formatDuration(elapsed)} />
           </div>
 
@@ -630,7 +630,7 @@ function DoneView({ batch }: { batch: BatchStatus }) {
               tone="brand"
             />
             <StatTile loading={loading} icon={<Rows3 />} label="Rows kept" value={formatNumber(sum((s) => s.rows))} tone="success" />
-            <StatTile loading={loading} icon={<Trash2 />} label="Rows removed" value={formatNumber(sum((s) => s.rows_removed))} tone="warning" />
+            <StatTile loading={loading} icon={<Trash2 />} label="Rows removed" value={formatNumber(sum((s) => s.rows_removed))} />
           </div>
         )}
 
@@ -722,7 +722,7 @@ function FileOutcome({ job, onReview, onAppendDetails }: { job: JobStatus; onRev
                   : "Loading results…"}
               </p>
             ) : job.status === "failed" ? (
-              <p className="text-caption text-brand-700">{job.error?.message ?? "The job stopped unexpectedly."}</p>
+              <p className="text-caption text-danger-700">{job.error?.message ?? "The job stopped unexpectedly."}</p>
             ) : (
               <p className="text-caption text-ink-500">{job.message || "Cancelled"}</p>
             )}
@@ -763,8 +763,8 @@ function FailureDetails({ job, className }: { job: JobStatus; className?: string
   const error = job.error;
   const stage = STAGES.find((item) => item.id === error?.stage);
   return (
-    <div className={clsx("overflow-hidden rounded-lg border border-brand-200", className)}>
-      <dl className="grid gap-4 bg-brand-50/40 p-4 sm:grid-cols-2">
+    <div className={clsx("overflow-hidden rounded-lg border border-danger-200", className)}>
+      <dl className="grid gap-4 bg-danger-50/40 p-4 sm:grid-cols-2">
         <div>
           <dt className="label-caps">Error</dt>
           <dd className="text-body font-medium text-ink-900">{error?.detail || error?.message || "An unexpected error"}</dd>
@@ -782,7 +782,7 @@ function FailureDetails({ job, className }: { job: JobStatus; className?: string
         </div>
       </dl>
       {(error?.technical || error?.kind) && (
-        <div className="border-t border-brand-100">
+        <div className="border-t border-danger-100">
           <button
             type="button"
             aria-expanded={open}

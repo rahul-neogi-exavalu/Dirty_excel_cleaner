@@ -3,6 +3,8 @@ import {
   Check,
   ChevronRight,
   ClipboardCheck,
+  DatabaseZap,
+  Layers3,
   FileSpreadsheet,
   Home,
   Loader2,
@@ -25,6 +27,8 @@ export const PAGE_META: Record<Page, { step: number; label: string; icon: ReactN
   configuration: { step: 1, label: "Configure", icon: <SlidersHorizontal /> },
   run: { step: 2, label: "Run", icon: <PlayCircle /> },
   results: { step: 3, label: "Results", icon: <ClipboardCheck /> },
+  ingest: { step: 4, label: "Ingest", icon: <DatabaseZap /> },
+  silver: { step: 5, label: "Silver", icon: <Layers3 /> },
 };
 
 /** The Exavalu mark: a staircase of six squares with a red outline. */
@@ -45,13 +49,13 @@ export function ExavaluMark({ className }: { className?: string }) {
 export function Logo({ compact }: { compact?: boolean }) {
   return (
     <div className="flex items-center gap-3">
-      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-500 text-white ring-1 ring-white/10">
-        <FileSpreadsheet className="h-5 w-5" />
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-white p-1.5">
+        <ExavaluMark className="h-full w-full" />
       </span>
       {!compact && (
         <div className="leading-none">
-          <p className="font-display text-[17px] font-semibold tracking-[0.06em] text-white">EXAVALU</p>
-          <p className="mt-1 text-[11px] font-medium tracking-[0.04em] text-brand-200/70">Data Cleaning Studio</p>
+          <p className="font-display text-[15px] font-semibold tracking-[0.08em] text-white">EXAVALU</p>
+          <p className="mt-1 text-[11px] font-medium text-white/50">Data Cleaning Studio</p>
         </div>
       )}
     </div>
@@ -70,6 +74,9 @@ function useStepState(page: Page): { done: boolean; locked: string | null; busy:
       locked: flow.files.length ? null : flow.runBlockedReason,
       busy: flow.running,
     };
+  // Silver reads bronze loads from the database, not this session's files.
+  if (page === "silver") return { done: false, locked: null, busy: false };
+  // Results and Ingest both need at least one cleaned file.
   return { done: false, locked: flow.reviewBlockedReason, busy: false };
 }
 
@@ -93,8 +100,8 @@ function NavItem({ page, active, compact, onNavigate }: { page: Page; active: bo
         compact && "justify-center px-0",
       )}
     >
-      {active && <span className="absolute inset-y-2.5 left-0 w-[3px] rounded-r bg-brand-400" aria-hidden />}
-      <span className={clsx("flex shrink-0 [&>svg]:h-[18px] [&>svg]:w-[18px]", active && "text-brand-300")} aria-hidden>
+      {active && <span className="absolute inset-y-2.5 left-0 w-[2px] rounded-r bg-white" aria-hidden />}
+      <span className={clsx("flex shrink-0 [&>svg]:h-[18px] [&>svg]:w-[18px]", active && "text-white")} aria-hidden>
         {meta.icon}
       </span>
       {!compact && (
@@ -102,11 +109,11 @@ function NavItem({ page, active, compact, onNavigate }: { page: Page; active: bo
           <span className="num w-5 font-display text-caption text-white/35">{String(meta.step).padStart(2, "0")}</span>
           <span className="flex-1 font-medium">{meta.label}</span>
           {busy ? (
-            <Loader2 className="h-4 w-4 animate-spin text-brand-300" aria-label="Running" />
+            <Loader2 className="h-4 w-4 animate-spin text-white/70" aria-label="Running" />
           ) : locked ? (
             <Lock className="h-3.5 w-3.5 text-white/40" aria-label="Locked" />
           ) : done ? (
-            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-brand-400/20 text-brand-300" aria-label="Complete">
+            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-white/10 text-white/80" aria-label="Complete">
               <Check className="h-3 w-3" strokeWidth={3} />
             </span>
           ) : null}
@@ -155,7 +162,7 @@ function WorkbookCard({ compact }: { compact: boolean }) {
   return (
     <div className="rounded-xl border border-white/[0.07] bg-white/[0.04] p-3.5">
       <div className="flex items-start gap-2.5">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-500/25 text-brand-200" aria-hidden>
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-white/[0.08] text-white/70" aria-hidden>
           <FileSpreadsheet className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
@@ -217,11 +224,11 @@ function WorkbookCard({ compact }: { compact: boolean }) {
 function SidebarContent({ page, compact, onNavigate, onToggle }: { page: Page; compact: boolean; onNavigate: (page: Page) => void; onToggle?: () => void }) {
   const flow = useWorkflow();
   return (
-    <nav aria-label="Workflow" className="flex h-full flex-col bg-nav bg-[radial-gradient(420px_260px_at_0%_0%,rgba(79,168,114,0.16),transparent_70%)] px-4 py-6 text-white/70">
+    <nav aria-label="Workflow" className="flex h-full flex-col border-r border-nav-line bg-nav px-4 py-6 text-white/70">
       <div className={clsx("mb-10 flex items-center", compact ? "justify-center" : "justify-between px-2")}>
         <Logo compact={compact} />
       </div>
-      {!compact && <p className="label-caps mb-3 px-3 !text-[11px] !tracking-[0.16em] !text-white/40">Workflow</p>}
+      {!compact && <p className="mb-3 px-3 text-caption font-medium text-white/40">Workflow</p>}
       <ol className="space-y-1.5">
         {(Object.keys(PAGE_META) as Page[]).map((key) => (
           <li key={key}>
@@ -231,7 +238,7 @@ function SidebarContent({ page, compact, onNavigate, onToggle }: { page: Page; c
       </ol>
       <div className="my-6 border-t border-white/[0.07]" />
       {!compact && flow.files.length > 0 && (
-        <p className="label-caps mb-3 px-3 !text-[11px] !tracking-[0.16em] !text-white/40">{flow.files.length > 1 ? "Workbooks" : "Workbook"}</p>
+        <p className="mb-3 px-3 text-caption font-medium text-white/40">{flow.files.length > 1 ? "Workbooks" : "Workbook"}</p>
       )}
       <WorkbookCard compact={compact} />
       <div className="mt-auto flex items-center justify-between gap-2 border-t border-white/[0.07] px-2 pt-4 text-caption text-white/40">
@@ -366,36 +373,39 @@ export function PageHeader({
 
 function WorkflowStepper({ current }: { current: Page }) {
   const pages = Object.keys(PAGE_META) as Page[];
-  const index = pages.indexOf(current);
   return (
     <ol className="hidden shrink-0 items-center xl:flex" aria-label="Workflow progress">
-      {pages.map((page, i) => {
-        const state = i < index ? "done" : i === index ? "current" : "upcoming";
-        return (
-          <li key={page} className="flex items-center">
-            <div className="flex flex-col items-center gap-1.5">
-              <span
-                aria-current={state === "current" ? "step" : undefined}
-                className={clsx(
-                  "num flex h-8 w-8 items-center justify-center rounded-full font-display text-[13px] font-semibold transition-colors",
-                  state === "current" && "bg-brand-600 text-white shadow-[0_4px_12px_-4px_rgba(29,122,70,0.6)] ring-4 ring-brand-100",
-                  state === "done" && "bg-brand-100 text-brand-700",
-                  state === "upcoming" && "border border-ink-200 bg-white text-ink-500",
-                )}
-              >
-                {state === "done" ? <Check className="h-3.5 w-3.5" strokeWidth={3} /> : i + 1}
-              </span>
-              <span className={clsx("whitespace-nowrap text-caption", state === "current" ? "font-semibold text-ink-900" : "text-ink-500")}>
-                {PAGE_META[page].label}
-              </span>
-            </div>
-            {i < pages.length - 1 && (
-              <span className={clsx("mx-2 mb-5 h-0.5 w-10 rounded-full", i < index ? "bg-brand-300" : "bg-ink-200")} aria-hidden />
-            )}
-          </li>
-        );
-      })}
+      {pages.map((page, i) => (
+        <StepperItem key={page} page={page} index={i} current={page === current} last={i === pages.length - 1} />
+      ))}
     </ol>
+  );
+}
+
+/** One step: ticked only when its work is actually done, not because it comes earlier. */
+function StepperItem({ page, index, current, last }: { page: Page; index: number; current: boolean; last: boolean }) {
+  const { done } = useStepState(page);
+  const state = current ? "current" : done ? "done" : "upcoming";
+  return (
+    <li className="flex items-center">
+      <div className="flex flex-col items-center gap-1.5">
+        <span
+          aria-current={current ? "step" : undefined}
+          className={clsx(
+            "num flex h-8 w-8 items-center justify-center rounded-full font-display text-[13px] font-semibold transition-colors",
+            state === "current" && "bg-brand-600 text-white ring-4 ring-brand-100",
+            state === "done" && "bg-ink-800 text-white",
+            state === "upcoming" && "border border-ink-200 bg-white text-ink-500",
+          )}
+        >
+          {state === "done" ? <Check className="h-3.5 w-3.5" strokeWidth={3} aria-label="Complete" /> : index + 1}
+        </span>
+        <span className={clsx("whitespace-nowrap text-caption", current ? "font-semibold text-ink-900" : "text-ink-500")}>
+          {PAGE_META[page].label}
+        </span>
+      </div>
+      {!last && <span className={clsx("mx-2 mb-5 h-0.5 w-10 rounded-full", done ? "bg-ink-500" : "bg-ink-200")} aria-hidden />}
+    </li>
   );
 }
 
@@ -423,7 +433,7 @@ export function SectionCard({
       <header className="flex flex-col gap-3 border-b border-ink-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between md:px-6">
         <div className="flex items-center gap-3">
           {icon && (
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-600 [&>svg]:h-[18px] [&>svg]:w-[18px]" aria-hidden>
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-ink-50 text-ink-600 [&>svg]:h-4 [&>svg]:w-4" aria-hidden>
               {icon}
             </span>
           )}

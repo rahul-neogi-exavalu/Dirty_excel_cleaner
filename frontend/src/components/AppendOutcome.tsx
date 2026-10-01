@@ -163,7 +163,7 @@ export function AppendMismatchModal({
   );
 }
 
-function ColumnChips({ names, tone }: { names: string[]; tone: "neutral" | "danger" | "info" }) {
+export function ColumnChips({ names, tone }: { names: string[]; tone: "neutral" | "danger" | "info" }) {
   const shown = names.slice(0, 24);
   return (
     <div className="mt-1.5 flex flex-wrap gap-1">

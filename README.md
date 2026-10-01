@@ -78,7 +78,7 @@ headers, export. The API (`backend/api/`) calls the `ahi_clean` functions in
 `backend/src/` directly and changes none of them. Run from the project root:
 
 ```bash
-.venv\Scripts\python -m uvicorn api.main:app --app-dir backend --reload --port 8000
+.venv\Scripts\python -m uvicorn api.main:app --app-dir backend --reload --port 8080
 ```
 
 ```bash
@@ -89,7 +89,8 @@ npm --prefix frontend install
 npm --prefix frontend run dev
 ```
 
-Open http://localhost:5173 (Vite proxies `/api` to port 8000). For a single-origin
+Open http://localhost:5173 (Vite proxies `/api` to port 8080; set `VITE_API_TARGET` to use
+another address). For a single-origin
 deployment, `npm --prefix frontend run build` and uvicorn then serves `frontend/dist` itself.
 
 What the UI can and cannot know, and when:
@@ -119,6 +120,131 @@ so a server restart means uploading again.
 | `PUT /api/jobs/{id}/outputs/{oid}/headers` | Rename headers `{renames: {old: new}}` |
 | `GET /api/jobs/{id}/outputs/{oid}/export/csv` · `/metadata` | Downloads with current headers |
 | `GET /api/jobs/{id}/export/audit` · `/export/zip` | Audit report; everything zipped |
+
+## Ingest (File → Bronze)
+
+Step 4 of the UI loads cleaned tables into a Postgres **bronze** layer, following
+`enhancements/AHI-File-Bronze-Scenario-Doc.docx`. A person stays in the loop for every
+decision that can lose or reshape data.
+
+> **Full write-up:** [enhancements/FILE_TO_BRONZE.md](enhancements/FILE_TO_BRONZE.md) covers the
+> architecture, the data model, and every business requirement mapped to the code and test that
+> satisfies it.
+
+**Setup:** copy `.env.example` to `backend/.env` (or `.env` in the project root; both are
+git-ignored, and `backend/.env` wins) and fill in `AHI_DB_HOST`, `AHI_DB_PORT`,
+`AHI_DB_NAME`, `AHI_DB_USER`, `AHI_DB_PASSWORD` (`AHI_DB_SSLMODE=require` for cloud).
+Never put real values in `.env.example`; it is committed.
+The control tables (`ingest.bronze_table`, `ingest.ingestion`, `ingest.ingest_plan`)
+are created on first use from `backend/migrations/`. Until the database is set, the
+step shows "Database not configured" and cleaning works as before.
+
+**What it decides** (`backend/src/ahi_bronze/planner.py`, pure and unit-tested):
+
+| Situation | Action | Confirmation |
+|---|---|---|
+| New table | Create `ext_{source}_{sheet}`, or `ext_{source}_data` for month/date sheets | — |
+| Later period, identical columns | Append | — |
+| Later period, same columns reordered | Reorder to the table's order, append | — |
+| Later period, columns added or missing | Evolve (`ADD COLUMN`; missing load as NULL) | Required |
+| Later period, different schema | New table `…_{yyyy_mm}` | Required |
+| Overlapping period (revised Jan–Jun, or Jan–Jul) | Replace the earlier load(s) | Required |
+| Same file content again | Skip (can be overridden to Replace) | Required if overridden |
+
+- **Detection:** the source system comes from the file-name suffix (`ARR_pc0515.xlsx` → `pc0515`). The period comes from the accounting / transaction date columns, then from month-named sheets. Both are pre-filled and editable.
+- **Atomic loads:** an approved plan loads in **one transaction**, so either all of it lands or none of it does. Rows are checked against the cleaned row count before commit.
+- **Lineage:** every bronze row carries `_ingestion_id`, `_source_file`, `_source_sheet` and `_ingested_at`. Bronze columns are `text`, and typing is left to Silver.
+- **Tests:** run the unit tests with `python -m pytest backend/tests -k bronze`. The end-to-end test runs when `AHI_TEST_DATABASE_URL` points at a scratch Postgres.
+- **Duplicates:** a file is identified by its content hash plus the sheets an output came from. Each table of a multi-table workbook is matched to its own earlier load, and the same file twice in one batch is loaded once.
+- **Approval is re-checked:** on approve, the plan is rebuilt against the bronze layer as it is now. If anything the reviewer confirmed has changed (action, target table, columns, or the loads it replaces), approval is refused with `plan_changed` and the plan must be reviewed again.
+- **Errors:** an unreachable database, or a user that can't create schemas, returns a 503 with advice rather than a server error.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/bronze/status` | Configured / reachable |
+| `POST /api/bronze/plans` | Build a plan `{job_ids, batch_id}` |
+| `PATCH /api/bronze/plans/{id}/files/{job_id}` | Edit source system / period |
+| `PATCH /api/bronze/plans/{id}/items/{key}` | Edit table name / action |
+| `POST /api/bronze/plans/{id}/approve` | `{reviewed_by, confirmed}`; 409 until every risky item is confirmed |
+| `GET /api/bronze/tables` | Registry with ingestion history |
+
+## Silver (Bronze → Silver)
+
+Step 5 of the UI follows `enhancements/AHI-Bronze-Silver-Scenario-Doc.docx`. It takes bronze loads that have no successful Silver run yet (the ingestion audit table), maps their columns onto one common schema, cleanses them, and loads them. A person approves the whole mapping first.
+
+> **Full write-up:** [enhancements/BRONZE_TO_SILVER.md](enhancements/BRONZE_TO_SILVER.md) covers the
+> architecture, the voting matcher, cleansing, and every business requirement mapped to the
+> code and test that satisfies it.
+
+**Tables in `AHI_SILVER_SCHEMA`:**
+
+| Table | Holds |
+|---|---|
+| `column_mapping` | **Approved** mappings only: `pc_id, bronze_table_name, bronze_column_name, drt_column_name, silver_column_name`. A NULL `silver_column_name` means the column was approved as ignored. |
+| `detail` | Every loaded row under the Silver column names, typed (text / date / numeric(18,2)), with `pc_id`, `pc_lookup_status`, `business_key_hash`, `row_hash` and lineage (`_bronze_table`, `_ingestion_id`, `_source_file`, `_source_sheet`, `_silver_run_id`). |
+| `summary` | Rows and premium by `pc_id`, profit center and accounting month, rebuilt for each profit center a run touches. |
+
+**The Silver columns** (the DRT) are listed in `backend/config/silver_columns.csv` (`silver_column_name, drt_column_name, data_type, business_key, description`). A draft built from the document's fields ships; replace it with the business's DRT. Synonyms written in the description's parentheses help matching.
+
+**Matching: independent votes.** The methods do not run one after another. Each one votes on every column (`backend/src/ahi_silver/matching.py`):
+
+1. **Saved:** this table's approved mapping, or the same column name approved for another table.
+2. **Exact:** same words as the Silver or DRT name, after splitting run-together names (`profitcentername`) and expanding abbreviations (`acct_eff_dt`).
+3. **Fuzzy:** rapidfuzz WRatio of at least `AHI_MATCH_FUZZY_MIN` (85). The match must share a distinctive word, beat the runner-up by 5 points and agree on the kind of value, so a column that shares only "name" is never guessed.
+4. **Semantic:** word2vec cosine of at least `AHI_MATCH_SEMANTIC_MIN` (0.72) against the name, DRT name and synonyms, with the same margin and kind rule. Names with an unexpanded abbreviation (`acc`, `incp`) get no word2vec vote.
+   - Vectors are read straight from `AHI_WORD2VEC_PATH` (word2vec `.bin`, `.txt` or gzipped). There is no gensim dependency: gensim has no working build for this Python.
+   - The 200,000 most frequent words are loaded on first use, about 9 seconds for the Google News model.
+5. **AI:** one structured-output call per table over all its columns.
+   - **Azure OpenAI** is the default (`AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_DEPLOYMENT_NAME`), called through the official `openai` SDK.
+   - **Gemini** is the alternative (`AHI_AI_PROVIDER=gemini`, `GEMINI_API_KEY`).
+   - `AHI_AI_ENABLED=false` turns the AI vote off.
+   - The prompt is **few-shot** (`backend/src/ahi_silver/llm.py`):
+     - a decoding method;
+     - 21 worked contrast examples (`eff_dt` = `effective_date`; `acc_eff_dt` = `accountingeffectivedate`; a carrier code is not a carrier name; the insured is not the insurer);
+     - the mappings reviewers have approved, as precedents.
+   - The AI may answer "nothing fits", or add a second choice for an ambiguous name.
+   - Only column names and the Silver list are sent. Sample values go too only if `AHI_AI_SEND_SAMPLES=true`. Answers outside the Silver list are dropped.
+
+**Ranking and the reviewer:**
+
+- Votes for the same Silver column form a candidate. Candidates rank by this table's saved mapping first, then the number of methods that agree, then the strongest vote.
+- The top candidate is pre-selected. Each row's dropdown lists every candidate with the methods behind it (`total_premium`, recommended, Semantic + AI; `premium`, Fuzzy), then every Silver column, then Ignore.
+- Rows where methods disagree are flagged **Split**.
+- Approval is blocked until every column is mapped or set to Ignore, and no two columns share a target.
+- **Approving saves the whole mapping, pre-filled rows included.** Suggestions are never saved.
+- Saved rows stay editable in the Mapping tab.
+
+**Cleansing:**
+
+- **Text:** trimmed, and blank becomes NULL.
+- **Dates:** the document's formats in its order, then Excel serials.
+- **Decimals:** `$1,200.50` and `(250.00)` forms are understood.
+- **Unreadable values** become NULL and are counted in the review.
+
+**Profit center:** follows the document's four cases against the LOTL. Numbers are padded to 4 digits (`94` becomes `0094`). The `pc_id` is the numeric part of the source system. Until the real LOTL exists, a placeholder table `<control schema>.lotl` is used; `AHI_LOTL_TABLE` points elsewhere. Load it with:
+
+```bash
+python backend/tools/seed_lotl.py enhancements/test-files/lotl_seed.csv
+```
+
+**Loading:** one transaction. It saves the mapping, deletes the Silver rows of bronze loads that were replaced (`status='superseded'`), `COPY`s the new rows, checks the counts, rebuilds the summary, and sets `ingest.ingestion.silver_status`. `ingest.silver_run` keeps every run with its reviewer and the mapping they approved, including, per row, whether it was the recommendation or a manual choice, and every method's vote.
+
+- **Removal-only runs:** a run with no loads selected is allowed. It only removes the rows of loads replaced in Bronze.
+- **Stale approvals are refused** with `409 plan_changed`. Approval (and the load, under its lock) checks that the loads are still eligible (not replaced in Bronze, not loaded by another run), that the bronze tables' columns are unchanged, and that every mapped Silver column still exists.
+- **No database connection is held during matching.** Bronze rows, the saved mapping and the LOTL are read once and the connection is released before word2vec or the AI is consulted. Mapping edits re-check quality against those rows in memory.
+
+**Word2vec vectors:** Google's pretrained Google News vectors (1.7 GB, gzipped) go in `backend/models/`, which is git-ignored. Download them from the gensim-data releases on GitHub (`word2vec-google-news-300.gz`) and set `AHI_WORD2VEC_PATH=backend/models/word2vec-google-news-300.gz`.
+
+**Test data:** 10 workbooks covering every scenario are in `enhancements/test-files/`; its README gives the order and the expected outcome of each.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/silver/eligible` | Loads to process, plus replaced loads whose rows will be removed |
+| `POST /api/silver/runs` | Suggest a mapping and a dry-run quality report `{ingestion_ids}` |
+| `PATCH /api/silver/runs/{id}/mapping` | Change one row `{table_name, bronze_column, silver_column, ignored}` |
+| `POST /api/silver/runs/{id}/approve` | `{reviewed_by}`; returns 409 until every column is decided |
+| `GET` / `PATCH /api/silver/mapping` | Saved mapping, editable |
+| `GET /api/silver/summary`, `GET /api/silver/catalog` | Summary table; the Silver column list and which matchers are active |
 
 ## Outputs
 
@@ -432,15 +558,25 @@ memory and never names a file, so swapping the corpus cannot break what they pin
 clean.py                 entry point (no PYTHONPATH needed)
 requirements.txt         Python dependencies (cleaner + API)
 pytest.ini               runs backend/tests from the project root
-frontend/                React + Vite UI (Configuration → Run → Review & Results)
+frontend/                React + Vite UI (Configure → Run → Results → Ingest → Silver)
+.env.example             bronze database settings template (copy to .env)
+design-system/           UI design system (MASTER.md): tokens, type, copy rules
+enhancements/            AHI scenario documents (File → Bronze, Bronze → Silver)
 backend/
-  api/                   FastAPI service: routes, validation, jobs, exports
+  api/                   FastAPI service: routes, validation, jobs, exports, bronze ingest
+  migrations/            SQL for the bronze control tables, applied on first use
   legacy/                the original six POC workbooks
   sample_files_uncleaned/  the scenario corpus (git-ignored; supply your own)
   tests/                 cleaner and API test suites
   tools/scorecard.py     scores the cleaner against every scenario workbook
   tools/benchmark.py     single-sheet throughput and executor comparison
   tools/ablation.py      disables each signal in turn to show what is load-bearing
+  src/ahi_bronze/        File → Bronze rules, pure: naming, periods, schema cases, planner
+  src/ahi_silver/        Bronze → Silver rules, pure: voting matcher, AI prompt, cleansing, profit center, hashes
+  config/silver_columns.csv  the Silver target columns (DRT draft)
+  models/                word2vec vectors (git-ignored)
+  tools/make_silver_test_files.py  writes the 10 scenario workbooks
+  tools/seed_lotl.py     loads a LOTL CSV
   src/ahi_clean/
     signals.py        scoring primitives (fill, uniqueness, type profile, coverage, contrast)
     typing_utils.py   fine-grained type inference

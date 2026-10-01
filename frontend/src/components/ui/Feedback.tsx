@@ -234,17 +234,18 @@ export function StatTile({
   loading?: boolean;
 }) {
   const iconTone = {
+    // Colour is kept for states that need attention; everything else stays neutral.
     neutral: "bg-ink-100 text-ink-600",
-    brand: "bg-brand-50 text-brand-600",
-    success: "bg-emerald-50 text-emerald-600",
-    warning: "bg-amber-50 text-amber-600",
-    info: "bg-sky-50 text-sky-600",
-    danger: "bg-danger-50 text-danger-600",
+    brand: "bg-ink-100 text-ink-600",
+    success: "bg-ink-100 text-emerald-700",
+    warning: "bg-amber-50 text-amber-700",
+    info: "bg-ink-100 text-ink-600",
+    danger: "bg-danger-50 text-danger-700",
   }[tone];
   return (
-    <div className={clsx("flex items-center gap-3 rounded-xl border border-ink-200 bg-white px-4 py-3.5", className)}>
+    <div className={clsx("flex items-center gap-3 rounded-lg border border-ink-200 bg-white px-4 py-3", className)}>
       {icon && (
-        <div className={clsx("flex h-10 w-10 shrink-0 items-center justify-center rounded-lg [&>svg]:h-[18px] [&>svg]:w-[18px]", iconTone)} aria-hidden>
+        <div className={clsx("flex h-9 w-9 shrink-0 items-center justify-center rounded-md [&>svg]:h-4 [&>svg]:w-4", iconTone)} aria-hidden>
           {icon}
         </div>
       )}

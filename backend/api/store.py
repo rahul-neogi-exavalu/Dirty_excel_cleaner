@@ -39,6 +39,8 @@ class Upload:
     kind: str  # "workbook" | "delimited"
     sheets: list[dict]
     uploaded_at: float = field(default_factory=time.time)
+    # Content hash, so the bronze step can tell a re-sent file from a new one.
+    sha256: str = ""
 
 
 @dataclass
@@ -103,6 +105,8 @@ class Job:
     audit_path: Path | None = None
     directory: Path | None = None
     batch_id: str | None = None
+    # The source file's content hash, copied from the upload when the job is created.
+    source_sha256: str = ""
 
     def output(self, output_id: str) -> OutputRecord:
         for record in self.outputs:

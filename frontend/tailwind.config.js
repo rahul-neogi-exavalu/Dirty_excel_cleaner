@@ -1,9 +1,9 @@
 /** Exavalu Data Cleaning Studio design tokens.
  *
- * Forest green marks the primary action, the active step and focus; errors use the
- * separate danger scale, and everything else sits on a green-tinted neutral scale.
- * Spacing uses Tailwind's 4px scale restricted in practice to 1,2,3,4,6,8,10,12
- * (4/8/12/16/24/32/40/48 px).
+ * Neutral first: cool greys carry the interface, one cobalt accent marks the primary
+ * action, the active step and focus. Green, amber and red mean success, warning and
+ * error only -- never decoration -- so a status reads at a glance. The Exavalu mark is
+ * the only place the brand red appears. See design-system/exavalu-data-cleaning-studio.
  */
 /** @type {import('tailwindcss').Config} */
 export default {
@@ -11,18 +11,18 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Forest green: primary action, active step, focus and selection.
+        // Cobalt: primary action, active step, focus and selection. ~70% saturation.
         brand: {
-          50: "#EEF7F1",
-          100: "#D9EFE1",
-          200: "#B4DEC2",
-          300: "#82C59B",
-          400: "#4FA872",
-          500: "#2A8C55",
-          600: "#1D7A46",
-          700: "#17623A",
-          800: "#124D2E",
-          900: "#0D3A23",
+          50: "#EFF4FE",
+          100: "#DCE6FB",
+          200: "#BACDF6",
+          300: "#8CABEE",
+          400: "#5B85E2",
+          500: "#3A69D8",
+          600: "#2556C7",
+          700: "#1E46A3",
+          800: "#1B3A82",
+          900: "#182F64",
         },
         // Errors and failed states only.
         danger: {
@@ -35,20 +35,21 @@ export default {
           700: "#B42318",
           800: "#912018",
         },
-        // Neutrals with a faint green cast so greys sit comfortably beside the brand.
+        // Cool neutral greys, one family throughout.
         ink: {
-          900: "#0F1E17",
-          800: "#1B2B23",
-          700: "#33433A",
-          600: "#4B5A52",
-          500: "#67766D",
-          400: "#97A59C",
-          300: "#C8D3CC",
-          200: "#E1E8E3",
-          100: "#EEF2EF",
-          50: "#F5F8F6",
+          900: "#14171C",
+          800: "#1F242B",
+          700: "#353C45",
+          600: "#4C5562",
+          500: "#67707D",
+          400: "#98A0AB",
+          300: "#C8CDD5",
+          200: "#E2E5EA",
+          100: "#EFF1F4",
+          50: "#F6F7F9",
         },
-        nav: { DEFAULT: "#0E2A1D", raised: "#173B29", line: "#21483A" },
+        // Charcoal sidebar.
+        nav: { DEFAULT: "#15181D", raised: "#1E2228", line: "#2A2F37" },
       },
       fontFamily: {
         display: ["IBM Plex Sans", "ui-sans-serif", "system-ui", "Segoe UI", "sans-serif"],
@@ -64,11 +65,11 @@ export default {
         section: ["18px", { lineHeight: "26px", fontWeight: "600" }],
         page: ["28px", { lineHeight: "36px", fontWeight: "600", letterSpacing: "-0.01em" }],
       },
-      borderRadius: { DEFAULT: "6px", md: "8px", lg: "10px", xl: "14px", "2xl": "18px" },
+      borderRadius: { DEFAULT: "5px", md: "6px", lg: "7px", xl: "9px", "2xl": "12px" },
       boxShadow: {
-        card: "0 1px 2px rgba(15, 30, 23, 0.03), 0 4px 16px -8px rgba(15, 30, 23, 0.06)",
-        pop: "0 12px 32px rgba(15, 30, 23, 0.14), 0 2px 6px rgba(15, 30, 23, 0.06)",
-        focus: "0 0 0 3px rgba(29, 122, 70, 0.25)",
+        card: "0 1px 2px rgba(20, 23, 28, 0.04)",
+        pop: "0 12px 32px -4px rgba(20, 23, 28, 0.16), 0 2px 6px rgba(20, 23, 28, 0.06)",
+        focus: "0 0 0 3px rgba(37, 86, 199, 0.28)",
       },
       keyframes: {
         "fade-in": { from: { opacity: 0, transform: "translateY(4px)" }, to: { opacity: 1, transform: "none" } },

@@ -13,7 +13,7 @@ import type { BatchStatus, JobResults, JobStatus, OutputSummary, Workbook } from
 import { useToast } from "../components/ui/Feedback";
 import { plural } from "../lib/format";
 
-export type Page = "configuration" | "run" | "results";
+export type Page = "configuration" | "run" | "results" | "ingest" | "silver";
 
 const STORAGE_KEY = "exavalu.workflow.v2";
 const POLL_MS = 700;
@@ -444,9 +444,9 @@ export function useWorkflow(): Workflow {
   return context;
 }
 
-/* ---- hash routing: three pages, deep-linkable, back button works ---- */
+/* ---- hash routing: five pages, deep-linkable, back button works ---- */
 
-const PAGES: Page[] = ["configuration", "run", "results"];
+const PAGES: Page[] = ["configuration", "run", "results", "ingest", "silver"];
 
 export const NavContext = createContext<(page: Page) => void>(() => {});
 export const useNavigate = () => useContext(NavContext);

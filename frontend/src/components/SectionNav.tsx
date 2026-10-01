@@ -71,7 +71,7 @@ export function SectionNav({ sections, label }: { sections: NavSection[]; label:
 
   return (
     <nav ref={nav} aria-label={label} className="sticky top-14 z-20 -mx-4 mb-6 bg-ink-50/90 px-4 py-3 backdrop-blur-md md:-mx-10 md:px-10">
-      <ol className="flex gap-1 overflow-x-auto rounded-xl border border-ink-200/80 bg-white/80 p-1 shadow-card scroll-thin">
+      <ol className="flex gap-1 overflow-x-auto rounded-lg border border-ink-200 bg-ink-100 p-1 scroll-thin">
         {sections.map((section) => {
           const selected = section.id === active;
           return (
@@ -83,10 +83,10 @@ export function SectionNav({ sections, label }: { sections: NavSection[]; label:
                 className={clsx(
                   "relative flex w-full items-center justify-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-body font-medium transition-colors",
                   "focus-visible:outline-none focus-visible:shadow-focus",
-                  selected ? "bg-brand-600 text-white shadow-sm" : "text-ink-600 hover:bg-ink-100 hover:text-ink-900",
+                  selected ? "bg-white text-ink-900 shadow-card ring-1 ring-ink-200" : "text-ink-600 hover:bg-white/60 hover:text-ink-900",
                 )}
               >
-                <span className={clsx("[&>svg]:h-[18px] [&>svg]:w-[18px]", selected ? "text-brand-100" : "text-ink-400")} aria-hidden>
+                <span className={clsx("[&>svg]:h-[18px] [&>svg]:w-[18px]", selected ? "text-brand-600" : "text-ink-400")} aria-hidden>
                   {section.icon}
                 </span>
                 <span className="truncate">
@@ -94,7 +94,7 @@ export function SectionNav({ sections, label }: { sections: NavSection[]; label:
                   <span className="lg:hidden">{section.shortLabel ?? section.label}</span>
                 </span>
                 {section.done && !section.attention && (
-                  <span className={clsx("hidden h-4 w-4 shrink-0 items-center sm:flex justify-center rounded-full", selected ? "bg-white/20 text-white" : "bg-brand-100 text-brand-600")} aria-label="complete">
+                  <span className={clsx("hidden h-4 w-4 shrink-0 items-center sm:flex justify-center rounded-full", "bg-ink-200 text-ink-700")} aria-label="complete">
                     <Check className="h-3 w-3" strokeWidth={3} />
                   </span>
                 )}

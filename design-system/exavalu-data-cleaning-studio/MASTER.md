@@ -17,21 +17,26 @@
 
 The generated output below is the baseline the tool produced. Where it conflicts with this section, **this section wins**. The source of truth for values is `frontend/tailwind.config.js` and `frontend/src/index.css`.
 
-### Palette: forest green instead of teal
-The generator proposed teal `#0D9488`. The app keeps its **forest green** brand scale instead. It's a close sibling of teal, it reads as "spreadsheet" next to Excel, and it already meets contrast.
+### Palette: neutral first, one cobalt accent
+Revised after review: the earlier forest-green brand was used for the sidebar, buttons, tints and greys, so "success" green had nothing to contrast with. The interface is now **neutral first**, closer to enterprise systems such as Carbon (see `design-system/reference/carbon-enterprise.DESIGN.md`, from awesome-design-md). The ui-ux-pro-max palettes for an analytics dashboard (deep blue on cool neutral) and for B2B (near-black plus blue) agree.
 
 | Role | Token | Hex |
 |------|-------|-----|
-| Primary action / active / focus | `brand-600` | `#1D7A46` |
-| Primary hover | `brand-700` | `#17623A` |
-| Tint (selected rows, chips) | `brand-50` | `#EEF7F1` |
-| Sidebar | `nav` | `#0E2A1D` |
-| Text strong / body / muted | `ink-900` / `ink-800` / `ink-500` | `#0F1E17` / `#1B2B23` / `#67766D` |
-| Page background | `ink-50` | `#F5F8F6` |
-| Border | `ink-200` | `#E1E8E3` |
+| Primary action / current step / focus / selection | `brand-600` | `#2556C7` (cobalt, ~70% saturation) |
+| Primary hover / pressed | `brand-700` / `brand-800` | `#1E46A3` / `#1B3A82` |
+| Selection tint | `brand-50` | `#EFF4FE` |
+| Sidebar (charcoal) | `nav` | `#15181D` |
+| Text strong / body / muted | `ink-900` / `ink-800` / `ink-500` | `#14171C` / `#1F242B` / `#67707D` |
+| Page background | `ink-50` | `#F6F7F9` |
+| Border | `ink-200` | `#E2E5EA` |
 | Danger (errors only) | `danger-600` | `#D92D20` |
 
-Keep semantic colors (Tailwind `emerald` = success, `amber` = warning, `sky` = info, `danger` = error) separate from the brand. There is no orange CTA accent, because the primary green is the only call-to-action color.
+**Rules:**
+- **Colour means state.** `emerald` is success, `amber` warning, `danger` error. Never use them for decoration. Icon tiles, file icons, section icons and completed steps stay neutral.
+- **One accent.** Cobalt marks the primary action, the current step, focus and selection, and nothing else. A screen should have about one blue thing that asks to be clicked.
+- **Brand red lives only in the Exavalu mark**, on a white tile in the sidebar. It is never used for UI, so it can't be mistaken for an error.
+- **No gradients, glows or tinted page backgrounds.** Depth comes from hairline borders (`ink-200`) and one subtle shadow.
+- **Shape:** radii of 5–9 px, tighter on inner elements. Badges are square-cornered, not pills.
 
 ### Typography: IBM Plex Sans + JetBrains Mono
 Roboto (generated) was replaced with pairings from the typography database: **IBM Plex Sans** ("Financial Trust": enterprise, finance) for headings and UI, and **JetBrains Mono** ("Developer Mono") for codes, datatypes and step numbers.
@@ -44,11 +49,11 @@ Roboto (generated) was replaced with pairings from the typography database: **IB
 | `text-body` | 14/20 | Default UI text |
 | `text-table` | 13/20 | Data tables |
 | `text-caption` | 12/16 | Meta, hints |
-| `.label-caps` | 12, uppercase, tracked | Field/group labels ("Summary", "Pipeline") |
+| `.label-caps` | 12, semibold, sentence case | Field/group labels ("Summary", "Pipeline"). Capitals only in the `STEP 0n` eyebrow (mono). |
 | `.num` | tabular-nums | Every count, size, percentage |
 
 ### Icons
-Lucide only (`lucide-react`), 16–18px in UI and 14px inside badges. Decorative icons get `aria-hidden`, and icon-only buttons get `aria-label`. Never use emoji.
+Lucide only (`lucide-react`) at one stroke weight (1.75, set globally in `index.css`), 16–18px in UI and 14px inside badges. Decorative icons get `aria-hidden`, and icon-only buttons get `aria-label`. Never use emoji.
 
 ### Copy rules ("less writing")
 - Page titles are one word: **Configure / Run / Results**. Each subtitle is one short line, five to seven words.
@@ -60,7 +65,7 @@ Lucide only (`lucide-react`), 16–18px in UI and 14px inside badges. Decorative
 
 ### Layout patterns
 - Shell: a dark green sidebar (workflow steps and workbook card), a sticky 56px top bar with a breadcrumb, and content capped at 1320px.
-- Page header: eyebrow (`STEP 0n`), title and one-line subtitle on the left, the 3-step stepper on the right, then a hairline divider.
+- Page header: eyebrow (`STEP 0n`), title and one-line subtitle on the left, the 4-step stepper on the right (a step is ticked only when its work is actually done), then a hairline divider.
 - `SectionCard`: an icon tile plus title in a bordered header row, then the body. Secondary meta (limits, counts) sits as a pill on the right.
 - `StatTile` rows for key numbers. The label should be one word.
 - Sticky right-hand summary panel on the Configure page (xl+).

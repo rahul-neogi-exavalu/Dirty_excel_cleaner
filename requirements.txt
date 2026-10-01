@@ -6,3 +6,10 @@ fastapi==0.141.1
 uvicorn[standard]==0.54.0
 python-multipart
 httpx
+psycopg[binary]>=3.2
+psycopg-pool>=3.2
+python-dotenv>=1.0
+rapidfuzz>=3.9
+wordninja>=2.0
+openai>=3.0
+google-genai>=1.20

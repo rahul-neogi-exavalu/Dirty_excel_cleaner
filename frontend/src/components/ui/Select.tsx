@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { Check, ChevronDown } from "lucide-react";
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useId, useState, type ReactNode } from "react";
 import { PopoverPanel, usePopover } from "./Overlay";
 
 export interface SelectOption<T extends string> {
@@ -10,6 +10,8 @@ export interface SelectOption<T extends string> {
   icon?: ReactNode;
   meta?: ReactNode;
   disabled?: boolean;
+  /** A heading is shown wherever the group changes from the previous option's. */
+  group?: string;
 }
 
 /** Accessible single-select listbox: arrow keys, Home/End, Enter, Escape, type-ahead. */
@@ -133,33 +135,40 @@ export function Select<T extends string>({
         {options.length === 0 && <p className="px-3 py-6 text-center text-body text-ink-500">No options available</p>}
         {options.map((option, index) => {
           const isSelected = option.value === value;
+          const heading = option.group && option.group !== options[index - 1]?.group ? option.group : null;
           return (
-            <div
-              key={option.value}
-              id={`${id}-opt-${index}`}
-              data-index={index}
-              role="option"
-              aria-selected={isSelected}
-              aria-disabled={option.disabled || undefined}
-              onMouseEnter={() => setActive(index)}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => choose(index)}
-              className={clsx(
-                "flex cursor-pointer items-start gap-2.5 rounded px-3 py-2",
-                index === active && "bg-ink-100",
-                option.disabled && "cursor-not-allowed opacity-50",
+            <Fragment key={option.value}>
+              {heading && (
+                <div role="presentation" className={clsx("label-caps px-3 pb-1 pt-2", index > 0 && "mt-1 border-t border-ink-100")}>
+                  {heading}
+                </div>
               )}
-            >
-              {option.icon && <span className="mt-0.5 shrink-0 text-ink-500 [&>svg]:h-4 [&>svg]:w-4">{option.icon}</span>}
-              <span className="min-w-0 flex-1">
-                <span className={clsx("block truncate text-body", isSelected ? "font-semibold text-ink-900" : "text-ink-800")}>
-                  {option.label}
+              <div
+                id={`${id}-opt-${index}`}
+                data-index={index}
+                role="option"
+                aria-selected={isSelected}
+                aria-disabled={option.disabled || undefined}
+                onMouseEnter={() => setActive(index)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => choose(index)}
+                className={clsx(
+                  "flex cursor-pointer items-start gap-2.5 rounded px-3 py-2",
+                  index === active && "bg-ink-100",
+                  option.disabled && "cursor-not-allowed opacity-50",
+                )}
+              >
+                {option.icon && <span className="mt-0.5 shrink-0 text-ink-500 [&>svg]:h-4 [&>svg]:w-4">{option.icon}</span>}
+                <span className="min-w-0 flex-1">
+                  <span className={clsx("block truncate text-body", isSelected ? "font-semibold text-ink-900" : "text-ink-800")}>
+                    {option.label}
+                  </span>
+                  {option.description && <span className="mt-0.5 block text-caption text-ink-500">{option.description}</span>}
                 </span>
-                {option.description && <span className="mt-0.5 block text-caption text-ink-500">{option.description}</span>}
-              </span>
-              {option.meta && <span className="shrink-0">{option.meta}</span>}
-              <Check className={clsx("mt-0.5 h-4 w-4 shrink-0 text-brand-600", !isSelected && "invisible")} aria-hidden />
-            </div>
+                {option.meta && <span className="shrink-0">{option.meta}</span>}
+                <Check className={clsx("mt-0.5 h-4 w-4 shrink-0 text-brand-600", !isSelected && "invisible")} aria-hidden />
+              </div>
+            </Fragment>
           );
         })}
       </PopoverPanel>

@@ -2,7 +2,16 @@ import type {
   ApiErrorBody,
   BatchFileRequest,
   BatchStatus,
+  BronzeStatus,
+  BronzeTable,
   ColumnProfile,
+  EligibleLoad,
+  CleanupLoad,
+  IngestPlan,
+  SavedMapping,
+  SilverCatalog,
+  SilverRun,
+  SilverSummaryRow,
   JobResults,
   JobStatus,
   OutputSummary,
@@ -137,6 +146,32 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ columns }),
     }),
+
+  bronzeStatus: () => request<BronzeStatus>("/api/bronze/status"),
+  bronzeTables: () => request<BronzeTable[]>("/api/bronze/tables"),
+  createPlan: (job_ids: string[], batch_id: string | null) =>
+    request<IngestPlan>("/api/bronze/plans", { method: "POST", body: JSON.stringify({ job_ids, batch_id }) }),
+  getPlan: (id: string) => request<IngestPlan>(`/api/bronze/plans/${id}`),
+  updatePlanFile: (id: string, jobId: string, change: { source_system?: string | null; period_start?: string | null; period_end?: string | null }) =>
+    request<IngestPlan>(`/api/bronze/plans/${id}/files/${jobId}`, { method: "PATCH", body: JSON.stringify(change) }),
+  updatePlanItem: (id: string, key: string, change: { table_name?: string | null; action?: string | null }) =>
+    request<IngestPlan>(`/api/bronze/plans/${id}/items/${encodeURIComponent(key)}`, { method: "PATCH", body: JSON.stringify(change) }),
+  approvePlan: (id: string, reviewed_by: string, confirmed: string[]) =>
+    request<IngestPlan>(`/api/bronze/plans/${id}/approve`, { method: "POST", body: JSON.stringify({ reviewed_by, confirmed }) }),
+
+  silverCatalog: () => request<SilverCatalog>("/api/silver/catalog"),
+  silverEligible: () => request<{ loads: EligibleLoad[]; cleanup: CleanupLoad[] }>("/api/silver/eligible"),
+  createSilverRun: (ingestion_ids: string[]) =>
+    request<SilverRun>("/api/silver/runs", { method: "POST", body: JSON.stringify({ ingestion_ids }) }),
+  getSilverRun: (id: string) => request<SilverRun>(`/api/silver/runs/${id}`),
+  editSilverRunMapping: (id: string, change: { table_name: string; bronze_column: string; silver_column: string | null; ignored: boolean }) =>
+    request<SilverRun>(`/api/silver/runs/${id}/mapping`, { method: "PATCH", body: JSON.stringify(change) }),
+  approveSilverRun: (id: string, reviewed_by: string) =>
+    request<SilverRun>(`/api/silver/runs/${id}/approve`, { method: "POST", body: JSON.stringify({ reviewed_by }) }),
+  silverMapping: () => request<SavedMapping[]>("/api/silver/mapping"),
+  editSilverMapping: (row: { pc_id: string; bronze_table_name: string; bronze_column_name: string; silver_column_name: string | null }) =>
+    request<SavedMapping>("/api/silver/mapping", { method: "PATCH", body: JSON.stringify(row) }),
+  silverSummary: () => request<SilverSummaryRow[]>("/api/silver/summary"),
 };
 
 export const exportUrls = {

@@ -1,7 +1,9 @@
 import { AppShell } from "./components/layout/Layout";
 import { ConfigurationPage } from "./pages/ConfigurationPage";
+import { IngestPage } from "./pages/IngestPage";
 import { ResultsPage } from "./pages/ResultsPage";
 import { RunPage } from "./pages/RunPage";
+import { SilverPage } from "./pages/SilverPage";
 import { NavContext, usePage } from "./state/workflow";
 
 export default function App() {
@@ -12,6 +14,8 @@ export default function App() {
         {page === "configuration" && <ConfigurationPage />}
         {page === "run" && <RunPage />}
         {page === "results" && <ResultsPage />}
+        {page === "ingest" && <IngestPage />}
+        {page === "silver" && <SilverPage />}
       </AppShell>
     </NavContext.Provider>
   );

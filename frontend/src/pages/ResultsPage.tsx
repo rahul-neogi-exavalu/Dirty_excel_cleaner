@@ -49,7 +49,16 @@ export function ResultsPage() {
   const jobId = succeeded.some((job) => job.id === flow.resultsJobId) ? flow.resultsJobId : succeeded[0]?.id ?? null;
 
   const header = (
-    <PageHeader page="results" title="Results" description="Review, refine and export cleaned data." />
+    <PageHeader
+      page="results"
+      title="Results"
+      description="Review, refine and export cleaned data."
+      actions={jobId && (
+        <Button variant="primary" iconRight={<ArrowRight />} onClick={() => navigate("ingest")}>
+          Ingest
+        </Button>
+      )}
+    />
   );
 
   if (!jobId) {
@@ -226,7 +235,7 @@ function ResultsContent({ results }: { results: JobResults }) {
 
       {/* Completion banner */}
       <section className="card flex flex-col gap-4 p-5 md:flex-row md:items-center md:p-6" aria-labelledby="done-title">
-        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200" aria-hidden>
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-emerald-50 text-emerald-700" aria-hidden>
           <FileCheck2 className="h-6 w-6" />
         </div>
         <div className="min-w-0 flex-1">
@@ -336,8 +345,8 @@ function OutputStats({
           className={clsx(tile, issues > 0 && "border-danger-200")}
           icon={issues ? <ShieldAlert /> : <ShieldCheck />}
           tone={issues ? "danger" : "success"}
-          label={issues ? "Issues" : "Checks passed"}
-          value={issues}
+          label={issues ? "Issues" : "Checks"}
+          value={issues || "Passed"}
         />
       </button>
     </div>
@@ -503,7 +512,7 @@ function ExportSection({
     <section className="card p-5 md:p-6" aria-labelledby="export-title">
       <div className="flex flex-col gap-5 xl:flex-row xl:items-start">
         <div className="flex items-start gap-3 xl:w-[320px] xl:shrink-0">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-600" aria-hidden>
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-ink-50 text-ink-600" aria-hidden>
             <Download className="h-5 w-5" />
           </div>
           <div>
@@ -633,7 +642,7 @@ function BatchExport({ batch }: { batch: BatchStatus }) {
 
   return (
     <section className="card flex flex-col gap-4 p-5 md:flex-row md:items-center md:p-6" aria-labelledby="batch-export-title">
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-600" aria-hidden>
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-ink-50 text-ink-600" aria-hidden>
         <Archive className="h-5 w-5" />
       </div>
       <div className="min-w-0 flex-1">

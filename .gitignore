@@ -59,3 +59,10 @@ cleaned/
 .workspace/
 frontend/node_modules/
 frontend/dist/
+
+# --- Local secrets -----------------------------------------------------------
+# Database credentials. .env.example is the committed template.
+.env
+
+# --- Large model files (word2vec vectors) ------------------------------------
+backend/models/

@@ -308,7 +308,7 @@ function UploadSection() {
             dragging ? "border-brand-500 bg-brand-50" : "border-ink-200 bg-grid hover:border-brand-300",
           )}
         >
-          <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-brand-100 text-brand-700 ring-8 ring-brand-50" aria-hidden>
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg border border-ink-200 bg-white text-ink-600 shadow-card" aria-hidden>
             <Upload className="h-5 w-5" />
           </div>
           <div className="min-w-0 flex-1">
@@ -355,7 +355,7 @@ function LoadedFileRow({ entry }: { entry: FileEntry }) {
 
   return (
     <li className={clsx("flex animate-fade-in items-center gap-3 px-4 py-3", focused ? "bg-brand-50/40" : "bg-white")}>
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-white" aria-hidden>
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-ink-50 text-ink-600" aria-hidden>
         <FileSpreadsheet className="h-4 w-4" />
       </div>
       <button type="button" onClick={focus} className="group min-w-0 flex-1 rounded text-left focus-visible:outline-none focus-visible:shadow-focus">
@@ -737,7 +737,7 @@ function SummaryPanel({ onContinue }: { onContinue: () => void }) {
               {row.ok ? <Check className="h-3 w-3" strokeWidth={3} /> : <span className="h-1.5 w-1.5 rounded-full bg-ink-400" />}
             </span>
             <div className="min-w-0 flex-1">
-              <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-500">{row.label}</dt>
+              <dt className="text-caption text-ink-500">{row.label}</dt>
               <dd className={clsx("mt-0.5 text-body", row.ok ? "font-medium text-ink-900" : "text-ink-500")}>{row.value}</dd>
             </div>
           </div>
