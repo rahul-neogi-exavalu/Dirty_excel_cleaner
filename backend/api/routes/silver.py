@@ -22,13 +22,19 @@ class MappingEdit(BaseModel):
     bronze_column: str
     silver_column: str | None = None
     ignored: bool = False
+    # More Silver columns the bronze column also loads into (the whole list). Sent alone,
+    # it leaves the main choice as it is.
+    also: list[str] | None = None
 
 
 class SavedMappingEdit(BaseModel):
-    pc_id: str
-    bronze_table_name: str
-    bronze_column_name: str
+    """One DRT column mapping row, found by profit center, source column and its
+    current Silver column (a source column can have two rows), and its new target."""
+
+    profit_center: str
+    pc_column: str
     silver_column_name: str | None = None
+    new_silver_column_name: str | None = None
 
 
 class RunApprove(BaseModel):
@@ -46,7 +52,7 @@ def run_out(run: Run) -> dict:
         "reviewed_by": run.reviewed_by,
         "notes": run.notes,
         "cleanup": run.cleanup,
-        "lotl_rows": len(run.lotl.by_pc_id),
+        "lotl_rows": run.lotl.rows,
         "blockers": silver_service.problems(run),
         "result": run.result,
         "created_at": run.created_at,
@@ -63,6 +69,7 @@ def run_out(run: Run) -> dict:
                     {
                         "bronze_column": s.bronze_column,
                         "silver_column": s.silver_column,
+                        "also": s.also,
                         "ignored": s.ignored,
                         "selection": s.selection,
                         # Methods that voted for the current choice.
@@ -96,7 +103,9 @@ def run_out(run: Run) -> dict:
 def silver_catalog() -> dict:
     return {
         "file": config.SILVER_COLUMNS_FILE.name,
+        # Every silver_detail column; role "mapped" ones are what a bronze column can map to.
         "columns": [vars(column) for column in silver_service.catalog()],
+        "aggregate_columns": [column.name for column in silver_service.aggregate_catalog()],
         "semantic": bool(config.WORD2VEC_PATH),
         "ai": config.AI_ENABLED,
         # Provider and model only, never a key.
@@ -123,7 +132,7 @@ def get_run(run_id: str) -> dict:
 async def edit_run_mapping(run_id: str, request: MappingEdit) -> dict:
     run = await run_in_threadpool(
         silver_service.update_mapping, run_id, request.table_name, request.bronze_column,
-        request.silver_column, request.ignored,
+        request.silver_column, request.ignored, request.model_fields_set, request.also,
     )
     return run_out(run)
 
@@ -141,11 +150,11 @@ async def saved_mapping() -> list[dict]:
 @router.patch("/mapping")
 async def edit_saved_mapping(request: SavedMappingEdit) -> dict:
     return await run_in_threadpool(
-        silver_service.edit_saved_mapping, request.pc_id, request.bronze_table_name,
-        request.bronze_column_name, request.silver_column_name,
+        silver_service.edit_saved_mapping, request.profit_center, request.pc_column,
+        request.silver_column_name, request.new_silver_column_name,
     )
 
 
-@router.get("/summary")
-async def summary() -> list[dict]:
-    return await run_in_threadpool(silver_service.summary)
+@router.get("/aggregate")
+async def aggregate() -> list[dict]:
+    return await run_in_threadpool(silver_service.aggregate)

@@ -105,9 +105,16 @@ def identifier(name: str) -> str:
     return f"{name[: MAX_IDENTIFIER - 9].rstrip('_')}_{digest}"
 
 
-def column_names(names: list[str]) -> list[str]:
+# Columns every bronze table carries besides the file's own (see bronze_service), and the
+# internal lineage columns. A file column that would take one of these names is renamed
+# (file_name -> file_name_2), so CREATE TABLE never sees a duplicate.
+SYSTEM_COLUMNS = ("pc_id", "file_date", "division_name", "file_name", "processing_date")
+LINEAGE_COLUMNS = ("_ingestion_id", "_source_file", "_source_sheet", "_ingested_at")
+
+
+def column_names(names: list[str], reserved=SYSTEM_COLUMNS + LINEAGE_COLUMNS) -> list[str]:
     """Column identifiers for the bronze table, unique and within the length limit."""
-    used: set[str] = set()
+    used: set[str] = set(reserved)
     result = []
     for index, name in enumerate(names):
         base = identifier(name) if slug(name) else f"column_{index + 1}"

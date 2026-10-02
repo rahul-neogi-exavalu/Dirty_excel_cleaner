@@ -127,9 +127,17 @@ def _flag(name: str, default: str) -> bool:
 SILVER_SCHEMA = os.environ.get("AHI_SILVER_SCHEMA", "silver").strip()
 # The AHI doc's LOTL (pc_id -> legacy_office_name -> profit center number). Until the
 # real one exists this is a placeholder in the control schema, seeded for testing.
-LOTL_TABLE = os.environ.get("AHI_LOTL_TABLE", "").strip() or f"{CONTROL_SCHEMA}.lotl"
-# The Silver target columns (DRT). A draft ships; the business replaces it.
+# Empty: <control schema>.lotl, resolved when used (the control schema can be overridden).
+LOTL_TABLE = os.environ.get("AHI_LOTL_TABLE", "").strip()
+# The silver_detail columns, exactly as the business's silver_schema lists them.
 SILVER_COLUMNS_FILE = Path(os.environ.get("AHI_SILVER_COLUMNS_FILE", ROOT / "config" / "silver_columns.csv"))
+# The silver_aggregate columns, exactly as the business's silver_aggregate_schema lists them.
+SILVER_AGGREGATE_COLUMNS_FILE = Path(os.environ.get(
+    "AHI_SILVER_AGGREGATE_COLUMNS_FILE", ROOT / "config" / "silver_aggregate_columns.csv"))
+# The business's reference workbooks (division mapping, LOTL, DRT column mapping).
+REFERENCE_DIR = Path(os.environ.get("AHI_REFERENCE_DIR") or PROJECT_ROOT / "assets")
+if not REFERENCE_DIR.is_absolute():
+    REFERENCE_DIR = PROJECT_ROOT / REFERENCE_DIR
 # Thresholds for a fuzzy or word2vec vote.
 MATCH_FUZZY_MIN = float(os.environ.get("AHI_MATCH_FUZZY_MIN") or "85")
 MATCH_SEMANTIC_MIN = float(os.environ.get("AHI_MATCH_SEMANTIC_MIN") or "0.72")

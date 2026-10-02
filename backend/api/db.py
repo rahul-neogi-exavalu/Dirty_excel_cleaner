@@ -49,6 +49,11 @@ def pool():
         if not _migrated:
             try:
                 migrate(_pool)
+                # The business's reference tables, filled from assets/ while they are empty.
+                from .services import reference_service
+
+                with _pool.connection() as conn:
+                    reference_service.seed_control(conn)
             except Exception as error:
                 if _is_connection_error(error):
                     raise unreachable(error) from error

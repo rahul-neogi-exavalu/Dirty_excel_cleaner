@@ -2,12 +2,14 @@ import clsx from "clsx";
 import {
   ArrowRight,
   BookCheck,
+  Building2,
   Check,
   Columns3,
   Database,
   Info,
   Layers3,
   ListChecks,
+  Plus,
   RefreshCw,
   Rows3,
   ServerOff,
@@ -19,6 +21,7 @@ import {
   Trash2,
   TriangleAlert,
   UserCheck,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api/client";
@@ -26,19 +29,19 @@ import type {
   BronzeStatus,
   CleanupLoad,
   EligibleLoad,
+  DrtMapping,
   MatchMethod,
-  SavedMapping,
+  SilverAggregateRow,
   SilverCatalog,
   SilverCandidate,
   SilverMappingRow,
   SilverRun,
-  SilverSummaryRow,
   SilverTableReview,
   SilverVote,
 } from "../api/types";
 import { PageHeader, SectionCard } from "../components/layout/Layout";
 import { Badge } from "../components/ui/Badge";
-import { Button } from "../components/ui/Button";
+import { Button, IconButton } from "../components/ui/Button";
 import { Checkbox, LabeledCheckbox, SearchInput } from "../components/ui/Controls";
 import { Alert, EmptyState, ProgressBar, Skeleton, StatTile, useToast } from "../components/ui/Feedback";
 import { Tooltip } from "../components/ui/Overlay";
@@ -63,12 +66,14 @@ const IGNORE = "__ignore__";
 const POLL_MS = 700;
 const toError = (error: unknown) => (error instanceof ApiError ? error : new ApiError(0, { code: "unknown", message: String(error) }));
 const period = (start: string | null, end: string | null) => (!start ? "—" : start === end || !end ? start : `${start} → ${end}`);
+/** The Silver columns a bronze column can map to (system columns are filled by the pipeline). */
+const targetsOf = (catalog: SilverCatalog) => catalog.columns.filter((column) => column.role !== "system");
 
 export function SilverPage() {
   const [status, setStatus] = useState<BronzeStatus | null>(null);
   const [catalog, setCatalog] = useState<SilverCatalog | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
-  const [tab, setTab] = useState<"run" | "mapping" | "summary">("run");
+  const [tab, setTab] = useState<"run" | "mapping" | "aggregate">("run");
 
   const load = useCallback(() => {
     setError(null);
@@ -104,11 +109,11 @@ export function SilverPage() {
               items={[
                 { id: "run", label: "Run", icon: <ListChecks /> },
                 { id: "mapping", label: "Mapping", icon: <BookCheck /> },
-                { id: "summary", label: "Summary", icon: <Sigma /> },
+                { id: "aggregate", label: "Aggregate", icon: <Sigma /> },
               ]}
             />
             <span className="flex items-center gap-3 text-caption text-ink-500">
-              <span>{catalog.columns.length} Silver columns · {catalog.file}</span>
+              <span title={catalog.file}>{catalog.columns.length} Silver columns · {targetsOf(catalog).length} mappable</span>
               <span className={clsx("inline-flex items-center gap-1", catalog.semantic ? "text-ink-600" : "text-ink-400")}>
                 <span className={clsx("h-1.5 w-1.5 rounded-full", catalog.semantic ? "bg-emerald-500" : "bg-ink-300")} aria-hidden />word2vec
               </span>
@@ -123,8 +128,8 @@ export function SilverPage() {
           <TabPanel idPrefix="silver" id="mapping" active={tab === "mapping"}>
             {tab === "mapping" && <MappingView catalog={catalog} />}
           </TabPanel>
-          <TabPanel idPrefix="silver" id="summary" active={tab === "summary"}>
-            {tab === "summary" && <SummaryView />}
+          <TabPanel idPrefix="silver" id="aggregate" active={tab === "aggregate"}>
+            {tab === "aggregate" && <AggregateView />}
           </TabPanel>
         </div>
       )}
@@ -248,7 +253,7 @@ function EligibleLoads({
       )}
       <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
       <div className="relative overflow-x-auto scroll-thin">
-        <table className="w-full min-w-[680px] border-collapse text-table">
+        <table className="w-full min-w-[820px] border-collapse text-table">
           <caption className="sr-only">Bronze loads eligible for Silver</caption>
           <thead className="bg-ink-50">
             <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
@@ -258,6 +263,7 @@ function EligibleLoads({
               </th>
               <th scope="col" className="px-2 py-2.5">Bronze table</th>
               <th scope="col" className="px-3 py-2.5">File</th>
+              <th scope="col" className="px-3 py-2.5">Profit center</th>
               <th scope="col" className="px-3 py-2.5">Period</th>
               <th scope="col" className="px-4 py-2.5 text-right">Rows</th>
             </tr>
@@ -279,6 +285,10 @@ function EligibleLoads({
                   </td>
                   <td className="px-2 py-2.5 font-mono font-medium text-ink-900">{load.table_name}</td>
                   <td className="max-w-[260px] truncate px-3 py-2.5 text-ink-700" title={load.file_name}>{load.file_name}</td>
+                  <td className="px-3 py-2.5">
+                    <span className="block font-mono text-ink-800">{load.pc_id ?? "—"}</span>
+                    {load.division_name && <span className="block text-caption text-ink-500">{load.division_name}</span>}
+                  </td>
                   <td className="num px-3 py-2.5 text-ink-700">{period(load.period_start, load.period_end)}</td>
                   <td className="num px-4 py-2.5 text-right text-ink-800">{formatNumber(load.rows)}</td>
                 </tr>
@@ -322,6 +332,17 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
     }
   };
 
+  const editAlso = async (table: string, column: string, also: string[]) => {
+    setBusy(true);
+    try {
+      onChange(await api.editSilverRunMapping(run.id, { table_name: table, bronze_column: column, also }));
+    } catch (err) {
+      toast({ severity: "error", title: "Change not saved", description: toError(err).body.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const approve = async () => {
     setBusy(true);
     try {
@@ -345,7 +366,7 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
             {run.cleanup.map((item) => `${item.file_name} (${item.table_name})`).join(", ")}
           </Alert>
         )}
-        <TablePicker tables={run.tables} catalog={catalog} busy={busy} onEdit={edit} />
+        <TablePicker tables={run.tables} catalog={catalog} busy={busy} onEdit={edit} onAlso={editAlso} />
       </div>
 
       <aside className="scroll-thin xl:sticky xl:top-[80px] xl:max-h-[calc(100dvh-96px)] xl:self-start xl:overflow-y-auto">
@@ -393,11 +414,13 @@ function TablePicker({
   catalog,
   busy,
   onEdit,
+  onAlso,
 }: {
   tables: SilverTableReview[];
   catalog: SilverCatalog;
   busy: boolean;
   onEdit: (table: string, column: string, value: string) => void;
+  onAlso: (table: string, column: string, also: string[]) => void;
 }) {
   const [name, setName] = useState(tables[0]?.table_name ?? "");
   const table = tables.find((item) => item.table_name === name) ?? tables[0];
@@ -427,6 +450,7 @@ function TablePicker({
       busy={busy}
       picker={picker}
       onEdit={(column, value) => onEdit(table.table_name, column, value)}
+      onAlso={(column, also) => onAlso(table.table_name, column, also)}
     />
   );
 }
@@ -436,12 +460,14 @@ function TableMapping({
   catalog,
   busy,
   onEdit,
+  onAlso,
   picker,
 }: {
   table: SilverTableReview;
   catalog: SilverCatalog;
   busy: boolean;
   onEdit: (column: string, value: string) => void;
+  onAlso: (column: string, also: string[]) => void;
   picker?: React.ReactNode;
 }) {
   const list = useRef<HTMLDivElement>(null);
@@ -452,7 +478,10 @@ function TableMapping({
   // Which bronze column currently holds each Silver column, to flag a second use.
   const usedBy = useMemo(() => {
     const map = new Map<string, string>();
-    for (const row of table.mapping) if (row.silver_column) map.set(row.silver_column, row.bronze_column);
+    for (const row of table.mapping) {
+      if (row.silver_column) map.set(row.silver_column, row.bronze_column);
+      for (const extra of row.also) map.set(extra, row.bronze_column);
+    }
     return map;
   }, [table.mapping]);
   const quality = table.quality;
@@ -463,7 +492,7 @@ function TableMapping({
     <SectionCard
       icon={<Table2 />}
       title={table.table_name}
-      description={`${table.loads.map((load) => load.file_name).join(", ")} · pc_id ${table.pc_id ?? "—"}`}
+      description={`${table.loads.map((load) => load.file_name).join(", ")} · ${table.pc_id ?? "no profit center"}`}
       actions={
         <span className="flex items-center gap-2">
           {split > 0 && <Badge tone="warning" icon={<Split />}>{split} split</Badge>}
@@ -491,7 +520,8 @@ function TableMapping({
           </thead>
           <tbody>
             {paged.slice.map((row) => (
-              <MappingRow key={row.bronze_column} row={row} catalog={catalog} usedBy={usedBy} busy={busy} onEdit={(value) => onEdit(row.bronze_column, value)} />
+              <MappingRow key={row.bronze_column} row={row} catalog={catalog} usedBy={usedBy} busy={busy}
+                onEdit={(value) => onEdit(row.bronze_column, value)} onAlso={(also) => onAlso(row.bronze_column, also)} />
             ))}
           </tbody>
         </table>
@@ -539,7 +569,22 @@ function candidateLabel(candidate: SilverCandidate) {
   return `${candidate.silver_column ?? "Ignore"} (${methods.join(" + ") || "2nd choice"})`;
 }
 
-function MappingRow({ row, catalog, usedBy, busy, onEdit }: { row: SilverMappingRow; catalog: SilverCatalog; usedBy: Map<string, string>; busy: boolean; onEdit: (value: string) => void }) {
+function MappingRow({
+  row,
+  catalog,
+  usedBy,
+  busy,
+  onEdit,
+  onAlso,
+}: {
+  row: SilverMappingRow;
+  catalog: SilverCatalog;
+  usedBy: Map<string, string>;
+  busy: boolean;
+  onEdit: (value: string) => void;
+  onAlso: (also: string[]) => void;
+}) {
+  const [adding, setAdding] = useState(false);
   const options = useMemo(() => {
     const inUse = (name: string) => {
       const owner = usedBy.get(name);
@@ -559,7 +604,7 @@ function MappingRow({ row, catalog, usedBy, busy, onEdit }: { row: SilverMapping
       ),
     }));
     const voted = new Set(row.candidates.map((candidate) => candidate.silver_column ?? IGNORE));
-    const rest: SelectOption<string>[] = catalog.columns
+    const rest: SelectOption<string>[] = targetsOf(catalog)
       .filter((column) => !voted.has(column.name))
       .map((column) => ({
         value: column.name,
@@ -572,6 +617,8 @@ function MappingRow({ row, catalog, usedBy, busy, onEdit }: { row: SilverMapping
   }, [row, catalog, usedBy]);
 
   const value = row.ignored ? IGNORE : row.silver_column;
+  // "Also load into": every other target column, not the main one, not Ignore.
+  const alsoOptions = options.filter((option) => option.value !== IGNORE && option.value !== row.silver_column && !row.also.includes(option.value));
   const current = row.candidates.find((candidate) => (candidate.silver_column ?? IGNORE) === value);
   const backing = current?.votes.filter((vote) => !vote.second_choice) ?? [];
   const others = row.candidates.filter((candidate) => candidate.support > 0 && candidate !== current);
@@ -619,6 +666,40 @@ function MappingRow({ row, catalog, usedBy, busy, onEdit }: { row: SilverMapping
             {row.split && !open && <Badge tone="warning" icon={<Split />}>Split</Badge>}
           </span>
         </Tooltip>
+        {row.silver_column && !row.ignored && (
+          <div className="mt-1.5 flex max-w-[360px] flex-wrap items-center gap-1.5">
+            {row.also.map((extra) => (
+              <span key={extra} className="inline-flex items-center gap-0.5 rounded bg-ink-100 py-0.5 pl-2 pr-0.5 text-caption text-ink-700">
+                <span className="text-ink-500">Also</span> <span className="font-mono">{extra}</span>
+                <IconButton label={`Stop loading ${row.bronze_column} into ${extra}`} className="!h-5 !w-5" disabled={busy}
+                  onClick={() => onAlso(row.also.filter((item) => item !== extra))}>
+                  <X />
+                </IconButton>
+              </span>
+            ))}
+            {adding ? (
+              <Select<string>
+                value={null}
+                options={alsoOptions}
+                onChange={(extra) => {
+                  setAdding(false);
+                  onAlso([...row.also, extra]);
+                }}
+                label={`Also load ${row.bronze_column} into`}
+                hideLabel
+                placeholder="Also load into…"
+                disabled={busy}
+                width={400}
+                className="w-full"
+              />
+            ) : (
+              <button type="button" disabled={busy} onClick={() => setAdding(true)}
+                className="inline-flex items-center gap-1 rounded px-1 text-caption text-ink-500 hover:text-brand-700 focus-visible:outline-none focus-visible:shadow-focus disabled:opacity-40">
+                <Plus className="h-3 w-3" aria-hidden /> Also load into
+              </button>
+            )}
+          </div>
+        )}
       </td>
     </tr>
   );
@@ -655,7 +736,8 @@ function ResultView({ run, onNew }: { run: SilverRun; onNew: () => void }) {
         <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3">
           <StatTile icon={<Rows3 />} label="Rows loaded" value={formatNumber(run.result.rows_loaded ?? 0)} tone="success" />
           <StatTile icon={<Trash2 />} label="Replaced rows removed" value={formatNumber(run.result.rows_removed ?? 0)} />
-          <StatTile icon={<BookCheck />} label="Mappings saved" value={run.tables.reduce((sum, table) => sum + table.mapping.length, 0)} />
+          <StatTile icon={<BookCheck />} label="Mappings saved"
+            value={run.tables.reduce((sum, table) => sum + table.mapping.reduce((n, row) => n + Math.max(1, (row.silver_column ? 1 : 0) + row.also.length), 0), 0)} />
         </div>
       )}
     </section>
@@ -663,14 +745,16 @@ function ResultView({ run, onNew }: { run: SilverRun; onNew: () => void }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Saved mapping (editable) and summary                                         */
+/* DRT column mapping (editable) and the aggregate                              */
 /* -------------------------------------------------------------------------- */
+
+const ALL = "__all__";
 
 function MappingView({ catalog }: { catalog: SilverCatalog }) {
   const toast = useToast();
-  const [rows, setRows] = useState<SavedMapping[] | null>(null);
+  const [rows, setRows] = useState<DrtMapping[] | null>(null);
   const [query, setQuery] = useState("");
-  const [tableKey, setTableKey] = useState("all");
+  const [profitCenter, setProfitCenter] = useState(ALL);
   const list = useRef<HTMLDivElement>(null);
   const pageSize = useFitPageSize(list, { reserve: 130 });
   const load = useCallback(() => {
@@ -679,42 +763,35 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
   }, [toast]);
   useEffect(load, [load]);
   const options = useMemo(
-    () => [...catalog.columns.map((column) => ({ value: column.name, label: column.name, description: column.drt_name })), { value: IGNORE, label: "Ignore" }],
+    () => [...targetsOf(catalog).map((column) => ({ value: column.name, label: column.name, description: column.drt_name })), { value: IGNORE, label: "Ignore" }],
     [catalog],
   );
-
-  const keyOf = (row: SavedMapping) => `${row.pc_id}|${row.bronze_table_name}`;
-  const tableOptions = useMemo(() => {
-    const counts = new Map<string, { row: SavedMapping; count: number }>();
-    for (const row of rows ?? []) {
-      const found = counts.get(keyOf(row));
-      counts.set(keyOf(row), { row, count: (found?.count ?? 0) + 1 });
-    }
+  const centers = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const row of rows ?? []) counts.set(row.profit_center, (counts.get(row.profit_center) ?? 0) + 1);
     return [
-      { value: "all", label: "All tables", description: plural(rows?.length ?? 0, "column") },
-      ...[...counts.entries()].map(([value, { row, count }]) => ({
-        value,
-        label: row.bronze_table_name,
-        description: `pc_id ${row.pc_id || "—"} · ${plural(count, "column")}`,
-      })),
+      { value: ALL, label: "All profit centers", description: plural(rows?.length ?? 0, "row") },
+      ...[...counts.entries()].map(([value, count]) => ({ value, label: value, description: plural(count, "row") })),
     ];
   }, [rows]);
   const needle = query.trim().toLowerCase();
   const visible = (rows ?? []).filter(
     (row) =>
-      (tableKey === "all" || keyOf(row) === tableKey) &&
-      (!needle || [row.pc_id, row.bronze_table_name, row.bronze_column_name, row.silver_column_name ?? ""].some((v) => v.toLowerCase().includes(needle))),
+      (profitCenter === ALL || row.profit_center === profitCenter) &&
+      (!needle || [row.profit_center, row.pc_column, row.drt_column ?? "", row.silver_column_name ?? ""].some((v) => v.toLowerCase().includes(needle))),
   );
-  const paged = usePaged(visible, pageSize, `${tableKey}|${needle}`);
+  const paged = usePaged(visible, pageSize, `${profitCenter}|${needle}`);
 
   if (!rows) return <div className="card space-y-2 p-6"><Skeleton className="h-10" /><Skeleton className="h-10" /></div>;
-  if (!rows.length) return <div className="card"><EmptyState icon={<BookCheck />} title="No saved mappings yet" description="Approved Silver runs save their mapping here." /></div>;
+  if (!rows.length) return <div className="card"><EmptyState icon={<BookCheck />} title="No mappings" description="Add drt_column_mapping.xlsx to assets/." /></div>;
 
-  const save = async (row: SavedMapping, value: string) => {
+  const save = async (row: DrtMapping, value: string) => {
     const silver = value === IGNORE ? null : value;
     try {
-      await api.editSilverMapping({ pc_id: row.pc_id, bronze_table_name: row.bronze_table_name, bronze_column_name: row.bronze_column_name, silver_column_name: silver });
-      setRows((current) => current?.map((item) => (item === row ? { ...item, silver_column_name: silver } : item)) ?? null);
+      const saved = await api.editSilverMapping({
+        profit_center: row.profit_center, pc_column: row.pc_column, silver_column_name: row.silver_column_name, new_silver_column_name: silver,
+      });
+      setRows((current) => current?.map((item) => (item === row ? { ...item, silver_column_name: silver, drt_column: saved.drt_column } : item)) ?? null);
       toast({ severity: "success", title: "Mapping updated", description: "Applies from the next Silver run." });
     } catch (err) {
       toast({ severity: "error", title: "Change not saved", description: toError(err).body.message });
@@ -724,13 +801,11 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
   return (
     <SectionCard
       icon={<BookCheck />}
-      title="Saved mapping"
-      description="Approved bronze → Silver columns."
+      title="Mapping"
+      description="DRT column mapping by profit center."
       actions={
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          {tableOptions.length > 2 && (
-            <Select<string> label="Bronze table" hideLabel value={tableKey} options={tableOptions} onChange={setTableKey} icon={<Table2 className="h-4 w-4" />} className="sm:w-64" />
-          )}
+          <Select<string> label="Profit center" hideLabel value={profitCenter} options={centers} onChange={setProfitCenter} icon={<Building2 className="h-4 w-4" />} className="sm:w-56" />
           <SearchInput value={query} onChange={setQuery} placeholder="Search" label="Search mappings" className="sm:w-56" />
         </div>
       }
@@ -738,71 +813,92 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
       <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
       <div className="relative overflow-x-auto scroll-thin">
         <table className="w-full min-w-[760px] border-separate border-spacing-0 text-table">
-          <caption className="sr-only">Saved column mapping</caption>
+          <caption className="sr-only">DRT column mapping</caption>
           <thead>
             <tr className="text-left text-caption font-semibold text-ink-600">
-              {["pc_id", "Bronze table", "Bronze column", "DRT column", "Silver column"].map((label) => (
+              {["Profit center", "Source column", "DRT column", "Silver column"].map((label) => (
                 <th key={label} scope="col" className="border-b border-ink-200 bg-ink-50 px-3 py-2.5">{label}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {paged.slice.map((row) => (
-              <tr key={`${row.pc_id}|${row.bronze_table_name}|${row.bronze_column_name}`} data-row>
-                <td className="num border-b border-ink-100 px-3 py-2 text-ink-700">{row.pc_id}</td>
-                <td className="border-b border-ink-100 px-3 py-2 font-mono text-ink-800">{row.bronze_table_name}</td>
-                <td className="border-b border-ink-100 px-3 py-2 font-mono font-medium text-ink-900">{row.bronze_column_name}</td>
-                <td className="border-b border-ink-100 px-3 py-2 text-ink-600">{row.drt_column_name ?? "—"}</td>
+              <tr key={`${row.profit_center}|${row.pc_column}|${row.silver_column_name}|${row.drt_column}`} data-row>
+                <td className="border-b border-ink-100 px-3 py-2 font-mono text-ink-700">{row.profit_center}</td>
+                <td className="max-w-[280px] truncate border-b border-ink-100 px-3 py-2 font-mono font-medium text-ink-900" title={row.pc_column}>{row.pc_column}</td>
+                <td className="border-b border-ink-100 px-3 py-2 text-ink-600">{row.drt_column ?? "—"}</td>
                 <td className="w-[240px] border-b border-ink-100 px-3 py-1.5">
-                  <Select<string> value={row.silver_column_name ?? IGNORE} options={options} onChange={(value) => save(row, value)} label={`Silver column for ${row.bronze_column_name}`} hideLabel width={300} />
+                  <Select<string> value={row.silver_column_name ?? (row.drt_column ? null : IGNORE)} options={options} onChange={(value) => save(row, value)} label={`Silver column for ${row.pc_column}`} hideLabel placeholder="Not resolved" width={300} />
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
-        {!visible.length && <EmptyState compact icon={<BookCheck />} title="No matching mappings" description="Try another table or search." />}
+        {!visible.length && <EmptyState compact icon={<BookCheck />} title="No matching mappings" description="Try another profit center or search." />}
       </div>
-      <Pagination {...paged} onPage={paged.setPage} noun="column" />
+      <Pagination {...paged} onPage={paged.setPage} noun="row" />
       </div>
     </SectionCard>
   );
 }
 
-function SummaryView() {
-  const [rows, setRows] = useState<SilverSummaryRow[] | null>(null);
+const money = (value: number | null | undefined) =>
+  value == null ? "—" : value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function AggregateView() {
+  const [rows, setRows] = useState<SilverAggregateRow[] | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
+  const [source, setSource] = useState(ALL);
   const list = useRef<HTMLDivElement>(null);
-  const paged = usePaged(rows ?? [], useFitPageSize(list, { fallbackRow: 37, reserve: 130 }));
+  const visible = (rows ?? []).filter((row) => source === ALL || row.source_system === source);
+  const paged = usePaged(visible, useFitPageSize(list, { fallbackRow: 37, reserve: 130 }), source);
   useEffect(() => {
-    api.silverSummary().then(setRows).catch((err) => setError(toError(err)));
+    api.silverAggregate().then(setRows).catch((err) => setError(toError(err)));
   }, []);
+  const sources = useMemo(() => {
+    const names = [...new Set((rows ?? []).map((row) => row.source_system ?? "—"))];
+    return [{ value: ALL, label: "All sources" }, ...names.map((name) => ({ value: name, label: name }))];
+  }, [rows]);
   if (error) return <Alert tone="error" title={error.body.message} />;
   if (!rows) return <div className="card space-y-2 p-6"><Skeleton className="h-10" /><Skeleton className="h-10" /></div>;
-  if (!rows.length) return <div className="card"><EmptyState icon={<Sigma />} title="No summary yet" description="Load data to Silver first." /></div>;
-  const total = rows.reduce((sum, row) => sum + row.row_count, 0);
-  const premium = rows.reduce((sum, row) => sum + (row.premium_total ?? 0), 0);
+  if (!rows.length) return <div className="card"><EmptyState icon={<Sigma />} title="No aggregate yet" description="Load data to Silver first." /></div>;
+  const policies = visible.reduce((sum, row) => sum + (row.policy_count ?? 0), 0);
+  const premium = visible.reduce((sum, row) => sum + (row.premium ?? 0), 0);
   return (
-    <SectionCard icon={<Sigma />} title="Summary" description="Rows and premium by profit center and accounting month." actions={<span className="num text-caption text-ink-600">{formatNumber(total)} rows · {premium.toLocaleString("en-US", { style: "currency", currency: "USD" })}</span>}>
+    <SectionCard
+      icon={<Sigma />}
+      title="Aggregate"
+      description="Profit center by accounting month."
+      actions={
+        <div className="flex w-full flex-col items-stretch gap-2 sm:w-auto sm:flex-row sm:items-center">
+          <span className="num text-caption text-ink-600">{formatNumber(policies)} policies · {premium.toLocaleString("en-US", { style: "currency", currency: "USD" })}</span>
+          {sources.length > 2 && <Select<string> label="Source" hideLabel value={source} options={sources} onChange={setSource} className="sm:w-44" />}
+        </div>
+      }
+    >
       <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
       <div className="relative overflow-x-auto scroll-thin">
-        <table className="w-full min-w-[640px] border-separate border-spacing-0 text-table">
-          <caption className="sr-only">Silver summary</caption>
+        <table className="w-full min-w-[820px] border-separate border-spacing-0 text-table">
+          <caption className="sr-only">Silver aggregate</caption>
           <thead>
             <tr className="text-left text-caption font-semibold text-ink-600">
-              {["pc_id", "Profit center", "Number", "Month", "Rows", "Premium"].map((label) => (
-                <th key={label} scope="col" className={clsx("border-b border-ink-200 bg-ink-50 px-3 py-2.5", ["Rows", "Premium"].includes(label) && "text-right")}>{label}</th>
+              {["Source", "Profit center", "Month", "Policies", "Premium", "Commission", "Revenue"].map((label, index) => (
+                <th key={label} scope="col" className={clsx("border-b border-ink-200 bg-ink-50 px-3 py-2.5", index > 2 && "text-right")}>{label}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {paged.slice.map((row, index) => (
               <tr key={`${paged.page}-${index}`} data-row>
-                <td className="num border-b border-ink-100 px-3 py-2 text-ink-700">{row.pc_id}</td>
-                <td className="border-b border-ink-100 px-3 py-2 text-ink-900">{row.profit_center_name ?? "—"}</td>
-                <td className="num border-b border-ink-100 px-3 py-2 text-ink-700">{row.profit_center_number ?? "—"}</td>
-                <td className="num border-b border-ink-100 px-3 py-2 text-ink-700">{row.accounting_month?.slice(0, 7) ?? "—"}</td>
-                <td className="num border-b border-ink-100 px-3 py-2 text-right text-ink-800">{formatNumber(row.row_count)}</td>
-                <td className="num border-b border-ink-100 px-3 py-2 text-right text-ink-800">{row.premium_total?.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) ?? "—"}</td>
+                <td className="border-b border-ink-100 px-3 py-2 font-mono text-ink-700">{row.source_system ?? "—"}</td>
+                <td className="border-b border-ink-100 px-3 py-2 text-ink-900">
+                  <span className="num text-ink-600">{row.profit_center_number ?? "—"}</span> {row.profit_center_name ?? ""}
+                </td>
+                <td className="num border-b border-ink-100 px-3 py-2 text-ink-700">{row.reporting_period ?? "—"}</td>
+                <td className="num border-b border-ink-100 px-3 py-2 text-right text-ink-800">{row.policy_count == null ? "—" : formatNumber(row.policy_count)}</td>
+                <td className="num border-b border-ink-100 px-3 py-2 text-right text-ink-800">{money(row.premium)}</td>
+                <td className="num border-b border-ink-100 px-3 py-2 text-right text-ink-800">{money(row.gross_commission_amount)}</td>
+                <td className="num border-b border-ink-100 px-3 py-2 text-right text-ink-800">{money(row.revenue)}</td>
               </tr>
             ))}
           </tbody>

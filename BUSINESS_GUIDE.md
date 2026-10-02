@@ -516,6 +516,9 @@ person still approves every change that matters.
 **What the tool works out on its own:**
 
 - **Source system:** read from the file name's suffix (`ARR_pc0515.xlsx` → `pc0515`).
+- **Profit center (pc_id):** read from the file name. `PC796_2026-06 796 TPI - AJG Data Submission_796 TPI` becomes `PC0796`.
+- **File date:** read from the file name, so `2026-06` becomes 1 June 2026. A year on its own is not enough, and you enter it.
+- **Division:** looked up in the business's division table by profit center. For the few profit centers listed under two divisions, you choose.
 - **Period:** which months the file covers, read from its accounting or transaction dates, or from month-named sheets.
 - **Table name:** `ext_pc0515_arr`, or `ext_pc0515_data` when sheets are named after months.
 - **What to do** with the file against what is already loaded:
@@ -526,9 +529,13 @@ person still approves every change that matters.
   - A revised Jan–Jun file, or a Jan–Jul file, replaces the earlier load. This needs your confirmation and a final check.
   - The very same file again is skipped.
 
-**What you decide:** the reviewer checks the source system and period, can rename a
-table or choose another action, ticks a confirmation for every risky item, and enters
-their name. Nothing is written until then.
+**What you decide:** you check the profit center, file date, division, source system and
+period, can rename a table or choose another action, and tick a confirmation for every
+risky item. You approve as the signed-in user. Nothing is written until then, and a file
+with no profit center or file date can't be approved.
+
+**What every bronze row carries:** the profit center first, then the file's own columns,
+then the file date, the division, the exact file name, and the time it was loaded.
 
 **What protects the data:**
 
@@ -541,17 +548,17 @@ their name. Nothing is written until then.
 
 Every source names its columns differently: one file says `Carrier`, another
 `Insurance Company Name`, a third `Carrier Name`. The last step, **Silver**, puts them all
-into one common table under the names the business has agreed (the DRT).
+into one common table, with exactly the columns of the business's Silver schema.
 
 **How a column finds its Silver name.** Five checks look at every column, each on its own, and each casts a vote:
 
-1. **What was approved before.** Next month's file reuses last month's decisions.
+1. **What was approved before.** The business's DRT column mapping says, per profit center, which source column means which Silver column. Every decision you approve is added to it, so next month's file reuses last month's decisions.
 2. **The same name.** `Acct Eff Date` is recognised as Accounting Effective Date.
 3. **A near spelling.** `Premium Amt` is recognised as Premium. A guess that rests only on a shared word like "name" is never made.
 4. **The same meaning,** from a language model of English words. `Carrier` is recognised as the insurance company and `Agency` as the producer.
 5. **AI (Azure OpenAI),** which reads report abbreviations: `acc_eff_dt` is the accounting effective date, `incp_dt` the policy start. Only the column names are sent, never the data.
 
-**You choose.** The answer most checks agree on is pre-selected and marked *Recommended*. Open a row's list to see every suggestion and which checks voted for it, for example "total_premium: Semantic + AI" and "premium: Fuzzy". Rows where the checks disagree are flagged *Split*, so look at those first. You can pick any suggestion, any other Silver column, or "Ignore".
+**You choose.** The answer most checks agree on is pre-selected and marked *Recommended*. Open a row's list to see every suggestion and which checks voted for it, for example "total_premium: Semantic + AI" and "premium: Fuzzy". Rows where the checks disagree are flagged *Split*, so look at those first. You can pick any suggestion, any other Silver column, or "Ignore". One source column can also feed a second Silver column ("Also load into"). Some profit centers use one "Effective Date" for both the policy and the accounting date.
 
 **Nothing is remembered until you approve.** Approving saves the whole mapping, including the rows the tool filled in from before, so the next file from that source maps itself.
 
@@ -562,9 +569,11 @@ into one common table under the names the business has agreed (the DRT).
 - **Amounts:** `$1,200.50` and `(250.00)`, which means minus 250, are understood.
 - **Unreadable values** are left empty and counted, so you see how many there were before you approve.
 
-**Profit centers** are filled in and corrected from the LOTL reference table, exactly as the AHI document describes. A missing number is looked up from the name, a wrong number is corrected, and a row with neither gets the office of its source. Numbers are always four digits (`94` becomes `0094`). Rows the LOTL can't settle are kept and flagged, never dropped.
+**Profit centers** are filled in and corrected from the business's LOTL table, exactly as the AHI document describes. A missing number is looked up from the name, a wrong number is corrected, and a row with neither gets the office of its source. Numbers are always four digits (`94` becomes `0094`). Rows the LOTL can't settle are kept and flagged, never dropped.
 
 **When a file is replaced in bronze** (a revised Jan–Jun file), its old rows are removed from Silver on the next run, so nothing is counted twice.
+
+**The aggregate** adds up premium, fees, commissions, revenue and the number of policies per profit center and month, in the business's aggregate table. It is rebuilt after every load.
 
 ## What this tool does not do
 

@@ -73,6 +73,18 @@ Every statement of the scenario document, where it is implemented, and the test 
 | B14 | A sheet named after a date or month (Jan, Feb, June) uses a generic name: `ext_[source_system]_data` | `has_period` recognises month names, `2024-07`, `07-2024`, `07/31/2024`, quarters, `FY24` and years, whole-word only (`Market` is not March). Several stacked sheets also get `_data`. | `naming.has_period` | `test_table_names_follow_the_convention` |
 | B15 | "Alternatively, use another suitable generic name" | **The reviewer can rename any table** in the plan. Names must start with `ext_` and are cut to Postgres's 63-character limit with a hash suffix. | `bronze_service.update_item`, `naming.identifier` | `test_reviewer_table_name_is_used` |
 
+### The business's bronze columns (`assets/bronze_table_schema_example.xlsx`)
+
+Besides the file's own columns, every bronze table carries five more. `pc_id` comes first, and the other four follow the file's columns.
+
+| # | Column | How it is filled | Code | Test |
+|---|---|---|---|---|
+| B16 | `pc_id` (text) | `PC` plus the four-digit profit center, from the first `PC…` token of the file name: `PC796_2026-06 796 TPI - AJG Data Submission_796 TPI` gives `PC0796`; a sub-office `PC069_01` gives `PC0069_01`. A name without one falls back to its source system (`ARR_pc0515` gives `PC0515`). **The reviewer enters or corrects it**, and approval is blocked while it is missing. | `file_meta.pc_id_from_filename`, `normalize_pc_id` | `test_pc_id_and_file_date_come_from_the_file_name`, `test_pc_ids_are_normalized` |
+| B17 | `file_date` (date) | From the file name, after removing the profit-center token so `PC2024` is never a year. Accepted forms: `2026-06` (first of the month), `2026-06-15`, `202606`, `06-2026`, or a month word and a year (`Jun 2026`; with several months, `JanJun_2026`, the last). A year alone is not a date. **The reviewer enters it** when the name has none; approval is blocked until then. | `file_meta.file_date_from_filename`, `bronze_service._parse_file_date` | same; `test_bronze_db` |
+| B18 | `division_name` (text) | Looked up in `division_mapping` (`assets/division_table_details.xlsx`) by the four-digit profit center. Duplicate rows collapse. When a profit center is listed under two divisions (0673), **the reviewer picks**, and approval waits. When it is not listed, the column stays empty unless the reviewer chooses one. | `file_meta.divisions_for`, `bronze_service._lookup_division` | `test_division_lookup_returns_every_distinct_division`, `test_bronze_db` |
+| B19 | `file_name` (text) | The exact uploaded file name. | `bronze_service._load` | `test_bronze_db` |
+| B20 | `processing_date` (timestamptz) | The load time, taken per load and strictly increasing within a plan. It is not `now()`, which is one value per transaction. It is also stored in `ingestion.processing_date`, and Silver uses it as `ingestion_timestamp`. | `bronze_service._execute` | `test_bronze_db` (distinct per load, equal on rows and audit) |
+
 ### What the document implies but doesn't spell out
 
 | Need | How it is solved |
@@ -89,7 +101,7 @@ Every statement of the scenario document, where it is implemented, and the test 
 ```mermaid
 flowchart LR
     subgraph UI["Browser: step 4 Ingest"]
-        F[Files: source system, period]
+        F[Files: pc_id, file date, division, source system, period]
         P[Plan: table, action, schema diff]
         C[Confirm + Reviewed by]
     end
@@ -133,6 +145,8 @@ flowchart LR
 | Column | Meaning |
 |---|---|
 | *(the file's columns)* | **All `text`.** Bronze is the raw landing zone, so a later file can never conflict on type; typing is Silver's job. |
+| `pc_id` | First column: `PC` + four-digit profit center (B16) |
+| `file_date`, `division_name`, `file_name`, `processing_date` | After the file's columns (B17-B20). Reserved: a file column with one of these names is renamed (`file_name_2`). Kept out of the registry's column list, so they never count as schema drift. Tables created earlier gain them on their next load. |
 | `_ingestion_id` | Which load wrote the row. A replace deletes by it. |
 | `_source_file`, `_source_sheet` | Lineage (`_source_sheet` is taken from `source_sheet` for stacked month sheets, even if renamed) |
 | `_ingested_at` | When |
@@ -144,6 +158,9 @@ flowchart LR
 | `bronze_table` | Registry: each table's columns **in order**, with the cleaner's datatype, and its source system |
 | `ingestion` | **The ingestion audit table:** one row per file loaded or skipped. It holds the table, file, SHA-256, source sheets, period, action, schema diff, rows loaded, status (`ingested` / `superseded` / `skipped`), what superseded it, and the reviewer. Silver reads its eligibility from here. |
 | `ingest_plan` | Every approved plan, as the reviewer saw it, and whether it succeeded |
+| `division_mapping` | The business's division lookup (`division, international_office, profit_center`), loaded from `assets/` when empty (migration `003_reference.sql`) |
+
+Migration `003_reference.sql` also adds `pc_id`, `file_date`, `division_name` and `processing_date` to `ingestion`.
 
 ---
 

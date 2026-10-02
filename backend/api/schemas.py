@@ -171,6 +171,10 @@ class PlanFileUpdate(BaseModel):
     source_system: str | None = None
     period_start: str | None = None
     period_end: str | None = None
+    # PC0796 (796 and PC796 are accepted), YYYY-MM or YYYY-MM-DD, a division name.
+    pc_id: str | None = None
+    file_date: str | None = None
+    division_name: str | None = None
 
 
 class PlanItemUpdate(BaseModel):
@@ -195,6 +199,16 @@ class PlanFile(BaseModel):
     detected_period_end: str | None
     period_source: str | None
     period_candidates: list[dict[str, Any]]
+    pc_id: str | None = None
+    detected_pc_id: str | None = None
+    # ISO dates (YYYY-MM-DD).
+    file_date: str | None = None
+    detected_file_date: str | None = None
+    division_name: str | None = None
+    # The divisions division_mapping lists for the profit center (two for a few).
+    division_matches: list[str] = []
+    # What the reviewer may choose from: those, or every division when none is listed.
+    division_options: list[str] = []
 
 
 class PlanOut(BaseModel):

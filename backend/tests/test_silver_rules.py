@@ -96,8 +96,10 @@ def test_semantic_votes_with_word_vectors(tmp_path):
     table = semantic.load(str(vectors))
     found, notes = run(["carrier", "agency"], similarity=table.similarity, semantic_min=0.9)
     assert found["carrier"].silver_column == "insurance_company_name"
-    assert found["agency"].silver_column == "producer_name"
-    assert methods(found["carrier"]) == methods(found["agency"]) == [matching.SEMANTIC]
+    assert found["agency"].silver_column == "producer_agency_name"
+    assert methods(found["carrier"]) == [matching.SEMANTIC]
+    # "agency" also shares a word with producer_agency_name: fuzzy agrees.
+    assert matching.SEMANTIC in methods(found["agency"])
 
 
 def test_binary_word2vec_files_load(tmp_path):
@@ -112,10 +114,10 @@ def test_binary_word2vec_files_load(tmp_path):
 
 def test_ai_answers_are_checked_against_the_catalog():
     def stub(columns, targets):
-        return {"writing_agency": ("producer_name", 0.9, "agency that wrote it"),
+        return {"writing_agency": ("producer_agency_name", 0.9, "agency that wrote it"),
                 "notes": ("made_up_column", 0.99, "invented")}
     found, _ = run(["writing_agency", "notes"], llm=stub)
-    assert found["writing_agency"].silver_column == "producer_name"
+    assert found["writing_agency"].silver_column == "producer_agency_name"
     assert methods(found["writing_agency"]) == [matching.AI]
     assert found["notes"].silver_column is None and not found["notes"].candidates  # invented: dropped
 
@@ -182,8 +184,8 @@ def test_methods_run_independently_of_each_other():
 
 
 def test_a_saved_decision_outranks_more_votes():
-    found, _ = run(["premium"], saved={"premium": "commission"})
-    assert found["premium"].silver_column == "commission"  # the reviewer decided this earlier
+    found, _ = run(["premium"], saved={"premium": "gross_commission_amount"})
+    assert found["premium"].silver_column == "gross_commission_amount"  # the reviewer decided this earlier
     assert found["premium"].split and by_target(found["premium"])["premium"].support == 2
 
 
@@ -207,18 +209,18 @@ def test_ai_saying_nothing_fits_is_a_vote_not_an_ignore():
 
 def test_ai_second_choice_is_offered_but_not_counted():
     def gemini(columns, targets):
-        return {"prod_nm": ("producer_name", 0.6, "prod -> producer or product", "line_of_business")}
+        return {"prod_nm": ("producer_agency_name", 0.6, "prod -> producer or product", "product_line_name")}
 
     found, _ = run(["prod_nm"], llm=gemini)
-    second = by_target(found["prod_nm"])["line_of_business"]
+    second = by_target(found["prod_nm"])["product_line_name"]
     assert second.support == 0 and second.votes[0].second_choice
-    assert found["prod_nm"].silver_column == "producer_name" and not found["prod_nm"].split
+    assert found["prod_nm"].silver_column == "producer_agency_name" and not found["prod_nm"].split
 
 
 def test_picking_the_recommendation_again_restores_it():
     found, _ = run(["premium"])
     suggestion = found["premium"]
-    matching.choose(suggestion, "commission", False)
+    matching.choose(suggestion, "gross_commission_amount", False)
     assert suggestion.selection == matching.MANUAL and suggestion.backers() == []
     matching.choose(suggestion, "premium", False)
     assert suggestion.selection == matching.RECOMMENDED
@@ -242,7 +244,9 @@ def test_prompt_teaches_abbreviations_with_contrast_examples():
     assert examples["acc_eff_dt"]["silver_column"] == examples["accountingeffectivedate"]["silver_column"] == \
         "accounting_effective_date"
     # Contrast: a code is not a name, the insured is not the insurer.
-    assert examples["carrier_cd"]["silver_column"] is None and examples["insd_nm"]["silver_column"] is None
+    assert examples["carrier_cd"]["silver_column"] == "insurance_company_id"
+    assert examples["carr_nm"]["silver_column"] == "insurance_company_name"
+    assert examples["insd_nm"]["silver_column"] is None and examples["cncl_dt"]["silver_column"] is None
     assert "<source_columns>\n- eff_dt\n- acc_eff_dt\n</source_columns>" in prompt
 
 
@@ -291,8 +295,9 @@ def test_strings_are_trimmed_and_blanks_become_null():
 
 # --- profit center ----------------------------------------------------------------
 
-LOTL = profit_center.Lotl.from_rows([("0094", "Dayton Office", "94"), ("0515", "Toledo Office", "515"),
-                                     ("0303", "Columbus Office", "0303")])
+# The business's LOTL shape: (profit_center_number unpadded, legacy_office_name, status).
+LOTL = profit_center.Lotl.from_rows([("94", "Dayton Office", "Active"), ("515", "Toledo Office", "Active"),
+                                     ("303", "Columbus Office", "Active")])
 
 
 @pytest.mark.parametrize("name, number, expected", [
@@ -303,7 +308,7 @@ LOTL = profit_center.Lotl.from_rows([("0094", "Dayton Office", "94"), ("0515", "
     ("Unknown Office", 777, ("Unknown Office", "0777", profit_center.NO_MATCH)),
 ])
 def test_the_four_profit_center_scenarios(name, number, expected):
-    assert profit_center.resolve(name, number, "0303", LOTL) == expected
+    assert profit_center.resolve(name, number, "PC0303", LOTL) == expected
 
 
 def test_without_a_lotl_rows_are_kept_and_flagged():
@@ -311,7 +316,8 @@ def test_without_a_lotl_rows_are_kept_and_flagged():
         "Dayton Office", "0094", profit_center.UNAVAILABLE)
 
 
-@pytest.mark.parametrize("value, padded", [(94, "0094"), ("515", "0515"), ("94.0", "0094"), ("PC0001", "PC0001"), ("", None)])
+@pytest.mark.parametrize("value, padded", [(94, "0094"), ("515", "0515"), ("94.0", "0094"), ("PC0001", "PC0001"),
+                                           ("", None), ("069_01", "0069_01"), ("0796", "0796")])
 def test_numbers_are_four_digits(value, padded):
     assert profit_center.pad(value) == padded
 
@@ -381,7 +387,8 @@ def test_a_code_is_not_a_name_and_an_id_is_not_a_date(tmp_path):
     vectors = _vectors(tmp_path, {"carrier": [1, 0, 0], "insurer": [1, 0.05, 0], "code": [0, 0, 1],
                                   "name": [0, 1, 0], "insurance": [1, 0.1, 0], "company": [0.9, 0.1, 0]})
     found, _ = run(["carrier_code", "policy_id"], similarity=vectors.similarity, semantic_min=0.5)
-    assert found["carrier_code"].silver_column is None
+    # A carrier code is the company's identifier, never its name.
+    assert found["carrier_code"].silver_column != "insurance_company_name"
     assert found["policy_id"].silver_column != "policy_effective_date"
 
 
@@ -419,3 +426,131 @@ def test_azure_openai_voter_uses_structured_outputs(monkeypatch):
     assert sent["messages"][0] == {"role": "system", "content": llm.SYSTEM}
     assert "<examples>" in sent["messages"][1]["content"] and "2026-01-31" not in sent["messages"][1]["content"]
     assert sent["client"]["api_version"] == "2025-04-01-preview"
+
+
+# --- the business's LOTL, division and file-name rules ----------------------------------
+
+
+def test_lotl_prefers_active_rows_and_reads_the_export():
+    lotl = profit_center.Lotl.from_rows([
+        ("417", "BSPL - Southeast", "Inactive"), ("798", "BSPL - Southeast", "Active"),
+        ("null", "ALTRU", "Active"), ("null", "null", "null"), ("069_01", "BSIB-Dallas", "Inactive"),
+    ])
+    assert lotl.by_name["bspl - southeast"] == "0798"  # the Active row wins
+    assert "altru" not in lotl.by_name and lotl.rows == 5  # no number: nothing to look up
+    assert lotl.by_number["0069_01"] == ("BSIB-Dallas", "Inactive")
+    assert profit_center.resolve(None, None, "PC0798", lotl) == ("BSPL - Southeast", "0798", profit_center.FILLED_NAME)
+
+
+@pytest.mark.parametrize("name, pc, when", [
+    ("PC796_2026-06 796 TPI - AJG Data Submission_796 TPI.xlsx", "PC0796", date(2026, 6, 1)),
+    ("ARR_pc0515_2025-06-15.xlsx", "PC0515", date(2025, 6, 15)),
+    ("01_ARR_pc0101_2026_JanJun.xlsx", "PC0101", date(2026, 6, 1)),  # months run together: the last
+    ("Market_Report_PC2024_Mar_2025.xlsx", "PC2024", date(2025, 3, 1)),  # PC2024 is not a year
+    ("PC069_01 202607 data.csv", "PC0069_01", date(2026, 7, 1)),
+    ("05_Prem_pc0202_2026.xlsx", "PC0202", None),  # a year alone is not a date
+    ("PC796 Q2 2026.xlsx", "PC0796", None),  # a quarter is not a month
+    ("PC5_2026-06 5 X - AJG Data Submission_5 X.xlsx", "PC0005", date(2026, 6, 1)),  # "5" is not the day
+    ("customer_data.xlsx", None, None),
+])
+def test_pc_id_and_file_date_come_from_the_file_name(name, pc, when):
+    from ahi_bronze import file_meta
+
+    assert file_meta.pc_id_from_filename(name) == pc
+    assert file_meta.file_date_from_filename(name) == when
+
+
+@pytest.mark.parametrize("value, normalized", [("796", "PC0796"), ("PC796", "PC0796"), ("pc0796", "PC0796"),
+                                               ("0796.0", "PC0796"), ("PC069_01", "PC0069_01"), ("null", None),
+                                               ("abc", None), (None, None)])
+def test_pc_ids_are_normalized(value, normalized):
+    from ahi_bronze import file_meta
+
+    assert file_meta.normalize_pc_id(value) == normalized
+
+
+def test_division_lookup_returns_every_distinct_division():
+    from ahi_bronze import file_meta
+
+    rows = [("AH Programs", "No", "0673"), ("AH Specialty", "No", "0673"), ("Bridge Specialty Group", "No", "0796"),
+            ("Bridge Specialty Group", "No", "0796"), ("AH Specialty", "No", "0N/A")]
+    assert file_meta.divisions_for("PC0796", rows) == ["Bridge Specialty Group"]  # duplicates collapse
+    assert file_meta.divisions_for("PC0673", rows) == ["AH Programs", "AH Specialty"]  # the reviewer picks
+    assert file_meta.divisions_for("PC0101", rows) == []
+    rows.append(("Bridge Specialty Group", "No", "0069"))
+    assert file_meta.divisions_for("PC0069_01", rows) == ["Bridge Specialty Group"]  # a sub-office
+
+
+def test_the_catalog_is_the_business_silver_schema():
+    names = [column.name for column in CATALOG]
+    assert len(names) == 69 and names[0] == "ahi_policy_transaction_id" and names[-1] == "ajg_apd"
+    types = {column.name: column for column in CATALOG}
+    assert types["commission_pct"].sql_type == "numeric(10,6)" and types["premium"].sql_type == "numeric(18,2)"
+    assert types["is_mga"].sql_type == "boolean" and types["ingestion_timestamp"].sql_type == "timestamptz"
+    assert types["source_file"].role == catalog.SYSTEM and types["premium"].role == catalog.MAPPED
+    # Only mapped columns are ever offered as targets.
+    found, _ = run(["row_hash", "source_file"])
+    assert all(s.silver_column is None for s in found.values())
+
+
+def test_every_drt_label_has_a_silver_column():
+    for label in ["AccountingEffective Date", "InsuranceCompany Name", "Producer/Agency Name", "CommissionPct",
+                  "TransactionEffectiveDate <for different transactions>", "Producer Tax ID"]:
+        assert catalog.silver_name_for_drt(label, CATALOG) is not None, label
+
+
+def test_typed_cleansing_follows_each_column_type():
+    columns = {column.name: column for column in CATALOG}
+    rate, bad = cleanse.by_type(pl.Series("x", ["12.5%", "0.123456", "abc"]), columns["commission_pct"])
+    assert rate.to_list() == [Decimal("12.500000"), Decimal("0.123456"), None] and bad == 1
+    month, _ = cleanse.by_type(pl.Series("x", ["Jun", "7", "July"]), columns["policy_effective_month"])
+    assert month.to_list() == [6, 7, 7]
+    flag, bad = cleanse.by_type(pl.Series("x", ["Y", "no", "maybe"]), columns["is_mga"])
+    assert flag.to_list() == [True, False, None] and bad == 1
+
+
+def test_one_bronze_column_can_load_two_silver_columns():
+    found, _ = run(["effectivedate"], saved={"effectivedate": ["policy_effective_date", "accounting_effective_date"]})
+    suggestion = found["effectivedate"]
+    assert suggestion.targets == ["policy_effective_date", "accounting_effective_date"] or \
+        suggestion.targets == ["accounting_effective_date", "policy_effective_date"]
+    assert not suggestion.split  # a second target is not a disagreement
+    assert not matching.problems("t", [suggestion])
+
+
+def test_two_headers_that_normalize_alike_compete_instead_of_both_loading():
+    # "Agent Commission" (amount) and "Agent Commission%" (rate) are one key once normalized.
+    saved = {"agent_commission": ["producer_commission_amount", "producer_commission_pct"]}
+    found, _ = run(["agent_commission"], saved=saved, one_to_many=set())
+    assert found["agent_commission"].also == [] and found["agent_commission"].split
+
+
+def test_an_extra_target_counts_as_taken():
+    found, _ = run(["premium", "net_premium"])
+    matching.set_also(found["premium"], ["revenue"])
+    matching.choose(found["net_premium"], "revenue", False)
+    assert any("all map to revenue" in issue for issue in matching.problems("t", list(found.values())))
+
+
+def test_transform_writes_exactly_the_silver_schema():
+    from datetime import datetime, timezone
+
+    from ahi_silver import transform
+
+    frame = pl.DataFrame({"policyeffectivedate": ["2026-03-05"], "premium_amt": ["$1,200.50"], "rate": ["12%"],
+                          "_ingestion_id": ["i1"], "_source_file": ["f.xlsx"], "_source_sheet": ["S"]})
+    stamp = datetime(2026, 7, 1, 10, tzinfo=timezone.utc)
+    context = transform.Context("pc0101", "bronze.ext_pc0101_arr", stamp,
+                                {"i1": transform.LoadInfo("f.xlsx", stamp, "2026-01", "2026-06")})
+    mapping = [("policyeffectivedate", "policy_effective_date"), ("policyeffectivedate", "accounting_effective_date"),
+               ("premium_amt", "premium"), ("rate", "commission_pct")]
+    silver, quality = transform.transform(frame, mapping, CATALOG, "PC0101", profit_center.Lotl(), context)
+    assert silver.columns == [column.name for column in CATALOG][1:]  # all but the generated key
+    row = silver.row(0, named=True)
+    assert row["policy_effective_date"] == row["accounting_effective_date"] == date(2026, 3, 5)
+    assert (row["policy_effective_year"], row["policy_effective_month"]) == (2026, 3)  # derived
+    assert row["premium"] == Decimal("1200.50") and row["commission_pct"] == Decimal("12.000000")
+    assert (row["source_table"], row["source_file"], row["ingestion_timestamp"]) == ("bronze.ext_pc0101_arr", "f.xlsx", stamp)
+    assert (row["source_data_period_start_date"], row["source_data_period_end_date"],
+            row["source_data_period_type"]) == (date(2026, 1, 1), date(2026, 6, 30), "DATE_RANGE")
+    assert row["row_hash"] and row["business_key_hash"] and quality["rows"] == 1

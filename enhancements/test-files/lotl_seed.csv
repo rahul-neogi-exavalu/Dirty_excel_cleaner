@@ -1,9 +1,9 @@
-pc_id,legacy_office_name,profit_center_number
-0094,Dayton Office,0094
-0101,Cleveland Office,0101
-0202,Akron Office,0202
-0303,Columbus Office,0303
-0404,Cincinnati Office,0404
-0505,Canton Office,0505
-0515,Toledo Office,0515
-0606,Youngstown Office,0606
+profit_center_number,legacy_office_name,status
+94,Dayton Office,Active
+101,Cleveland Office,Active
+202,Akron Office,Active
+303,Columbus Office,Active
+404,Cincinnati Office,Active
+505,Canton Office,Active
+515,Toledo Office,Active
+606,Youngstown Office,Active

@@ -3,10 +3,12 @@
 The flow is human-in-the-loop by design:
 
 1. ``create_plan`` reads the cleaned outputs of the chosen jobs, detects each file's
-   source system (file-name suffix) and period (date columns, month sheets), and asks
-   the planner (``ahi_bronze.planner``) what to do against the bronze layer as it is now.
-2. The reviewer corrects source systems, periods, table names or actions; every change
-   re-plans from scratch, so the plan shown is always the one that will run.
+   source system (file-name suffix), profit center (pc_id, ``PC796`` -> ``PC0796``), file
+   date (``2026-06`` in the name), division (division_mapping, by profit center) and
+   period (date columns, month sheets), and asks the planner (``ahi_bronze.planner``)
+   what to do against the bronze layer as it is now.
+2. The reviewer corrects any of those, table names or actions; every change re-plans
+   from scratch, so the plan shown is always the one that will run.
 3. ``approve`` refuses until every blocker is fixed and every risky item (replace,
    schema evolution, separate table ...) is explicitly confirmed, then loads everything
    in one transaction: all of the plan is ingested, or none of it.
@@ -20,24 +22,30 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 
 import polars as pl
 
-from ahi_bronze import naming, periods, planner
+from ahi_bronze import file_meta, naming, periods, planner
 from ahi_clean.orchestrate import SOURCE_SHEET_COLUMN
 from ahi_bronze.periods import Period
 
 from .. import config, db
 from ..errors import ApiError, conflict, not_found
 from ..store import SUCCEEDED, Job, OutputRecord, store
-from . import job_history
+from . import job_history, reference_service
 
 DRAFT = "draft"
 RUNNING = "running"
 SUCCEEDED_PLAN = "succeeded"
 FAILED = "failed"
 
-LINEAGE = ["_ingestion_id", "_source_file", "_source_sheet", "_ingested_at"]
+LINEAGE = list(naming.LINEAGE_COLUMNS)
+# Every bronze table carries these besides the file's own columns: pc_id first, the
+# others after the file's columns (the business's bronze schema). Kept out of the
+# registry's column list, so they never count as schema drift.
+SYSTEM_TYPES = {"pc_id": "text", "file_date": "date", "division_name": "text", "file_name": "text",
+                "processing_date": "timestamptz"}
 
 
 @dataclass
@@ -51,6 +59,14 @@ class FileInput:
     period_candidates: list[dict]
     source_system: str | None
     period: Period | None
+    # From the file name, then as the reviewer set them.
+    detected_pc_id: str | None = None
+    pc_id: str | None = None
+    detected_file_date: date | None = None
+    file_date: date | None = None
+    # division_mapping's divisions for the profit center (two for a few), and the one used.
+    division_matches: list[str] = field(default_factory=list)
+    division_name: str | None = None
 
 
 @dataclass
@@ -73,6 +89,8 @@ class Plan:
     started_at: float | None = None
     finished_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # division_mapping rows, read once when the plan is made.
+    divisions: list[tuple] = field(default_factory=list, repr=False)
 
 
 _plans: dict[str, Plan] = {}
@@ -123,13 +141,16 @@ def list_tables() -> list[dict]:
             "FROM {}.bronze_table ORDER BY table_name").format(control)).fetchall()
         loads = conn.execute(sql.SQL(
             "SELECT id, table_name, file_name, period_start, period_end, action, rows_loaded, status, "
-            "reviewed_by, created_at, superseded_by FROM {}.ingestion ORDER BY created_at DESC").format(control)).fetchall()
+            "reviewed_by, created_at, superseded_by, pc_id, file_date, division_name, processing_date "
+            "FROM {}.ingestion ORDER BY created_at DESC").format(control)).fetchall()
     by_table: dict[str, list[dict]] = {}
     for row in loads:
         by_table.setdefault(row[1], []).append({
             "id": row[0], "file_name": row[2], "period_start": row[3], "period_end": row[4],
             "action": row[5], "rows_loaded": row[6], "status": row[7], "reviewed_by": row[8],
-            "created_at": row[9].timestamp(), "superseded_by": row[10],
+            "created_at": row[9].timestamp(), "superseded_by": row[10], "pc_id": row[11],
+            "file_date": row[12].isoformat() if row[12] else None, "division_name": row[13],
+            "processing_date": row[14].timestamp() if row[14] else None,
         })
     result = []
     for name, schema, source, columns, created, updated in tables:
@@ -157,6 +178,8 @@ def list_tables() -> list[dict]:
 
 def create_plan(job_ids: list[str], batch_id: str | None) -> Plan:
     db.require()
+    with db.connection() as conn:
+        divisions = reference_service.divisions(conn)
     files = []
     for job_id in dict.fromkeys(job_ids):
         job = store.job(job_id)
@@ -167,19 +190,41 @@ def create_plan(job_ids: list[str], batch_id: str | None) -> Plan:
             continue
         guess = _detect_period(job)
         source = naming.source_system_from_filename(job.source_name, config.SOURCE_SYSTEM_PATTERN)
-        files.append(FileInput(
+        # PC796_2026-06 ... -> PC0796; a name without a PC token falls back to its source system.
+        pc = file_meta.pc_id_from_filename(job.source_name) or file_meta.normalize_pc_id(source)
+        when = file_meta.file_date_from_filename(job.source_name)
+        file = FileInput(
             job_id=job.id, file_name=job.source_name, file_sha256=job.source_sha256 or job.id,
             detected_source_system=source, detected_period=guess.period,
             period_source=guess.source, period_candidates=guess.candidates,
             source_system=source, period=guess.period,
-        ))
+            detected_pc_id=pc, pc_id=pc, detected_file_date=when, file_date=when,
+        )
+        _lookup_division(file, divisions)
+        files.append(file)
     if not files:
         raise conflict("None of these files produced a table to ingest.")
-    plan = Plan(id=str(uuid.uuid4()), batch_id=batch_id, files=files)
+    plan = Plan(id=str(uuid.uuid4()), batch_id=batch_id, files=files, divisions=divisions)
     _replan(plan)
     with _plans_lock:
         _plans[plan.id] = plan
     return plan
+
+
+def _lookup_division(file: FileInput, divisions: list[tuple]) -> None:
+    """division_name from division_mapping by the file's profit center: set when the
+    table gives exactly one division, left for the reviewer when it gives two."""
+    file.division_matches = file_meta.divisions_for(file.pc_id, divisions)
+    if file.division_name not in file.division_matches:
+        file.division_name = file.division_matches[0] if len(file.division_matches) == 1 else None
+
+
+def division_options(file: FileInput, divisions: list[tuple]) -> list[str]:
+    """What the reviewer may choose: the profit center's divisions, or every division
+    when the table does not list the profit center."""
+    if file.division_matches:
+        return list(file.division_matches)
+    return sorted({str(row[0]).strip() for row in divisions if row[0]})
 
 
 def _detect_period(job: Job) -> periods.PeriodGuess:
@@ -228,7 +273,8 @@ def _editable(plan: Plan) -> None:
 
 
 def update_file(plan_id: str, job_id: str, source_system: str | None, period_start: str | None,
-                period_end: str | None, fields: set[str]) -> Plan:
+                period_end: str | None, fields: set[str], pc_id: str | None = None,
+                file_date: str | None = None, division_name: str | None = None) -> Plan:
     plan = get_plan(plan_id)
     with plan.lock:
         _editable(plan)
@@ -237,6 +283,22 @@ def update_file(plan_id: str, job_id: str, source_system: str | None, period_sta
             raise not_found("That file in the plan")
         if "source_system" in fields:
             file.source_system = naming.clean_source_system(source_system) or None
+        if "pc_id" in fields:
+            normalized = file_meta.normalize_pc_id(pc_id)
+            if pc_id and str(pc_id).strip() and normalized is None:
+                raise ApiError(422, "invalid_pc_id", "Enter the profit center as PC followed by its number, e.g. PC0796.",
+                               field="pc_id")
+            if normalized != file.pc_id:
+                file.pc_id = normalized
+                _lookup_division(file, plan.divisions)
+        if "file_date" in fields:
+            file.file_date = _parse_file_date(file_date)
+        if "division_name" in fields:
+            choice = (division_name or "").strip() or None
+            if choice is not None and choice not in division_options(file, plan.divisions):
+                raise ApiError(422, "invalid_division", f"'{choice}' is not a division for {file.pc_id or 'this file'}.",
+                               field="division_name")
+            file.division_name = choice
         if fields & {"period_start", "period_end"}:
             if period_start is None and period_end is None:
                 file.period = None
@@ -248,6 +310,19 @@ def update_file(plan_id: str, job_id: str, source_system: str | None, period_sta
                 file.period = parsed
         _replan(plan)
     return plan
+
+
+def _parse_file_date(value: str | None) -> date | None:
+    """'YYYY-MM' (the first of that month) or 'YYYY-MM-DD'; blank clears it."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    for fmt, size in (("%Y-%m-%d", 10), ("%Y-%m", 7)):
+        try:
+            return datetime.strptime(text[:size], fmt).date()
+        except ValueError:
+            continue
+    raise ApiError(422, "invalid_file_date", "Enter the file date as YYYY-MM or YYYY-MM-DD.", field="file_date")
 
 
 def update_item(plan_id: str, key: str, table_name: str | None, action: str | None, fields: set[str]) -> Plan:
@@ -271,7 +346,25 @@ def update_item(plan_id: str, key: str, table_name: str | None, action: str | No
 
 
 def problems(plan: Plan, confirmed: set[str] | None = None) -> list[str]:
-    return planner.approvable(plan.items, confirmed if confirmed is not None else {i.key for i in plan.items})
+    issues = _file_issues(plan)
+    return issues + planner.approvable(plan.items, confirmed if confirmed is not None else {i.key for i in plan.items})
+
+
+def _file_issues(plan: Plan) -> list[str]:
+    """What each file still needs before its rows can carry pc_id, file_date and division."""
+    # By job: a skipped duplicate of a file (same name) needs nothing.
+    loading = {item.key.split(".", 1)[0] for item in plan.items if item.action != planner.SKIP}
+    issues = []
+    for file in plan.files:
+        if file.job_id not in loading:
+            continue
+        if not file.pc_id:
+            issues.append(f"{file.file_name}: enter the profit center (pc_id).")
+        if not file.file_date:
+            issues.append(f"{file.file_name}: enter the file date.")
+        if len(file.division_matches) > 1 and not file.division_name:
+            issues.append(f"{file.file_name}: choose the division ({' or '.join(file.division_matches)}).")
+    return issues
 
 
 # --- running ---------------------------------------------------------------------
@@ -292,7 +385,7 @@ def approve(plan_id: str, reviewed_by: str, confirmed: list[str], user_id: str |
         if _signature(plan.items) != shown:
             raise ApiError(409, "plan_changed", "The plan changed since it was reviewed.",
                            "Review the updated plan and confirm again.")
-        issues = planner.approvable(plan.items, set(confirmed))
+        issues = _file_issues(plan) + planner.approvable(plan.items, set(confirmed))
         if issues:
             raise ApiError(409, "plan_not_ready", "The plan can't be approved yet.",
                            " ".join(issues[:3]) + (" …" if len(issues) > 3 else ""))
@@ -385,6 +478,7 @@ def _execute(conn, plan: Plan) -> None:
     )
     records = {_key(job, record): (file, job, record) for file, job, record in _outputs(plan)}
     work = [item for item in plan.items if item.action != planner.SKIP]
+    stamp = None
 
     for index, item in enumerate(plan.items):
         file, job, record = records[item.key]
@@ -396,14 +490,19 @@ def _execute(conn, plan: Plan) -> None:
         done = sum(1 for other in work[: work.index(item)])
         plan.progress = done / max(len(work), 1)
         plan.message = f"Loading {item.table_name}"
-        rows = _load(conn, control, bronze, item, file, record, ingestion_id)
+        # This load's processing_date. Taken per load (not now(), which is the same for
+        # the whole transaction) and strictly increasing, so two loads never share one:
+        # with the table and file name it identifies the load's rows in Silver.
+        now = datetime.now(timezone.utc)
+        stamp = now if stamp is None or now > stamp else stamp + timedelta(microseconds=1)
+        rows = _load(conn, control, bronze, item, file, record, ingestion_id, stamp)
         if item.replaces:
             conn.execute(
                 sql.SQL("UPDATE {}.ingestion SET status = 'superseded', superseded_by = %s "
                         "WHERE id = ANY(%s)").format(control),
                 [ingestion_id, [ref["id"] for ref in item.replaces]],
             )
-        _audit(conn, control, plan, item, file, job, record, ingestion_id, rows, "ingested")
+        _audit(conn, control, plan, item, file, job, record, ingestion_id, rows, "ingested", stamp)
         job_history.note(plan.id, f"Loaded {rows} rows from {record.file} into {item.table_name} ({item.action})")
         plan.results[item.key] = {"ingestion_id": ingestion_id, "rows_loaded": rows, "table_name": item.table_name}
 
@@ -426,7 +525,7 @@ def _table_exists(conn, name: str) -> bool:
 
 
 def _load(conn, control, bronze, item: planner.PlanItem, file: FileInput, record: OutputRecord,
-          ingestion_id: str) -> int:
+          ingestion_id: str, processing_date: datetime) -> int:
     from psycopg import sql
     from psycopg.types.json import Jsonb
 
@@ -442,14 +541,22 @@ def _load(conn, control, bronze, item: planner.PlanItem, file: FileInput, record
 
     if item.rebuild:
         conn.execute(sql.SQL("DROP TABLE IF EXISTS {}.{}").format(bronze, table))
+    def typed(name: str):
+        return sql.SQL("{} {}").format(sql.Identifier(name), sql.SQL(SYSTEM_TYPES[name]))
+
     if item.rebuild or current is None:
-        columns = [sql.SQL("{} text").format(sql.Identifier(name)) for name in item.columns_after]
+        # The business's layout: pc_id, the file's columns, then the other file-level values.
+        columns = ([typed("pc_id")] + [sql.SQL("{} text").format(sql.Identifier(name)) for name in item.columns_after]
+                   + [typed(name) for name in naming.SYSTEM_COLUMNS if name != "pc_id"])
         conn.execute(sql.SQL(
             "CREATE TABLE {}.{} ({}, _ingestion_id text NOT NULL, _source_file text NOT NULL, "
             "_source_sheet text, _ingested_at timestamptz NOT NULL DEFAULT now())"
         ).format(bronze, table, sql.SQL(", ").join(columns)))
         conn.execute(sql.SQL("CREATE INDEX ON {}.{} (_ingestion_id)").format(bronze, table))
     else:
+        # Tables made before these columns existed get them now (appended at the end).
+        for name in naming.SYSTEM_COLUMNS:
+            conn.execute(sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {}").format(bronze, table, typed(name)))
         for name in [name for name in item.columns_after if name not in set(current)]:
             conn.execute(sql.SQL("ALTER TABLE {}.{} ADD COLUMN {} text").format(bronze, table, sql.Identifier(name)))
         if item.replaces:
@@ -458,7 +565,8 @@ def _load(conn, control, bronze, item: planner.PlanItem, file: FileInput, record
 
     frame = _as_text(record)
     present = [name for name in item.columns_after if name in frame.columns]
-    target = present + ["_ingestion_id", "_source_file", "_source_sheet"]
+    target = present + list(naming.SYSTEM_COLUMNS) + ["_ingestion_id", "_source_file", "_source_sheet"]
+    extras = [file.pc_id, file.file_date, file.division_name, file.file_name, processing_date]
     sheets = list(dict.fromkeys(record.sheet_names))
     # The appended table's provenance column, under whatever name the reviewer gave it
     # (``_as_text`` keeps the column order, so its position identifies it).
@@ -471,7 +579,7 @@ def _load(conn, control, bronze, item: planner.PlanItem, file: FileInput, record
         order = [frame.columns.index(name) for name in present]
         for row in frame.iter_rows():
             sheet = row[sheet_index] if sheet_index is not None else (sheets[0] if len(sheets) == 1 else None)
-            copy.write_row([row[i] for i in order] + [ingestion_id, file.file_name, sheet])
+            copy.write_row([row[i] for i in order] + extras + [ingestion_id, file.file_name, sheet])
 
     loaded = conn.execute(sql.SQL("SELECT count(*) FROM {}.{} WHERE _ingestion_id = %s").format(bronze, table),
                           [ingestion_id]).fetchone()[0]
@@ -514,7 +622,8 @@ def _as_text(record: OutputRecord) -> pl.DataFrame:
 
 
 def _audit(conn, control, plan: Plan, item: planner.PlanItem, file: FileInput, job: Job,
-           record: OutputRecord, ingestion_id: str, rows: int, status: str) -> None:
+           record: OutputRecord, ingestion_id: str, rows: int, status: str,
+           processing_date: datetime | None = None) -> None:
     from psycopg import sql
     from psycopg.types.json import Jsonb
 
@@ -522,12 +631,14 @@ def _audit(conn, control, plan: Plan, item: planner.PlanItem, file: FileInput, j
         sql.SQL(
             "INSERT INTO {}.ingestion (id, plan_id, table_name, file_name, file_sha256, source_system, "
             "source_sheets, period_start, period_end, action, schema_diff, rows_loaded, status, reviewed_by, "
-            "job_id, output_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            "job_id, output_id, pc_id, file_date, division_name, processing_date) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         ).format(control),
         [ingestion_id, plan.id, item.table_name, file.file_name, file.file_sha256, item.source_system,
          list(record.sheet_names), item.period.start if item.period else None,
          item.period.end if item.period else None, item.action,
-         Jsonb(item.comparison) if item.comparison else None, rows, status, plan.reviewed_by, job.id, record.id],
+         Jsonb(item.comparison) if item.comparison else None, rows, status, plan.reviewed_by, job.id, record.id,
+         file.pc_id, file.file_date, file.division_name, processing_date],
     )
 
 

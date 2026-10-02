@@ -102,22 +102,24 @@ EXAMPLES: list[dict] = [
      "reason": "endt -> endorsement, eff dt -> effective date => endorsement effective date; an endorsement is a mid-term policy transaction"},
     {"bronze_column": "incp_dt", "silver_column": "policy_effective_date", "alternative": None, "confidence": 0.88,
      "reason": "incp -> inception, dt -> date => inception date = when coverage starts (listed synonym)"},
-    {"bronze_column": "pol_exp_dt", "silver_column": None, "alternative": None, "confidence": 0.9,
-     "reason": "pol -> policy, exp -> expiration, dt -> date => policy end date; no expiration target, and another date is not a fallback"},
+    {"bronze_column": "pol_exp_dt", "silver_column": "policy_expiration_date", "alternative": None, "confidence": 0.9,
+     "reason": "pol -> policy, exp -> expiration, dt -> date => policy expiration date = the target name"},
+    {"bronze_column": "cncl_dt", "silver_column": None, "alternative": None, "confidence": 0.85,
+     "reason": "cncl -> cancellation, dt -> date => cancellation date; no cancellation target, and another date is not a fallback"},
     {"bronze_column": "date", "silver_column": None, "alternative": "accounting_effective_date", "confidence": 0.25,
      "reason": "bare 'date': accounting, policy and transaction effective dates all fit; nothing in the name decides"},
     {"bronze_column": "carr_nm", "silver_column": "insurance_company_name", "alternative": None, "confidence": 0.9,
      "reason": "carr -> carrier, nm -> name => carrier name; 'carrier' is a listed synonym of the insurance company"},
-    {"bronze_column": "carrier_cd", "silver_column": None, "alternative": None, "confidence": 0.6,
-     "reason": "cd -> code => carrier CODE, an identifier; the insurance company target holds names and lists no code"},
+    {"bronze_column": "carrier_cd", "silver_column": "insurance_company_id", "alternative": None, "confidence": 0.8,
+     "reason": "cd -> code => carrier CODE, an identifier: the insurance company id (company code), never the company name"},
     {"bronze_column": "insd_nm", "silver_column": None, "alternative": None, "confidence": 0.85,
      "reason": "insd -> insured (the policyholder, not the insurer), nm -> name => insured name; no policyholder target"},
     {"bronze_column": "brnch_cd", "silver_column": "profit_center_number", "alternative": None, "confidence": 0.88,
      "reason": "brnch -> branch, cd -> code => branch code; a code fits the code/number target, which lists 'branch code'"},
-    {"bronze_column": "prdcr_nm", "silver_column": "producer_name", "alternative": None, "confidence": 0.9,
-     "reason": "prdcr -> producer (vowels dropped), nm -> name => producer name = the target name"},
-    {"bronze_column": "prod_nm", "silver_column": "producer_name", "alternative": "line_of_business", "confidence": 0.6,
-     "reason": "prod -> producer or product; producer name is the usual premium-report reading, product name would be the line of business"},
+    {"bronze_column": "prdcr_nm", "silver_column": "producer_agency_name", "alternative": None, "confidence": 0.9,
+     "reason": "prdcr -> producer (vowels dropped), nm -> name => producer name; the producer/agency name target"},
+    {"bronze_column": "prod_nm", "silver_column": "producer_agency_name", "alternative": "product_line_name", "confidence": 0.6,
+     "reason": "prod -> producer or product; producer name is the usual premium-report reading, product name would be the product line"},
     {"bronze_column": "grs_wrtn_prm", "silver_column": "premium", "alternative": None, "confidence": 0.9,
      "reason": "grs -> gross, wrtn -> written, prm -> premium => gross written premium (listed synonym)"},
     {"bronze_column": "prem_tax_amt", "silver_column": None, "alternative": None, "confidence": 0.85,
@@ -147,8 +149,10 @@ class Answers(BaseModel):
 
 
 def render_catalog(catalog: list[SilverColumn]) -> str:
+    """The mapping targets only: system columns (keys, hashes, timestamps) are never answers."""
     return "\n".join(
-        f"- {column.name} ({column.data_type}): {column.drt_name}. {column.description}".rstrip() for column in catalog
+        f"- {column.name} ({column.data_type}): {column.drt_name}. {column.description}".rstrip()
+        for column in catalog if getattr(column, "role", "mapped") == "mapped"
     )
 
 

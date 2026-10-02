@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import normalize
-from .catalog import SilverColumn
+from .catalog import MAPPED, SilverColumn
 
 try:
     from rapidfuzz import fuzz, process
@@ -104,15 +104,25 @@ class Suggestion:
     reason: str = ""
     candidates: list[Candidate] = field(default_factory=list)
     samples: list[str] = field(default_factory=list)
+    # More Silver columns the same bronze column also loads into (the DRT mapping maps
+    # one source column to two, e.g. one "EffectiveDate" to the policy and accounting dates).
+    also: list[str] = field(default_factory=list)
 
     @property
     def decided(self) -> bool:
         return self.silver_column is not None or self.ignored
 
     @property
+    def targets(self) -> list[str]:
+        """Every Silver column this bronze column loads into."""
+        return [] if self.ignored or not self.silver_column else [self.silver_column, *self.also]
+
+    @property
     def split(self) -> bool:
-        """Methods disagree: votes went to more than one candidate (or to "nothing fits")."""
-        return sum(1 for candidate in self.candidates if candidate.support) > 1
+        """Methods disagree: votes went to more than one candidate (or to "nothing fits").
+        A second target the column also loads into is not a disagreement."""
+        return sum(1 for candidate in self.candidates
+                   if candidate.support and candidate.silver_column not in self.also) > 1
 
     @property
     def recommended(self) -> Candidate | None:
@@ -184,16 +194,25 @@ def synonyms(column: SilverColumn) -> list[str]:
 # --- the voters -------------------------------------------------------------------
 
 
+def _targets(value) -> list[str | None]:
+    """A saved decision as a list: [silver], [silver, silver] (1:N) or [None] (ignored)."""
+    if isinstance(value, (list, tuple)):
+        return list(value) or [None]
+    return [value]
+
+
 def _saved_votes(columns, saved, known, by_name, votes, stale) -> None:
     for column in columns:
         if column in saved:
-            target = saved[column]
-            if target is not None and target not in by_name:
+            gone = [t for t in _targets(saved[column]) if t is not None and t not in by_name]
+            live = [t for t in _targets(saved[column]) if t is None or t in by_name]
+            if gone:
                 # Approved earlier, but that Silver column is no longer in the list.
-                stale[column] = f"Was mapped to {target}, which is no longer a Silver column."
-                continue
-            reason = "Approved earlier for this table" if target else "Ignored when approved earlier for this table"
-            votes[column].append(Vote(SAVED, target, 1.0, reason, own=True))
+                stale[column] = f"Was mapped to {', '.join(gone)}, which is no longer a Silver column."
+            for target in live:
+                reason = ("Approved earlier for this profit center" if target
+                          else "Ignored when approved earlier for this profit center")
+                votes[column].append(Vote(SAVED, target, 1.0, reason, own=True))
         elif known.get(normalize.compact(column)) in by_name:
             votes[column].append(Vote(SAVED, known[normalize.compact(column)], 0.95,
                                       "Same column approved for another table"))
@@ -323,13 +342,19 @@ def suggest(
     semantic_min: float = 0.72,
     fuzzy_margin: float = 5,
     semantic_margin: float = 0.05,
+    one_to_many: set[str] | None = None,
 ) -> tuple[list[Suggestion], list[str]]:
     """One suggestion per bronze column, with every method's vote, plus notes on methods
     that could not run.
 
-    ``saved``: this bronze table's approved mapping (column -> silver, None = ignored).
+    ``saved``: this profit center's approved mapping (column -> silver, a list of silver
+    columns when one column feeds several, or None = ignored).
     ``known``: approved mappings elsewhere, by normalized column name.
+    ``one_to_many``: columns whose saved targets all load (one header mapped twice);
+    for the others several saved targets are competing votes. None: every list loads.
+    Only the catalog's mapped columns are targets; system columns are never offered.
     """
+    catalog = [column for column in catalog if column.role == MAPPED]
     samples = samples or {}
     notes: list[str] = []
     by_name = {column.name: column for column in catalog}
@@ -378,6 +403,19 @@ def suggest(
         taken[candidate.silver_column] = column
         chosen[column] = candidate
 
+    # A saved one-to-many decision: the other saved targets come along as "also",
+    # unless another column holds them.
+    also: dict[str, list[str]] = {}
+    for column, candidate in chosen.items():
+        if not candidate.own or candidate.silver_column is None:
+            continue
+        if one_to_many is not None and column not in one_to_many:
+            continue
+        for target in _targets(saved.get(column)):
+            if target and target != candidate.silver_column and target in by_name and target not in taken:
+                taken[target] = column
+                also.setdefault(column, []).append(target)
+
     result = []
     for column in columns:
         suggestion = Suggestion(column, candidates=candidates[column], samples=list(samples.get(column, []))[:3])
@@ -387,11 +425,14 @@ def suggest(
             candidate.recommended = True
             suggestion.silver_column = candidate.silver_column
             suggestion.ignored = candidate.silver_column is None
+            suggestion.also = also.get(column, [])
             suggestion.selection = RECOMMENDED
             if suggestion.ignored:
-                why = "Ignored, as approved earlier for this table."
+                why = "Ignored, as approved earlier for this profit center."
             else:
                 why = f"Recommended by {' + '.join(LABELS[m] for m in candidate.methods)}."
+                if suggestion.also:
+                    why += f" Also loads into {', '.join(suggestion.also)}, as approved earlier."
         elif column in stopped:
             why = f"AI: {stopped[column].counted[0].reason.rstrip('.')}. Choose a column or Ignore."
         elif column in blocked:
@@ -410,12 +451,23 @@ def choose(suggestion: Suggestion, silver_column: str | None, ignored: bool) -> 
     """Apply the reviewer's choice. Picking the recommendation again restores it."""
     suggestion.silver_column = None if ignored else silver_column
     suggestion.ignored = ignored
+    # The main column is no longer an extra one; an ignored column loads nowhere.
+    suggestion.also = [] if ignored or not silver_column else [t for t in suggestion.also if t != silver_column]
     recommended = suggestion.recommended
     if recommended is not None and recommended.silver_column == suggestion.silver_column and \
             (recommended.silver_column is not None or ignored):
         suggestion.selection = RECOMMENDED
     else:
         suggestion.selection = MANUAL
+
+
+def set_also(suggestion: Suggestion, targets: list[str]) -> None:
+    """The reviewer's extra targets for a column (its main target and repeats dropped)."""
+    if suggestion.ignored or not suggestion.silver_column:
+        suggestion.also = []
+        return
+    suggestion.also = [t for t in dict.fromkeys(targets) if t and t != suggestion.silver_column]
+    suggestion.selection = MANUAL
 
 
 def problems(table: str, suggestions: list[Suggestion]) -> list[str]:
@@ -426,8 +478,8 @@ def problems(table: str, suggestions: list[Suggestion]) -> list[str]:
             issues.append(f"{table}.{suggestion.bronze_column}: choose a Silver column or Ignore.")
     targets: dict[str, list[str]] = {}
     for suggestion in suggestions:
-        if suggestion.silver_column:
-            targets.setdefault(suggestion.silver_column, []).append(suggestion.bronze_column)
+        for target in suggestion.targets:
+            targets.setdefault(target, []).append(suggestion.bronze_column)
     for target, sources in targets.items():
         if len(sources) > 1:
             issues.append(f"{table}: {', '.join(sources)} all map to {target}; keep one.")

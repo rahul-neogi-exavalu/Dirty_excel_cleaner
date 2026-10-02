@@ -26,6 +26,8 @@ psycopg = pytest.importorskip("psycopg")
 from fastapi.testclient import TestClient  # noqa: E402
 
 BASE = ["profit_center_name", "policy_number", "premium", "accounting_effective_date"]
+# Every bronze table carries these besides the file's own columns.
+SYSTEM = ["pc_id", "file_date", "division_name", "file_name", "processing_date"]
 
 
 @pytest.fixture(scope="module")
@@ -101,10 +103,21 @@ def _clean(client, filename: str, content: bytes) -> str:
     return job["id"]
 
 
+def _complete(client, plan: dict, file_date: str = "2025-09") -> dict:
+    """What the reviewer enters when the file name does not say it: these test names carry
+    no date. (pc_id comes from the pc0515 / pc0094 suffix.)"""
+    for file in plan["files"]:
+        if not file["file_date"]:
+            response = client.patch(f"/api/bronze/plans/{plan['id']}/files/{file['job_id']}", json={"file_date": file_date})
+            assert response.status_code == 200, response.text
+            plan = response.json()
+    return plan
+
+
 def _ingest(client, job_id: str, confirm: bool = True, expect_actions=None) -> dict:
     plan = client.post("/api/bronze/plans", json={"job_ids": [job_id]})
     assert plan.status_code == 201, plan.text
-    plan = plan.json()
+    plan = _complete(client, plan.json())
     if expect_actions is not None:
         assert [item["action"] for item in plan["items"]] == expect_actions, plan["items"]
     keys = [item["key"] for item in plan["items"]] if confirm else []
@@ -128,6 +141,13 @@ def _query(config, statement: str):
 def _columns(config, table: str) -> list[str]:
     return [row[0] for row in _query(config, (
         "SELECT column_name FROM information_schema.columns WHERE table_schema = '{b}' "
+        f"AND table_name = '{table}' AND column_name NOT LIKE '\\_%' "
+        f"AND column_name NOT IN ({', '.join(repr(name) for name in SYSTEM)}) ORDER BY ordinal_position"))]
+
+
+def _all_columns(config, table: str) -> list[str]:
+    return [row[0] for row in _query(config, (
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = '{b}' "
         f"AND table_name = '{table}' AND column_name NOT LIKE '\\_%' ORDER BY ordinal_position"))]
 
 
@@ -138,9 +158,20 @@ def test_scenario_document_end_to_end(env):
 
     # Jan-Jun, single sheet -> CREATE ext_pc0515_arr
     first = _clean(client, "ARR_pc0515.xlsx", _workbook({"ARR": (BASE, _rows(h1, BASE))}))
+    plan = client.post("/api/bronze/plans", json={"job_ids": [first]}).json()
+    file = plan["files"][0]
+    # pc_id from the name, division from division_mapping; no date in the name -> asked for.
+    assert (file["pc_id"], file["division_name"], file["file_date"]) == ("PC0515", "Bridge Specialty Group", None)
+    assert any("enter the file date" in blocker for blocker in plan["blockers"])
+    bad = client.patch(f"/api/bronze/plans/{plan['id']}/files/{first}", json={"file_date": "June"})
+    assert bad.status_code == 422
     _ingest(client, first, expect_actions=["create"])
     assert _columns(config, "ext_pc0515_arr") == BASE
+    # The business's layout: pc_id first, the file's columns, then the file-level values.
+    assert _all_columns(config, "ext_pc0515_arr") == ["pc_id", *BASE, *SYSTEM[1:]]
     assert _query(config, "SELECT count(*) FROM {b}.ext_pc0515_arr")[0][0] == 24
+    values = _query(config, "SELECT DISTINCT pc_id, file_date::text, division_name, file_name FROM {b}.ext_pc0515_arr")
+    assert values == [("PC0515", "2025-09-01", "Bridge Specialty Group", "ARR_pc0515.xlsx")]
 
     # Case 1: July, identical schema -> APPEND
     _ingest(client, _clean(client, "ARR_jul_pc0515.xlsx", _workbook({"ARR": (BASE, _rows([7], BASE))})),
@@ -176,6 +207,15 @@ def test_scenario_document_end_to_end(env):
     assert _columns(config, "ext_pc0515_arr") == BASE
     statuses = dict(_query(config, "SELECT status, count(*) FROM {c}.ingestion WHERE table_name = 'ext_pc0515_arr' GROUP BY status"))
     assert statuses == {"ingested": 1, "superseded": 4}
+    # Each load has its own processing_date, on its rows and in the audit table.
+    audit = _query(config, "SELECT pc_id, file_date::text, division_name, processing_date FROM {c}.ingestion "
+                           "WHERE table_name = 'ext_pc0515_arr' AND status = 'ingested'")
+    assert audit[0][:3] == ("PC0515", "2025-09-01", "Bridge Specialty Group") and audit[0][3] is not None
+    stamps = _query(config, "SELECT processing_date FROM {c}.ingestion WHERE table_name LIKE 'ext_pc0515%' "
+                            "AND status <> 'skipped'")
+    assert len({row[0] for row in stamps}) == len(stamps)
+    assert _query(config, "SELECT count(*) FROM {b}.ext_pc0515_arr r JOIN {c}.ingestion i "
+                          "ON i.id = r._ingestion_id AND i.processing_date = r.processing_date")[0][0] == 18
 
     # Month-named sheets appended into one table -> ext_<src>_data
     content = _workbook({"Jan": (BASE, _rows([1], BASE)), "Feb": (BASE, _rows([2], BASE))})
@@ -186,6 +226,7 @@ def test_scenario_document_end_to_end(env):
     assert renamed.status_code == 200, renamed.text
     _ingest(client, monthly, expect_actions=["create"])
     assert _query(config, "SELECT count(DISTINCT _source_sheet) FROM {b}.ext_pc0094_data")[0][0] == 2
+    assert _query(config, "SELECT DISTINCT pc_id, division_name FROM {b}.ext_pc0094_data") == [("PC0094", "AH Programs")]
     assert "month_sheet" in _columns(config, "ext_pc0094_data")
 
     # The very same file (same bytes) again -> SKIP

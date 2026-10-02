@@ -35,6 +35,13 @@ def plan_out(plan: Plan) -> PlanOut:
                 period_candidates=[
                     {k: v for k, v in candidate.items() if k != "rank"} for candidate in file.period_candidates
                 ],
+                pc_id=file.pc_id,
+                detected_pc_id=file.detected_pc_id,
+                file_date=file.file_date.isoformat() if file.file_date else None,
+                detected_file_date=file.detected_file_date.isoformat() if file.detected_file_date else None,
+                division_name=file.division_name,
+                division_matches=file.division_matches,
+                division_options=bronze_service.division_options(file, plan.divisions),
             )
             for file in plan.files
         ],
@@ -73,6 +80,7 @@ async def update_file(plan_id: str, job_id: str, request: PlanFileUpdate) -> Pla
     plan = await run_in_threadpool(
         bronze_service.update_file, plan_id, job_id, request.source_system,
         request.period_start, request.period_end, request.model_fields_set,
+        request.pc_id, request.file_date, request.division_name,
     )
     return plan_out(plan)
 

@@ -236,7 +236,11 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
   const tables = new Set(active.map((item) => item.table_name)).size;
   const blocked = plan.blockers.length > 0;
   const canApprove = !blocked && !unconfirmed.length && active.length > 0;
-  const filesMissing = plan.files.filter((file) => !file.source_system || !file.period_start).length;
+  const filesMissing = plan.files.filter(
+    (file) =>
+      !file.source_system || !file.period_start || !file.pc_id || !file.file_date ||
+      (file.division_matches.length > 1 && !file.division_name),
+  ).length;
   const itemsToCheck = plan.items.filter(
     (item) => item.action !== "skip" && (item.blockers.length > 0 || (item.requires_confirmation && !confirmed.has(item.key))),
   ).length;
@@ -286,7 +290,7 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
           step={1}
           icon={<FileSpreadsheet />}
           title="Files"
-          description="Confirm source system and period."
+          description="Confirm profit center, date, division, period."
           actions={<Button size="sm" variant="ghost" icon={<RefreshCw />} onClick={createPlan} disabled={busy}>Re-plan</Button>}
         >
           <FilesTable plan={plan} busy={busy} onChange={(jobId, change) => mutate(() => api.updatePlanFile(plan.id, jobId, change))} />
@@ -411,13 +415,16 @@ function FilesTable({ plan, busy, onChange }: { plan: IngestPlan; busy: boolean;
   return (
     <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
     <div className="relative overflow-x-auto scroll-thin">
-      <table className="w-full min-w-[640px] border-collapse text-table">
+      <table className="w-full min-w-[1080px] border-collapse text-table">
         <caption className="sr-only">Files in this plan</caption>
         <thead className="bg-ink-50">
           <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
             <th scope="col" className="min-w-[180px] px-4 py-2.5">File</th>
-            <th scope="col" className="min-w-[130px] px-3 py-2.5">Source system</th>
-            <th scope="col" className="min-w-[300px] px-3 py-2.5">Period</th>
+            <th scope="col" className="min-w-[120px] px-3 py-2.5">Profit center</th>
+            <th scope="col" className="min-w-[150px] px-3 py-2.5">File date</th>
+            <th scope="col" className="min-w-[190px] px-3 py-2.5">Division</th>
+            <th scope="col" className="min-w-[120px] px-3 py-2.5">Source system</th>
+            <th scope="col" className="min-w-[280px] px-3 py-2.5">Period</th>
           </tr>
         </thead>
         <tbody>
@@ -434,6 +441,10 @@ function FilesTable({ plan, busy, onChange }: { plan: IngestPlan; busy: boolean;
 
 function FileRow({ file, busy, onChange }: { file: PlanFile; busy: boolean; onChange: (change: Record<string, string | null>) => void }) {
   const [source, setSource] = useState(file.source_system ?? "");
+  const [pc, setPc] = useState(file.pc_id ?? "");
+  const [fileDate, setFileDate] = useState(file.file_date ?? "");
+  useEffect(() => setPc(file.pc_id ?? ""), [file.pc_id]);
+  useEffect(() => setFileDate(file.file_date ?? ""), [file.file_date]);
   const [start, setStart] = useState(file.period_start ?? "");
   const [end, setEnd] = useState(file.period_end ?? "");
   useEffect(() => setSource(file.source_system ?? ""), [file.source_system]);
@@ -447,6 +458,9 @@ function FileRow({ file, busy, onChange }: { file: PlanFile; busy: boolean; onCh
   const input = "h-8 w-full rounded border bg-white px-2 text-body outline-none focus-visible:shadow-focus disabled:bg-ink-50";
   const sourceChanged = file.detected_source_system !== file.source_system;
   const periodChanged = file.detected_period_start !== file.period_start || file.detected_period_end !== file.period_end;
+  const fileChanged = file.detected_pc_id !== file.pc_id || file.detected_file_date !== file.file_date;
+  // One division: shown. Two: the reviewer picks. None listed: optional, from every division.
+  const divisionNeeded = file.division_matches.length > 1 && !file.division_name;
 
   return (
     <tr data-row className="border-b border-ink-100 align-middle last:border-0">
@@ -454,7 +468,7 @@ function FileRow({ file, busy, onChange }: { file: PlanFile; busy: boolean; onCh
         <span className="flex items-center gap-2">
           <FileSpreadsheet className="h-4 w-4 shrink-0 text-brand-600" aria-hidden />
           <span className="truncate font-medium text-ink-900" title={file.file_name}>{file.file_name}</span>
-          {(sourceChanged || periodChanged) && <Badge tone="info">Edited</Badge>}
+          {(sourceChanged || periodChanged || fileChanged) && <Badge tone="info">Edited</Badge>}
         </span>
         <div className="ml-6 min-w-0 overflow-hidden">
         <Tooltip
@@ -474,6 +488,45 @@ function FileRow({ file, busy, onChange }: { file: PlanFile; busy: boolean; onCh
           </span>
         </Tooltip>
         </div>
+      </td>
+      <td className="px-3 py-2.5">
+        <input
+          aria-label={`Profit center for ${file.file_name}`}
+          value={pc}
+          disabled={busy}
+          placeholder="PC0796"
+          onChange={(event) => setPc(event.target.value)}
+          onBlur={() => pc !== (file.pc_id ?? "") && onChange({ pc_id: pc || null })}
+          onKeyDown={(event) => event.key === "Enter" && (event.target as HTMLInputElement).blur()}
+          className={clsx(input, "font-mono", file.pc_id ? "border-ink-200" : "border-amber-400")}
+        />
+      </td>
+      <td className="px-3 py-2.5">
+        <input
+          type="date"
+          aria-label={`File date for ${file.file_name}`}
+          value={fileDate}
+          disabled={busy}
+          onChange={(event) => setFileDate(event.target.value)}
+          onBlur={() => fileDate !== (file.file_date ?? "") && onChange({ file_date: fileDate || null })}
+          className={clsx(input, "num", file.file_date ? "border-ink-200" : "border-amber-400")}
+        />
+      </td>
+      <td className="px-3 py-2.5">
+        {file.division_matches.length === 1 ? (
+          <span className="block truncate text-body text-ink-800" title="From division_mapping">{file.division_name}</span>
+        ) : (
+          <select
+            aria-label={`Division for ${file.file_name}`}
+            value={file.division_name ?? ""}
+            disabled={busy}
+            onChange={(event) => onChange({ division_name: event.target.value || null })}
+            className={clsx(input, "pr-1", divisionNeeded ? "border-amber-400" : "border-ink-200")}
+          >
+            <option value="">{file.division_matches.length > 1 ? "Choose…" : "— not listed"}</option>
+            {file.division_options.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+        )}
       </td>
       <td className="px-3 py-2.5">
         <input
@@ -846,7 +899,7 @@ function TablesView() {
       </ul>
       <Pagination {...paged} onPage={paged.setPage} noun="table" />
       <p className="flex items-center gap-1.5 border-t border-ink-100 px-5 py-3 text-caption text-ink-500 md:px-6">
-        <ArrowRight className="h-3.5 w-3.5" aria-hidden /> Every row carries _ingestion_id, _source_file and _source_sheet.
+        <ArrowRight className="h-3.5 w-3.5" aria-hidden /> Every row carries pc_id, file_date, division_name, file_name and processing_date.
       </p>
     </section>
   );

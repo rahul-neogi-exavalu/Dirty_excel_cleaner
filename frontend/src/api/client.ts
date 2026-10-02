@@ -13,10 +13,10 @@ import type {
   EligibleLoad,
   CleanupLoad,
   IngestPlan,
-  SavedMapping,
+  DrtMapping,
   SilverCatalog,
   SilverRun,
-  SilverSummaryRow,
+  SilverAggregateRow,
   JobResults,
   JobStatus,
   OutputSummary,
@@ -206,7 +206,18 @@ export const api = {
   createPlan: (job_ids: string[], batch_id: string | null) =>
     request<IngestPlan>("/api/bronze/plans", { method: "POST", body: JSON.stringify({ job_ids, batch_id }) }),
   getPlan: (id: string) => request<IngestPlan>(`/api/bronze/plans/${id}`),
-  updatePlanFile: (id: string, jobId: string, change: { source_system?: string | null; period_start?: string | null; period_end?: string | null }) =>
+  updatePlanFile: (
+    id: string,
+    jobId: string,
+    change: {
+      source_system?: string | null;
+      period_start?: string | null;
+      period_end?: string | null;
+      pc_id?: string | null;
+      file_date?: string | null;
+      division_name?: string | null;
+    },
+  ) =>
     request<IngestPlan>(`/api/bronze/plans/${id}/files/${jobId}`, { method: "PATCH", body: JSON.stringify(change) }),
   updatePlanItem: (id: string, key: string, change: { table_name?: string | null; action?: string | null }) =>
     request<IngestPlan>(`/api/bronze/plans/${id}/items/${encodeURIComponent(key)}`, { method: "PATCH", body: JSON.stringify(change) }),
@@ -219,15 +230,18 @@ export const api = {
   createSilverRun: (ingestion_ids: string[]) =>
     request<SilverRun>("/api/silver/runs", { method: "POST", body: JSON.stringify({ ingestion_ids }) }),
   getSilverRun: (id: string) => request<SilverRun>(`/api/silver/runs/${id}`),
-  editSilverRunMapping: (id: string, change: { table_name: string; bronze_column: string; silver_column: string | null; ignored: boolean }) =>
+  editSilverRunMapping: (
+    id: string,
+    change: { table_name: string; bronze_column: string; silver_column?: string | null; ignored?: boolean; also?: string[] },
+  ) =>
     request<SilverRun>(`/api/silver/runs/${id}/mapping`, { method: "PATCH", body: JSON.stringify(change) }),
   /** The signed-in user is recorded as the reviewer. */
   approveSilverRun: (id: string) =>
     request<SilverRun>(`/api/silver/runs/${id}/approve`, { method: "POST", body: JSON.stringify({}) }),
-  silverMapping: () => request<SavedMapping[]>("/api/silver/mapping"),
-  editSilverMapping: (row: { pc_id: string; bronze_table_name: string; bronze_column_name: string; silver_column_name: string | null }) =>
-    request<SavedMapping>("/api/silver/mapping", { method: "PATCH", body: JSON.stringify(row) }),
-  silverSummary: () => request<SilverSummaryRow[]>("/api/silver/summary"),
+  silverMapping: () => request<DrtMapping[]>("/api/silver/mapping"),
+  editSilverMapping: (row: { profit_center: string; pc_column: string; silver_column_name: string | null; new_silver_column_name: string | null }) =>
+    request<DrtMapping>("/api/silver/mapping", { method: "PATCH", body: JSON.stringify(row) }),
+  silverAggregate: () => request<SilverAggregateRow[]>("/api/silver/aggregate"),
 };
 
 export const exportUrls = {

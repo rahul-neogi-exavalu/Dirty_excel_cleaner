@@ -1,4 +1,4 @@
-"""Write the 10 test workbooks for File -> Bronze -> Silver, plus the LOTL seed.
+"""Write the 10 test workbooks for File -> Bronze -> Silver, plus test LOTL rows.
 
     python backend/tools/make_silver_test_files.py
 
@@ -183,11 +183,14 @@ def main() -> None:
     sheet(book, "Notes", ["Note"], [["Internal - do not load"]], hidden=True)
     save(book, "10_Report_pc0606_2026_JanJul.xlsx")
 
+    # Test offices in the LOTL's own shape, added on top of the business's LOTL with
+    # backend/tools/seed_reference.py --add-lotl (the real LOTL does not know them).
     with open(OUT / "lotl_seed.csv", "w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["pc_id", "legacy_office_name", "profit_center_number"])
-        for pc_id, (name, number) in OFFICES.items():
-            writer.writerow([pc_id, name, number])
+        writer = csv.writer(handle, lineterminator="
+")
+        writer.writerow(["profit_center_number", "legacy_office_name", "status"])
+        for number, (name, _) in OFFICES.items():
+            writer.writerow([number.lstrip("0"), name, "Active"])
     print("wrote lotl_seed.csv")
 
 

@@ -309,6 +309,17 @@ export interface PlanFile {
   detected_period_end: string | null;
   period_source: string | null;
   period_candidates: PeriodCandidate[];
+  /** PC + 4-digit number, e.g. PC0796 (from the file name, or entered). */
+  pc_id: string | null;
+  detected_pc_id: string | null;
+  /** YYYY-MM-DD. */
+  file_date: string | null;
+  detected_file_date: string | null;
+  division_name: string | null;
+  /** The divisions division_mapping lists for the profit center (two for a few). */
+  division_matches: string[];
+  /** What the reviewer may choose from. */
+  division_options: string[];
 }
 
 export interface PlanReplaceRef {
@@ -368,6 +379,10 @@ export interface BronzeIngestion {
   reviewed_by: string | null;
   created_at: number;
   superseded_by: string | null;
+  pc_id: string | null;
+  file_date: string | null;
+  division_name: string | null;
+  processing_date: number | null;
 }
 
 export interface BronzeTable {
@@ -410,14 +425,19 @@ export interface SilverCandidate {
 export interface SilverColumnDef {
   name: string;
   drt_name: string;
-  data_type: "text" | "date" | "decimal";
+  /** As the business's silver_schema states it: string, int, bigint, boolean, date, timestamp, decimal(p,s). */
+  data_type: string;
   business_key: boolean;
   description: string;
+  /** "mapped": a bronze column can map to it; "system": the pipeline fills it. */
+  role: "mapped" | "system";
 }
 
 export interface SilverCatalog {
   file: string;
+  /** Every silver_detail column, in table order. */
   columns: SilverColumnDef[];
+  aggregate_columns: string[];
   semantic: boolean;
   ai: boolean;
   /** Provider and model, e.g. "Azure OpenAI · gpt-4.1-mini"; empty when off. */
@@ -434,18 +454,26 @@ export interface EligibleLoad {
   rows: number;
   ingested_at: number;
   silver_status: string | null;
+  pc_id: string | null;
+  division_name: string | null;
+  file_date: string | null;
+  processing_date: number;
 }
 
 export interface CleanupLoad {
   ingestion_id: string;
   table_name: string;
   file_name: string;
+  source_system: string | null;
   pc_id: string | null;
+  processing_date: string;
 }
 
 export interface SilverMappingRow {
   bronze_column: string;
   silver_column: string | null;
+  /** More Silver columns the same bronze column also loads into. */
+  also: string[];
   ignored: boolean;
   selection: MappingSelection;
   /** Methods that voted for the current choice. */
@@ -489,21 +517,34 @@ export interface SilverRun {
   tables: SilverTableReview[];
 }
 
-export interface SavedMapping {
-  pc_id: string;
-  bronze_table_name: string;
-  bronze_column_name: string;
-  drt_column_name: string | null;
+/** A row of the business's DRT column mapping. One source column can have two rows. */
+export interface DrtMapping {
+  /** PC0077 */
+  profit_center: string;
+  /** The source column as the file writes it. */
+  pc_column: string;
+  drt_column: string | null;
+  /** null with no drt_column: the column is ignored. */
   silver_column_name: string | null;
 }
 
-export interface SilverSummaryRow {
-  pc_id: string;
+/** A silver_aggregate row: every column of the business's aggregate schema. */
+export interface SilverAggregateRow {
+  source_system: string | null;
   profit_center_number: string | null;
   profit_center_name: string | null;
-  accounting_month: string | null;
-  row_count: number;
-  premium_total: number | null;
+  record_grain: string | null;
+  reporting_period: string | null;
+  reporting_year: number | null;
+  reporting_month: number | null;
+  premium: number | null;
+  policy_fees: number | null;
+  gross_commission_amount: number | null;
+  producer_commission_amount: number | null;
+  revenue: number | null;
+  policy_count: number | null;
+  file_date: string | null;
+  [column: string]: string | number | boolean | null;
 }
 
 /* ---- Sign-in, users and job history ---- */
