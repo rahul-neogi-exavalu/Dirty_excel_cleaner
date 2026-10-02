@@ -6,6 +6,7 @@ import {
   Check,
   Columns3,
   Database,
+  EyeOff,
   Info,
   Layers3,
   ListChecks,
@@ -355,6 +356,18 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
     }
   };
 
+  const ignoreAll = async (tableName: string) => {
+    setBusy(true);
+    try {
+      onChange(await api.ignoreUnmapped(run.id, tableName));
+      toast({ severity: "success", title: "Unmapped columns ignored", description: `All undecided columns in ${tableName} set to Ignore.` });
+    } catch (err) {
+      toast({ severity: "error", title: "Could not ignore columns", description: toError(err).body.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
       <div className="min-w-0 space-y-6">
@@ -366,7 +379,7 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
             {run.cleanup.map((item) => `${item.file_name} (${item.table_name})`).join(", ")}
           </Alert>
         )}
-        <TablePicker tables={run.tables} catalog={catalog} busy={busy} onEdit={edit} onAlso={editAlso} />
+        <TablePicker tables={run.tables} catalog={catalog} busy={busy} onEdit={edit} onAlso={editAlso} onIgnoreAll={ignoreAll} />
       </div>
 
       <aside className="scroll-thin xl:sticky xl:top-[80px] xl:max-h-[calc(100dvh-96px)] xl:self-start xl:overflow-y-auto">
@@ -415,12 +428,14 @@ function TablePicker({
   busy,
   onEdit,
   onAlso,
+  onIgnoreAll,
 }: {
   tables: SilverTableReview[];
   catalog: SilverCatalog;
   busy: boolean;
   onEdit: (table: string, column: string, value: string) => void;
   onAlso: (table: string, column: string, also: string[]) => void;
+  onIgnoreAll: (table: string) => void;
 }) {
   const [name, setName] = useState(tables[0]?.table_name ?? "");
   const table = tables.find((item) => item.table_name === name) ?? tables[0];
@@ -451,6 +466,7 @@ function TablePicker({
       picker={picker}
       onEdit={(column, value) => onEdit(table.table_name, column, value)}
       onAlso={(column, also) => onAlso(table.table_name, column, also)}
+      onIgnoreAll={() => onIgnoreAll(table.table_name)}
     />
   );
 }
@@ -461,6 +477,7 @@ function TableMapping({
   busy,
   onEdit,
   onAlso,
+  onIgnoreAll,
   picker,
 }: {
   table: SilverTableReview;
@@ -468,6 +485,7 @@ function TableMapping({
   busy: boolean;
   onEdit: (column: string, value: string) => void;
   onAlso: (column: string, also: string[]) => void;
+  onIgnoreAll: () => void;
   picker?: React.ReactNode;
 }) {
   const list = useRef<HTMLDivElement>(null);
@@ -502,7 +520,20 @@ function TableMapping({
     >
       {(picker || openRows.length > 0) && (
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          {picker ?? <span />}
+          <div className="flex flex-wrap items-end gap-3">
+            {picker}
+            {openRows.length > 0 && (
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<EyeOff />}
+                disabled={busy}
+                onClick={onIgnoreAll}
+              >
+                Ignore all unmapped ({openRows.length})
+              </Button>
+            )}
+          </div>
           {openRows.length > 0 && (
             <LabeledCheckbox label={`Only columns to choose (${openRows.length})`} checked={onlyOpen} onChange={setOnlyOpen} />
           )}

@@ -238,6 +238,11 @@ export const api = {
   /** The signed-in user is recorded as the reviewer. */
   approveSilverRun: (id: string) =>
     request<SilverRun>(`/api/silver/runs/${id}/approve`, { method: "POST", body: JSON.stringify({}) }),
+  ignoreUnmapped: (id: string, table_name?: string) =>
+    request<SilverRun>(`/api/silver/runs/${id}/ignore-unmapped`, {
+      method: "POST",
+      body: JSON.stringify({ table_name: table_name ?? null }),
+    }),
   silverMapping: () => request<DrtMapping[]>("/api/silver/mapping"),
   editSilverMapping: (row: { profit_center: string; pc_column: string; silver_column_name: string | null; new_silver_column_name: string | null }) =>
     request<DrtMapping>("/api/silver/mapping", { method: "PATCH", body: JSON.stringify(row) }),

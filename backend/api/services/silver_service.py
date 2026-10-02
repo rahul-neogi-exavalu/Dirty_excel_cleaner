@@ -465,6 +465,34 @@ def update_mapping(run_id: str, table: str, column: str, silver_column: str | No
     return run
 
 
+def ignore_unmapped(run_id: str, table_name: str | None = None) -> Run:
+    """Bulk-ignore every undecided column for a table, or for all tables at once.
+
+    Avoids dozens of round trips when the reviewer wants to dismiss every column
+    no method could match. Each column is set exactly as ``choose(… ignored=True)``
+    would: the quality report is rebuilt once at the end.
+    """
+    run = get_run(run_id)
+    columns_catalog = catalog()
+    with run.lock:
+        if run.status != DRAFT:
+            raise conflict("This run has already been approved.")
+        reviews = run.tables if table_name is None else [
+            t for t in run.tables if t.table_name == table_name
+        ]
+        if table_name is not None and not reviews:
+            raise not_found("That table in the run")
+        changed = 0
+        for review in reviews:
+            for suggestion in review.suggestions:
+                if not suggestion.decided:
+                    matching.choose(suggestion, None, True)
+                    changed += 1
+            if changed:
+                _quality(review, columns_catalog, run.lotl)
+    return run
+
+
 # --- loading ---------------------------------------------------------------------
 
 

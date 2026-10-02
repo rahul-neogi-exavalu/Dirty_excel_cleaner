@@ -137,6 +137,16 @@ async def edit_run_mapping(run_id: str, request: MappingEdit) -> dict:
     return run_out(run)
 
 
+class IgnoreUnmapped(BaseModel):
+    table_name: str | None = None
+
+
+@router.post("/runs/{run_id}/ignore-unmapped")
+async def ignore_unmapped(run_id: str, request: IgnoreUnmapped) -> dict:
+    run = await run_in_threadpool(silver_service.ignore_unmapped, run_id, request.table_name)
+    return run_out(run)
+
+
 @router.post("/runs/{run_id}/approve", status_code=202)
 async def approve(run_id: str, request: RunApprove, user: User = Depends(require_user)) -> dict:
     return run_out(await run_in_threadpool(silver_service.approve, run_id, user.user_name, user.user_id))
