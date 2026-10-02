@@ -16,11 +16,23 @@ export interface NavSection {
 const GAP = 16;
 
 /**
- * Scrollspy: a sticky strip of section links. Clicking scrolls to the section; scrolling
- * the page highlights the section currently in view.
+ * A sticky strip of section links. As a scrollspy, clicking scrolls to the section and
+ * scrolling highlights the one in view. Given `active` and `onSelect` it switches
+ * sections instead, one on screen at a time, so the page barely scrolls.
  */
-export function SectionNav({ sections, label }: { sections: NavSection[]; label: string }) {
-  const [active, setActive] = useState(sections[0]?.id);
+export function SectionNav({
+  sections,
+  label,
+  active: shown,
+  onSelect,
+}: {
+  sections: NavSection[];
+  label: string;
+  active?: string;
+  onSelect?: (id: string) => void;
+}) {
+  const [spied, setActive] = useState(sections[0]?.id);
+  const active = shown ?? spied;
   const lock = useRef<number | null>(null);
   const nav = useRef<HTMLElement>(null);
   // Where content disappears under the sticky top bar + this nav; measured, so it holds
@@ -40,6 +52,7 @@ export function SectionNav({ sections, label }: { sections: NavSection[]; label:
   }, [sections]);
 
   useEffect(() => {
+    if (onSelect) return; // switching, not scrolling: nothing to spy on
     let frame = 0;
     const onScroll = () => {
       cancelAnimationFrame(frame);
@@ -53,9 +66,14 @@ export function SectionNav({ sections, label }: { sections: NavSection[]; label:
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onScroll);
     };
-  }, [measure]);
+  }, [measure, onSelect]);
 
   const go = (id: string) => {
+    if (onSelect) {
+      onSelect(id);
+      window.scrollTo({ top: 0 });
+      return;
+    }
     const el = document.getElementById(id);
     if (!el) return;
     setActive(id);
@@ -70,8 +88,8 @@ export function SectionNav({ sections, label }: { sections: NavSection[]; label:
   };
 
   return (
-    <nav ref={nav} aria-label={label} className="sticky top-14 z-20 -mx-4 mb-6 bg-ink-50/90 px-4 py-3 backdrop-blur-md md:-mx-10 md:px-10">
-      <ol className="flex gap-1 overflow-x-auto rounded-lg border border-ink-200 bg-ink-100 p-1 scroll-thin">
+    <nav ref={nav} aria-label={label} className="sticky top-14 z-20 -mx-4 mb-6 bg-ink-50/90 px-4 py-3 backdrop-blur-md md:-mx-8 md:px-8 xl:-mx-10 xl:px-10">
+      <ol className="relative flex gap-1 overflow-x-auto rounded-lg border border-ink-200 bg-ink-100 p-1 scroll-thin">
         {sections.map((section) => {
           const selected = section.id === active;
           return (

@@ -1,4 +1,4 @@
-/** Exavalu Data Cleaning Studio design tokens.
+/** Exavalu Data Processing Studio design tokens.
  *
  * Neutral first: cool greys carry the interface, one cobalt accent marks the primary
  * action, the active step and focus. Green, amber and red mean success, warning and
@@ -10,6 +10,8 @@ export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      // 24-inch and larger monitors: 1920 (FHD) and 2560 (QHD) wide.
+      screens: { "3xl": "1920px", "4xl": "2400px" },
       colors: {
         // Cobalt: primary action, active step, focus and selection. ~70% saturation.
         brand: {

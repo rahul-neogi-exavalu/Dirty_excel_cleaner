@@ -179,7 +179,8 @@ class PlanItemUpdate(BaseModel):
 
 
 class PlanApprove(BaseModel):
-    reviewed_by: str = Field(min_length=2, max_length=120)
+    # Ignored: the signed-in user is the reviewer. Kept so older clients still validate.
+    reviewed_by: str | None = None
     confirmed: list[str] = []
 
 

@@ -44,13 +44,10 @@ def clean_workbook(source: Path, out_dir: Path, audit_dir: Path, max_cells: int 
 
     out_dir.mkdir(parents=True, exist_ok=True)
     written, blocked = [], []
+    # One job id per workbook, fixed before anything is written, so every CSV, its
+    # metadata and the audit carry the final names -- nothing is renamed afterwards.
+    orchestrate.name_files(outputs, str(uuid.uuid4()))
     for output in outputs:
-        # The job id is fixed at write time, so the CSV, its metadata and the audit all
-        # carry the final names -- nothing is renamed afterwards.
-        output.job_id = str(uuid.uuid4())
-        output.file = f"{stem}_{output.job_id}.csv"
-        output.metadata_file = f"{stem}_metadata_{output.job_id}.csv"
-
         path = out_dir / output.file
         if not _write(output.frame, path, blocked):
             # No CSV, so nothing for the metadata to describe.

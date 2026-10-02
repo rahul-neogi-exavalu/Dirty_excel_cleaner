@@ -18,19 +18,22 @@ import {
   TriangleAlert,
   UserCheck,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api/client";
 import type { BronzeStatus, BronzeTable, IngestAction, IngestPlan, PlanFile, PlanItem } from "../api/types";
 import { ColumnChips } from "../components/AppendOutcome";
 import { PageHeader, SectionCard } from "../components/layout/Layout";
 import { Badge, type Tone } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
-import { Checkbox } from "../components/ui/Controls";
+import { Checkbox, LabeledCheckbox } from "../components/ui/Controls";
 import { Alert, EmptyState, ProgressBar, Skeleton, StatTile, useToast } from "../components/ui/Feedback";
 import { Modal, Tooltip } from "../components/ui/Overlay";
+import { Pagination, useFitPageSize, usePaged } from "../components/ui/Pagination";
+import { Segmented } from "../components/ui/Segmented";
 import { Select } from "../components/ui/Select";
 import { TabPanel, Tabs } from "../components/ui/Tabs";
 import { formatNumber, formatTimestamp, plural } from "../lib/format";
+import { useAuth } from "../state/auth";
 import { useNavigate, useWorkflow } from "../state/workflow";
 
 const ACTION: Record<IngestAction, { label: string; tone: Tone }> = {
@@ -144,15 +147,11 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
   const [error, setError] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmed, setConfirmed] = useState<Set<string>>(new Set());
-  const [reviewer, setReviewer] = useState(() => {
-    try {
-      return localStorage.getItem("exavalu.reviewer") ?? "";
-    } catch {
-      return "";
-    }
-  });
+  const reviewer = useAuth().user?.user_name ?? "";
   const [finalCheck, setFinalCheck] = useState(false);
   const [schemaFor, setSchemaFor] = useState<PlanItem | null>(null);
+  // Files and Plan take turns on screen; null until the first plan picks where to start.
+  const [part, setPart] = useState<"files" | "plan" | null>(null);
 
   const createPlan = useCallback(async () => {
     if (!batch || !jobIds.length) return;
@@ -236,18 +235,19 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
   const rows = active.reduce((sum, item) => sum + item.rows, 0);
   const tables = new Set(active.map((item) => item.table_name)).size;
   const blocked = plan.blockers.length > 0;
-  const canApprove = !blocked && !unconfirmed.length && reviewer.trim().length >= 2 && active.length > 0;
+  const canApprove = !blocked && !unconfirmed.length && active.length > 0;
+  const filesMissing = plan.files.filter((file) => !file.source_system || !file.period_start).length;
+  const itemsToCheck = plan.items.filter(
+    (item) => item.action !== "skip" && (item.blockers.length > 0 || (item.requires_confirmation && !confirmed.has(item.key))),
+  ).length;
+  // Start where the work is: files missing an input first, otherwise the plan.
+  const shown = part ?? (filesMissing ? "files" : "plan");
 
   const approve = async () => {
     setFinalCheck(false);
     setBusy(true);
     try {
-      localStorage.setItem("exavalu.reviewer", reviewer.trim());
-    } catch {
-      /* storage unavailable */
-    }
-    try {
-      setPlan(await api.approvePlan(plan.id, reviewer.trim(), [...confirmed]));
+      setPlan(await api.approvePlan(plan.id, [...confirmed]));
     } catch (err) {
       const apiError = toError(err);
       toast({ severity: "error", title: apiError.body.message, description: apiError.body.advice ?? undefined });
@@ -272,6 +272,16 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
             The configuration changed after cleaning. This plan uses the last run.
           </Alert>
         )}
+        <Segmented
+          label="Plan sections"
+          value={shown}
+          onChange={setPart}
+          items={[
+            { id: "files", label: `Files (${plan.files.length})`, step: 1, icon: <FileSpreadsheet />, attention: filesMissing > 0, done: filesMissing === 0 },
+            { id: "plan", label: `Plan (${plan.items.length})`, step: 2, icon: <Table2 />, attention: itemsToCheck > 0, done: itemsToCheck === 0 && filesMissing === 0 },
+          ]}
+        />
+        {shown === "files" ? (
         <SectionCard
           step={1}
           icon={<FileSpreadsheet />}
@@ -281,7 +291,7 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
         >
           <FilesTable plan={plan} busy={busy} onChange={(jobId, change) => mutate(() => api.updatePlanFile(plan.id, jobId, change))} />
         </SectionCard>
-
+        ) : (
         <SectionCard step={2} icon={<Table2 />} title="Plan" description="Target table and action per output.">
           <PlanTable
             plan={plan}
@@ -297,9 +307,10 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
             onChange={(key, change) => mutate(() => api.updatePlanItem(plan.id, key, change))}
           />
         </SectionCard>
+        )}
       </div>
 
-      <aside className="xl:sticky xl:top-[80px] xl:self-start">
+      <aside className="scroll-thin xl:sticky xl:top-[80px] xl:max-h-[calc(100dvh-96px)] xl:self-start xl:overflow-y-auto">
         <section className="card p-6" aria-labelledby="approve-title">
           <h2 id="approve-title" className="label-caps">Approval</h2>
           <div className="mt-4 grid grid-cols-2 gap-3">
@@ -309,20 +320,16 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
           <ul className="mt-4 space-y-2 text-body">
             <CheckLine ok={!blocked} label={blocked ? plural(plan.blockers.length, "issue") + " to fix" : "Inputs complete"} />
             <CheckLine ok={!unconfirmed.length} label={needConfirm.length ? `${needConfirm.length - unconfirmed.length} / ${needConfirm.length} confirmed` : "No risky changes"} />
-            <CheckLine ok={reviewer.trim().length >= 2} label="Reviewer named" />
           </ul>
           {blocked && (
             <Alert tone="warning" className="mt-4" title="Fix first">
               <ul className="space-y-0.5">{plan.blockers.slice(0, 4).map((text) => <li key={text}>{text}</li>)}</ul>
             </Alert>
           )}
-          <label className="mt-5 block">
-            <span className="label-caps">Reviewed by</span>
-            <span className="mt-1.5 flex items-center gap-2 rounded border border-ink-200 bg-white px-3 focus-within:shadow-focus">
-              <UserCheck className="h-4 w-4 shrink-0 text-ink-400" aria-hidden />
-              <input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="Your name" maxLength={120} className="h-9 w-full bg-transparent text-body outline-none" />
-            </span>
-          </label>
+          <p className="mt-5 flex items-center gap-2 text-body text-ink-600">
+            <UserCheck className="h-4 w-4 shrink-0 text-ink-400" aria-hidden />
+            Approving as <span className="font-medium text-ink-900">{reviewer}</span>
+          </p>
           <Button
             variant="primary"
             size="lg"
@@ -399,8 +406,11 @@ const periodLabel = (start: string | null, end: string | null) => (!start ? "—
 /* ---- Files ---- */
 
 function FilesTable({ plan, busy, onChange }: { plan: IngestPlan; busy: boolean; onChange: (jobId: string, change: Record<string, string | null>) => void }) {
+  const list = useRef<HTMLDivElement>(null);
+  const paged = usePaged(plan.files, useFitPageSize(list, { min: 3, max: 20, fallbackRow: 62, reserve: 140 }));
   return (
-    <div className="overflow-x-auto rounded-lg border border-ink-200 scroll-thin">
+    <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
+    <div className="relative overflow-x-auto scroll-thin">
       <table className="w-full min-w-[640px] border-collapse text-table">
         <caption className="sr-only">Files in this plan</caption>
         <thead className="bg-ink-50">
@@ -411,11 +421,13 @@ function FilesTable({ plan, busy, onChange }: { plan: IngestPlan; busy: boolean;
           </tr>
         </thead>
         <tbody>
-          {plan.files.map((file) => (
+          {paged.slice.map((file) => (
             <FileRow key={file.job_id} file={file} busy={busy} onChange={(change) => onChange(file.job_id, change)} />
           ))}
         </tbody>
       </table>
+    </div>
+    <Pagination {...paged} onPage={paged.setPage} noun="file" />
     </div>
   );
 }
@@ -437,7 +449,7 @@ function FileRow({ file, busy, onChange }: { file: PlanFile; busy: boolean; onCh
   const periodChanged = file.detected_period_start !== file.period_start || file.detected_period_end !== file.period_end;
 
   return (
-    <tr className="border-b border-ink-100 align-middle last:border-0">
+    <tr data-row className="border-b border-ink-100 align-middle last:border-0">
       <td className="max-w-[280px] px-4 py-2.5">
         <span className="flex items-center gap-2">
           <FileSpreadsheet className="h-4 w-4 shrink-0 text-brand-600" aria-hidden />
@@ -507,9 +519,50 @@ function PlanTable({
   onSchema: (item: PlanItem) => void;
   onChange: (key: string, change: { table_name?: string | null; action?: string | null }) => void;
 }) {
+  const list = useRef<HTMLUListElement>(null);
+  const [file, setFile] = useState("all");
+  const [attention, setAttention] = useState(false);
+  const needs = (item: PlanItem) =>
+    item.action !== "skip" && (item.blockers.length > 0 || (item.requires_confirmation && !confirmed.has(item.key)));
+  const files = [...new Set(plan.items.map((item) => item.file_name))];
+  const flagged = plan.items.filter(needs);
+  const items = plan.items.filter((item) => (file === "all" || item.file_name === file) && (!attention || needs(item)));
+  const paged = usePaged(items, useFitPageSize(list, { min: 2, max: 10, fallbackRow: 96, reserve: 140 }), `${file}|${attention}`);
   return (
-    <ul className="space-y-3" aria-label="Planned tables">
-      {plan.items.map((item) => (
+    <>
+    {(files.length > 1 || flagged.length > 0) && (
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        {files.length > 1 ? (
+          <Select<string>
+            label={`File (${files.length})`}
+            value={file}
+            onChange={setFile}
+            icon={<FileSpreadsheet className="h-4 w-4" />}
+            className="w-full sm:w-80"
+            options={[
+              { value: "all", label: "All files", description: plural(plan.items.length, "table") },
+              ...files.map((name) => {
+                const own = plan.items.filter((item) => item.file_name === name);
+                const open = own.filter(needs).length;
+                return {
+                  value: name,
+                  label: name,
+                  description: plural(own.length, "table"),
+                  meta: open ? <Badge tone="warning">{open} to check</Badge> : undefined,
+                };
+              }),
+            ]}
+          />
+        ) : (
+          <span />
+        )}
+        {flagged.length > 0 && (
+          <LabeledCheckbox label={`Only tables to check (${flagged.length})`} checked={attention} onChange={setAttention} />
+        )}
+      </div>
+    )}
+    <ul ref={list} className="space-y-3" aria-label="Planned tables">
+      {paged.slice.map((item) => (
         <PlanRow
           key={item.key}
           item={item}
@@ -521,6 +574,8 @@ function PlanTable({
         />
       ))}
     </ul>
+    <Pagination {...paged} onPage={paged.setPage} noun="table" className="mt-3 rounded-b-lg border-x-0 border-b-0 px-0" />
+    </>
   );
 }
 
@@ -547,6 +602,7 @@ function PlanRow({
 
   return (
     <li
+      data-row
       className={clsx(
         "rounded-lg border p-4 transition-colors",
         item.blockers.length && !skip ? "border-amber-300 bg-amber-50/40" : risky && !confirmed ? "border-danger-200" : "border-ink-200",
@@ -670,7 +726,7 @@ function RunView({ plan, onNew, onShowTables }: { plan: IngestPlan; onNew: () =>
             <StatTile icon={<Rows3 />} label="Rows" value={formatNumber(rows)} tone="success" />
             <StatTile icon={<ShieldCheck />} label="Reconciled" value="100%" tone="success" />
           </div>
-          <div className="mt-5 overflow-x-auto rounded-lg border border-ink-200 scroll-thin">
+          <div className="relative mt-5 overflow-x-auto rounded-lg border border-ink-200 scroll-thin">
             <table className="w-full min-w-[560px] border-collapse text-table">
               <caption className="sr-only">Ingested tables</caption>
               <thead className="bg-ink-50">
@@ -707,6 +763,8 @@ function TablesView() {
   const [tables, setTables] = useState<BronzeTable[] | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  const list = useRef<HTMLUListElement>(null);
+  const paged = usePaged(tables ?? [], useFitPageSize(list, { min: 5, fallbackRow: 49, reserve: 140 }));
   const load = useCallback(() => {
     setError(null);
     setTables(null);
@@ -724,11 +782,11 @@ function TablesView() {
         <h2 id="tables-title" className="text-card text-ink-900">{plural(tables.length, "table")}</h2>
         <Button size="sm" variant="ghost" icon={<RefreshCw />} onClick={load}>Refresh</Button>
       </header>
-      <ul className="divide-y divide-ink-100">
-        {tables.map((table) => {
+      <ul ref={list} className="divide-y divide-ink-100">
+        {paged.slice.map((table) => {
           const expanded = open === table.table_name;
           return (
-            <li key={table.table_name}>
+            <li key={table.table_name} data-row={expanded ? undefined : true}>
               <button
                 type="button"
                 aria-expanded={expanded}
@@ -749,7 +807,7 @@ function TablesView() {
               {expanded && (
                 <div className="animate-fade-in space-y-3 bg-ink-50/50 px-5 pb-4 pt-1 md:px-6">
                   <ColumnChips names={table.columns.map((column) => column.name)} tone="neutral" />
-                  <div className="overflow-x-auto rounded-md border border-ink-200 bg-white scroll-thin">
+                  <div className="relative overflow-x-auto rounded-md border border-ink-200 bg-white scroll-thin">
                     <table className="w-full min-w-[620px] text-caption">
                       <caption className="sr-only">Ingestion history for {table.table_name}</caption>
                       <thead className="bg-ink-50 text-left text-ink-600">
@@ -786,6 +844,7 @@ function TablesView() {
           );
         })}
       </ul>
+      <Pagination {...paged} onPage={paged.setPage} noun="table" />
       <p className="flex items-center gap-1.5 border-t border-ink-100 px-5 py-3 text-caption text-ink-500 md:px-6">
         <ArrowRight className="h-3.5 w-3.5" aria-hidden /> Every row carries _ingestion_id, _source_file and _source_sheet.
       </p>

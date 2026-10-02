@@ -10,7 +10,7 @@ import { appendUnavailableReason, useWorkflow, type FileEntry } from "../state/w
  * decided (once) during the run and reported with the results. Files never append
  * into each other: each is cleaned on its own.
  */
-export function AppendModeOptions({ entry }: { entry: FileEntry }) {
+export function AppendModeOptions({ entry, heading = true }: { entry: FileEntry; heading?: boolean }) {
   const flow = useWorkflow();
   const reason = appendUnavailableReason(entry);
   const disabled = Boolean(reason) || flow.running;
@@ -18,6 +18,7 @@ export function AppendModeOptions({ entry }: { entry: FileEntry }) {
 
   return (
     <div id="section-append" className="scroll-mt-40">
+      {heading && (
       <div className="mb-3 flex items-start gap-2.5">
         <span className="mt-0.5 text-ink-500 [&>svg]:h-4 [&>svg]:w-4" aria-hidden>
           <BetweenHorizontalEnd />
@@ -27,6 +28,7 @@ export function AppendModeOptions({ entry }: { entry: FileEntry }) {
           <p className="text-caption text-ink-500">Combine sheets with identical columns.</p>
         </div>
       </div>
+      )}
 
       {reason && (
         <div className="mb-3 flex items-start gap-3 rounded-lg border border-ink-200 bg-ink-50 px-4 py-3" role="note">

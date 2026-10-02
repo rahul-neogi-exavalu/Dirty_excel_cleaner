@@ -36,6 +36,7 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Alert, EmptyState, ProgressBar, StatTile, useToast } from "../components/ui/Feedback";
 import { Modal } from "../components/ui/Overlay";
+import { Pagination, usePaged } from "../components/ui/Pagination";
 import { formatBytes, formatDuration, formatNumber, formatTimestamp, plural } from "../lib/format";
 import { appendUnavailableReason, effectiveAppend, useNavigate, useWorkflow } from "../state/workflow";
 
@@ -53,6 +54,8 @@ const STAGES: { id: Stage; label: string; description: string; icon: ReactNode }
 ];
 
 const isActive = (job: JobStatus) => job.status === "queued" || job.status === "running";
+
+const FILES_PER_PAGE = 6;
 
 export function RunPage() {
   const flow = useWorkflow();
@@ -110,6 +113,8 @@ function useStart() {
 
 function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
   const flow = useWorkflow();
+  // Files listed a page at a time: a 20-file batch never pushes the start button off screen.
+  const filesPage = usePaged(flow.files, FILES_PER_PAGE);
   const navigate = useNavigate();
   const { state, error, start } = useStart();
   const count = flow.files.length;
@@ -156,10 +161,10 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
 
           <div className="mt-5 flex-1 border-t border-ink-200 pt-5">
             <div className="overflow-hidden rounded-lg border border-ink-200">
-              <div className="max-h-[320px] overflow-auto scroll-thin">
-                <table className="w-full min-w-[560px] border-collapse text-table">
+              <div className="relative overflow-x-auto scroll-thin">
+                <table className="w-full min-w-[480px] border-collapse text-table">
                   <caption className="sr-only">Files to clean</caption>
-                  <thead className="sticky top-0 z-10 bg-ink-50">
+                  <thead className="bg-ink-50">
                     <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
                       <th scope="col" className="w-10 px-3 py-2 text-right">#</th>
                       <th scope="col" className="px-3 py-2">File</th>
@@ -168,11 +173,11 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {flow.files.map((entry, index) => {
+                    {filesPage.slice.map((entry, index) => {
                       const reason = appendUnavailableReason(entry);
                       return (
                         <tr key={entry.workbook.id} className="border-b border-ink-100 align-top last:border-0">
-                          <td className="num px-3 py-2.5 text-right text-ink-500">{index + 1}</td>
+                          <td className="num px-3 py-2.5 text-right text-ink-500">{filesPage.from + index}</td>
                           <td className="max-w-[220px] px-3 py-2.5">
                             <p className="truncate font-medium text-ink-900" title={entry.workbook.filename}>{entry.workbook.filename}</p>
                             <p className="num text-caption text-ink-500">{formatBytes(entry.workbook.size)}</p>
@@ -197,6 +202,7 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
                   </tbody>
                 </table>
               </div>
+              <Pagination {...filesPage} onPage={filesPage.setPage} noun="file" />
             </div>
             <p className="mt-3 flex items-center gap-2 text-caption text-ink-500">
               <FileText className="h-3.5 w-3.5 shrink-0" aria-hidden />
@@ -386,6 +392,7 @@ const STATE_LABEL: Record<JobStatus["status"], string> = {
 };
 
 function RunningView({ batch }: { batch: BatchStatus }) {
+  const jobsPage = usePaged(batch.jobs, FILES_PER_PAGE);
   const flow = useWorkflow();
   const [confirm, setConfirm] = useState(false);
   const elapsed = useElapsed(batch.started_at, batch.finished_at, true);
@@ -442,7 +449,7 @@ function RunningView({ batch }: { batch: BatchStatus }) {
             )}
           </div>
 
-          <div className={clsx("mt-6 grid grid-cols-2 gap-3", multi ? "sm:grid-cols-3 2xl:grid-cols-5" : "lg:grid-cols-4")}>
+          <div className={clsx("mt-6 gap-3", multi ? "flex flex-wrap [&>*]:min-w-[150px] [&>*]:flex-1" : "grid grid-cols-2 lg:grid-cols-4")}>
             {multi && <StatTile icon={<Files />} label="Files" value={`${batch.files_done} / ${batch.files_total}`} tone="brand" />}
             <StatTile icon={<Layers />} label="Sheets" value={`${sheetsDone} / ${sheetsTotal}`} tone="info" />
             <StatTile icon={<Rows3 />} label="Rows kept" value={formatNumber(rowsKept)} tone="success" />
@@ -460,7 +467,7 @@ function RunningView({ batch }: { batch: BatchStatus }) {
             <h2 id="files-title" className="px-5 pt-5 text-card text-ink-900 md:px-6">Files</h2>
             <p className="px-5 text-caption text-ink-500 md:px-6">Select a file to follow its steps.</p>
             <ul className="mt-3 divide-y divide-ink-100 border-t border-ink-200">
-              {batch.jobs.map((job) => (
+              {jobsPage.slice.map((job) => (
                 <li
                   key={job.id}
                   className={clsx("flex items-center gap-3 px-5 py-3 md:px-6", shown?.id === job.id && "bg-ink-50")}
@@ -492,6 +499,7 @@ function RunningView({ batch }: { batch: BatchStatus }) {
                 </li>
               ))}
             </ul>
+            <Pagination {...jobsPage} onPage={jobsPage.setPage} noun="file" />
           </section>
         )}
       </div>
@@ -534,6 +542,7 @@ function RunningView({ batch }: { batch: BatchStatus }) {
 /* -------------------------------------------------------------------------- */
 
 function DoneView({ batch }: { batch: BatchStatus }) {
+  const outcomes = usePaged(batch.jobs, FILES_PER_PAGE);
   const flow = useWorkflow();
   const navigate = useNavigate();
   const { state: rerun, start } = useStart();
@@ -576,7 +585,7 @@ function DoneView({ batch }: { batch: BatchStatus }) {
   const single = batch.jobs[0];
 
   return (
-    <div className="space-y-6">
+    <div className={clsx("grid items-start gap-6", multi && "xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]")}>
       <section className="card p-5 md:p-6" aria-labelledby="done-title">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
           {tone === "success" ? (
@@ -618,7 +627,7 @@ function DoneView({ batch }: { batch: BatchStatus }) {
         </div>
 
         {succeeded.length > 0 && (
-          <div className={clsx("mt-6 grid grid-cols-2 gap-3", multi ? "sm:grid-cols-3 2xl:grid-cols-5" : "lg:grid-cols-4")}>
+          <div className={clsx("mt-6 gap-3", multi ? "flex flex-wrap [&>*]:min-w-[150px] [&>*]:flex-1" : "grid grid-cols-2 lg:grid-cols-4")}>
             {multi && <StatTile icon={<Files />} label="Files" value={`${batch.files_succeeded} / ${batch.files_total}`} tone={batch.files_succeeded === batch.files_total ? "success" : "warning"} />}
             <StatTile loading={loading} icon={<Layers />} label="Sheets" value={sum((s) => s.sheets_selected)} tone="info" />
             <StatTile
@@ -679,10 +688,11 @@ function DoneView({ batch }: { batch: BatchStatus }) {
             <p className="mt-0.5 text-caption text-ink-500">Open a file to review its tables.</p>
           </div>
           <ul className="mt-4 divide-y divide-ink-100 border-t border-ink-200">
-            {batch.jobs.map((job) => (
+            {outcomes.slice.map((job) => (
               <FileOutcome key={job.id} job={job} onReview={() => review(job.id)} onAppendDetails={() => setDetailsFor(job.id)} />
             ))}
           </ul>
+          <Pagination {...outcomes} onPage={outcomes.setPage} noun="file" />
         </section>
       )}
 

@@ -92,25 +92,34 @@ def unreachable(error: Exception) -> ApiError:
 
 def migrate(target_pool) -> list[str]:
     """Apply the numbered SQL files in ``backend/migrations`` that have not run yet."""
+    return run_migrations(target_pool, MIGRATIONS, config.CONTROL_SCHEMA, "{control}", "ahi-migrations")
+
+
+def run_migrations(target_pool, folder: Path, schema: str, placeholder: str, lock_key: str) -> list[str]:
+    """Apply the SQL files in ``folder`` not yet recorded in ``schema.schema_migrations``.
+
+    ``placeholder`` in a file is replaced by the quoted schema name. Files run in name
+    order, each in the one transaction, under an advisory lock so two API processes
+    starting together never migrate twice.
+    """
     from psycopg import sql
 
-    control = sql.Identifier(config.CONTROL_SCHEMA)
+    target = sql.Identifier(schema)
     applied = []
     with target_pool.connection() as conn:
-        # One migrator at a time, even across API processes.
-        conn.execute("SELECT pg_advisory_xact_lock(hashtext('ahi-migrations'))")
-        conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(control))
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [lock_key])
+        conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(target))
         conn.execute(sql.SQL(
             "CREATE TABLE IF NOT EXISTS {}.schema_migrations "
             "(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
-        ).format(control))
-        done = {row[0] for row in conn.execute(sql.SQL("SELECT name FROM {}.schema_migrations").format(control))}
-        for path in sorted(Path(MIGRATIONS).glob("*.sql")):
+        ).format(target))
+        done = {row[0] for row in conn.execute(sql.SQL("SELECT name FROM {}.schema_migrations").format(target))}
+        for path in sorted(Path(folder).glob("*.sql")):
             if path.name in done:
                 continue
-            text = path.read_text(encoding="utf-8").replace("{control}", control.as_string(conn))
+            text = path.read_text(encoding="utf-8").replace(placeholder, target.as_string(conn))
             conn.execute(text)
-            conn.execute(sql.SQL("INSERT INTO {}.schema_migrations (name) VALUES (%s)").format(control), [path.name])
+            conn.execute(sql.SQL("INSERT INTO {}.schema_migrations (name) VALUES (%s)").format(target), [path.name])
             applied.append(path.name)
     return applied
 

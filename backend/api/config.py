@@ -178,3 +178,34 @@ def db_conninfo() -> str:
         password=DB_PASSWORD or None, sslmode=DB_SSLMODE or None,
         application_name="exavalu-cleaning-studio",
     )
+
+
+# --- App database: users and job history ----------------------------------------
+# A database of its own (it may share the server with bronze). Sign-in needs it; the
+# cleaning service records every job here when it is configured.
+APP_DB_HOST = _setting("APP_DB_HOST")
+APP_DB_PORT = int(os.environ.get("APP_DB_PORT") or "5432")
+APP_DB_NAME = _setting("APP_DB_NAME")
+APP_DB_USER = _setting("APP_DB_USER")
+APP_DB_PASSWORD = os.environ.get("APP_DB_PASSWORD", "")
+APP_DB_SSLMODE = os.environ.get("APP_DB_SSLMODE", "prefer").strip()
+APP_DB_SCHEMA = _setting("APP_DB_SCHEMA") or "public"
+APP_DB_CONFIGURED = all((APP_DB_HOST, APP_DB_NAME, APP_DB_USER))
+
+# Sessions are an HMAC-SHA256-signed cookie. Without a fixed secret one is made per
+# process, so every restart signs everyone out.
+APP_SESSION_SECRET = _setting("APP_SESSION_SECRET")
+APP_SESSION_HOURS = float(os.environ.get("APP_SESSION_HOURS") or "12")
+# true behind HTTPS; plain http://localhost needs false or the browser drops the cookie.
+APP_COOKIE_SECURE = _flag("APP_COOKIE_SECURE", "false")
+
+
+def app_db_conninfo() -> str:
+    """libpq connection string for the app database."""
+    from psycopg.conninfo import make_conninfo
+
+    return make_conninfo(
+        host=APP_DB_HOST, port=APP_DB_PORT, dbname=APP_DB_NAME, user=APP_DB_USER,
+        password=APP_DB_PASSWORD or None, sslmode=APP_DB_SSLMODE or None,
+        application_name="exavalu-cleaning-studio-app",
+    )

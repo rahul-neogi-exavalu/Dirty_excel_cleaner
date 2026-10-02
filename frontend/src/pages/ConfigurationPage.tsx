@@ -19,7 +19,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, uploadWorkbook } from "../api/client";
 import { PageHeader, SectionCard } from "../components/layout/Layout";
 import { SectionNav } from "../components/SectionNav";
@@ -29,6 +29,7 @@ import { Button } from "../components/ui/Button";
 import { Checkbox, SearchInput } from "../components/ui/Controls";
 import { Alert, EmptyState, ProgressBar, StatTile, useToast } from "../components/ui/Feedback";
 import { Modal, Tooltip } from "../components/ui/Overlay";
+import { Pagination, usePaged } from "../components/ui/Pagination";
 import { Select } from "../components/ui/Select";
 import { formatBytes, formatNumber, plural } from "../lib/format";
 import { effectiveAppend, MAX_FILES, useNavigate, useWorkflow, type FileEntry } from "../state/workflow";
@@ -47,10 +48,16 @@ interface QueueItem {
   advice?: string | null;
 }
 
+type ConfigSection = "section-upload" | "section-sheets" | "section-append";
+/** Lets a file row open the Sheets tab for its file. */
+const ShowSection = createContext<(section: ConfigSection) => void>(() => {});
+
 export function ConfigurationPage() {
   const flow = useWorkflow();
   const navigate = useNavigate();
   const allSelected = flow.files.length > 0 && flow.files.every((entry) => entry.selected.length > 0);
+  // One section on screen at a time. Coming back with files uploaded opens their sheets.
+  const [section, setSection] = useState<ConfigSection>(flow.files.length ? "section-sheets" : "section-upload");
 
   return (
     <>
@@ -61,6 +68,8 @@ export function ConfigurationPage() {
       />
       <SectionNav
         label="Configuration sections"
+        active={section}
+        onSelect={(id) => setSection(id as ConfigSection)}
         sections={[
           { id: "section-upload", label: "Upload", icon: <FileSpreadsheet />, done: flow.files.length > 0 },
           { id: "section-sheets", label: "Sheets", icon: <Table2 />, done: allSelected },
@@ -69,10 +78,15 @@ export function ConfigurationPage() {
       />
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
         <div className="min-w-0 space-y-6">
-          <UploadSection />
-          <SheetSection />
+          <ShowSection.Provider value={setSection}>
+            {section === "section-upload" ? (
+              <UploadSection onNext={() => setSection("section-sheets")} />
+            ) : (
+              <SheetSection part={section === "section-append" ? "append" : "sheets"} />
+            )}
+          </ShowSection.Provider>
         </div>
-        <aside className="xl:sticky xl:top-[136px] xl:self-start">
+        <aside className="scroll-thin xl:sticky xl:top-[136px] xl:max-h-[calc(100dvh-152px)] xl:self-start xl:overflow-y-auto">
           <SummaryPanel onContinue={() => navigate("run")} />
         </aside>
       </div>
@@ -96,8 +110,9 @@ function rejectReason(file: File): { message: string; advice: string } | null {
   return null;
 }
 
-function UploadSection() {
+function UploadSection({ onNext }: { onNext: () => void }) {
   const flow = useWorkflow();
+  const filesPage = usePaged(flow.files, FILES_PER_PAGE);
   const toast = useToast();
   const input = useRef<HTMLInputElement>(null);
   const controllers = useRef(new Map<string, AbortController>());
@@ -242,11 +257,14 @@ function UploadSection() {
       {hasContent ? (
         <div className="space-y-3">
           {flow.files.length > 0 && (
-            <ul className="divide-y divide-ink-100 overflow-hidden rounded-lg border border-ink-200" aria-label="Uploaded files">
-              {flow.files.map((entry) => (
-                <LoadedFileRow key={entry.workbook.id} entry={entry} />
-              ))}
-            </ul>
+            <div className="overflow-hidden rounded-lg border border-ink-200">
+              <ul className="divide-y divide-ink-100" aria-label="Uploaded files">
+                {filesPage.slice.map((entry) => (
+                  <LoadedFileRow key={entry.workbook.id} entry={entry} />
+                ))}
+              </ul>
+              <Pagination {...filesPage} onPage={filesPage.setPage} noun="file" />
+            </div>
           )}
           {queue.length > 0 && (
             <ul className="space-y-2" aria-label="Uploads in progress" aria-live="polite">
@@ -261,6 +279,13 @@ function UploadSection() {
                 />
               ))}
             </ul>
+          )}
+          {flow.files.length > 0 && queue.length === 0 && (
+            <div className="flex justify-end">
+              <Button size="sm" variant="primary" iconRight={<ArrowRight />} onClick={onNext}>
+                Choose sheets
+              </Button>
+            </div>
           )}
           <div
             role="button"
@@ -348,9 +373,10 @@ function LoadedFileRow({ entry }: { entry: FileEntry }) {
   const focused = flow.focused?.workbook.id === workbook.id;
   const none = entry.selected.length === 0;
 
+  const show = useContext(ShowSection);
   const focus = () => {
     flow.setFocusedId(workbook.id);
-    document.getElementById("section-sheets")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    show("section-sheets");
   };
 
   return (
@@ -475,7 +501,10 @@ function QueueRow({
 /* 2. Sheets (per file) and append mode                                         */
 /* -------------------------------------------------------------------------- */
 
-function SheetSection() {
+const SHEETS_PER_PAGE = 8;
+const FILES_PER_PAGE = 5;
+
+function SheetSection({ part }: { part: "sheets" | "append" }) {
   const flow = useWorkflow();
   const [query, setQuery] = useState("");
   const entry = flow.focused;
@@ -498,6 +527,9 @@ function SheetSection() {
   }, [results]);
 
   useEffect(() => setQuery(""), [workbook?.id]);
+  const visible = (workbook?.sheets ?? []).filter((sheet) => sheet.name.toLowerCase().includes(query.trim().toLowerCase()));
+  // A workbook with dozens of sheets is paged, not scrolled; a new file or search starts on page one.
+  const sheetsPage = usePaged(visible, SHEETS_PER_PAGE, `${workbook?.id}|${query}`);
 
   if (!entry || !workbook) {
     return (
@@ -515,7 +547,6 @@ function SheetSection() {
   }
 
   const sheets = workbook.sheets;
-  const visible = sheets.filter((sheet) => sheet.name.toLowerCase().includes(query.trim().toLowerCase()));
   const attention = sheets.filter((sheet) => sheet.hidden || !sheet.has_content).length;
   const allVisibleSelected = visible.length > 0 && visible.every((sheet) => selected.has(sheet.name));
   const someVisibleSelected = visible.some((sheet) => selected.has(sheet.name));
@@ -545,11 +576,15 @@ function SheetSection() {
 
   return (
     <SectionCard
-      id="section-sheets"
-      step={2}
-      icon={<Table2 />}
-      title="Sheets"
-      description={flow.files.length > 1 ? "Settings are kept per file." : undefined}
+      id={part === "append" ? "section-append-card" : "section-sheets"}
+      step={part === "append" ? 3 : 2}
+      icon={part === "append" ? <BetweenHorizontalEnd /> : <Table2 />}
+      title={part === "append" ? "Append" : "Sheets"}
+      description={
+        part === "append"
+          ? `Combine sheets with identical columns.${flow.files.length > 1 ? " Set per file." : ""}`
+          : flow.files.length > 1 ? "Settings are kept per file." : undefined
+      }
     >
       <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-end">
         <Select
@@ -566,6 +601,8 @@ function SheetSection() {
         )}
       </div>
 
+      {part === "sheets" && (
+      <>
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
         <StatTile icon={<Layers />} label="Sheets" value={formatNumber(sheets.length)} tone="info" />
         <StatTile icon={<ListChecks />} label="Selected" value={`${selected.size} / ${sheets.length}`} tone="brand" />
@@ -584,10 +621,10 @@ function SheetSection() {
       )}
 
       <div className="overflow-hidden rounded-lg border border-ink-200">
-        <div className="max-h-[420px] overflow-auto scroll-thin">
+        <div className="relative overflow-x-auto scroll-thin">
           <table className="w-full min-w-[560px] border-collapse text-table">
             <caption className="sr-only">Sheets in {workbook.filename}</caption>
-            <thead className="sticky top-0 z-10 bg-ink-50">
+            <thead className="bg-ink-50">
               <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
                 <th scope="col" className="w-12 px-4 py-2.5">
                   <Checkbox
@@ -612,7 +649,7 @@ function SheetSection() {
               </tr>
             </thead>
             <tbody>
-              {visible.map((sheet) => {
+              {sheetsPage.slice.map((sheet) => {
                 const on = selected.has(sheet.name);
                 const size = measured.get(sheet.name);
                 return (
@@ -666,16 +703,17 @@ function SheetSection() {
             </tbody>
           </table>
         </div>
+        <Pagination {...sheetsPage} onPage={sheetsPage.setPage} noun="sheet" />
       </div>
       {selected.size === 0 && (
         <p className="mt-3 flex items-center gap-1.5 text-caption text-amber-700" role="status">
           <TriangleAlert className="h-3.5 w-3.5" aria-hidden /> Select at least one sheet.
         </p>
       )}
+      </>
+      )}
 
-      <div className="mt-6 border-t border-ink-200 pt-5">
-        <AppendModeOptions entry={entry} />
-      </div>
+      {part === "append" && <AppendModeOptions entry={entry} heading={false} />}
     </SectionCard>
   );
 }

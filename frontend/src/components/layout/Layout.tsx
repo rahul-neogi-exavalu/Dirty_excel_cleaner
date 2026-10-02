@@ -6,30 +6,44 @@ import {
   DatabaseZap,
   Layers3,
   FileSpreadsheet,
+  History,
   Home,
   Loader2,
   Lock,
+  LogOut,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
   PlayCircle,
   SlidersHorizontal,
   Trash2,
+  UsersRound,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { formatBytes, plural } from "../../lib/format";
-import { useWorkflow, type Page } from "../../state/workflow";
+import { formatBytes, initials, plural } from "../../lib/format";
+import { useAuth } from "../../state/auth";
+import { useWorkflow, type Page, type StepPage } from "../../state/workflow";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Drawer, Modal, Tooltip } from "../ui/Overlay";
 
-export const PAGE_META: Record<Page, { step: number; label: string; icon: ReactNode }> = {
+export const PAGE_META: Record<StepPage, { step: number; label: string; icon: ReactNode }> = {
   configuration: { step: 1, label: "Configure", icon: <SlidersHorizontal /> },
   run: { step: 2, label: "Run", icon: <PlayCircle /> },
   results: { step: 3, label: "Results", icon: <ClipboardCheck /> },
   ingest: { step: 4, label: "Ingest", icon: <DatabaseZap /> },
   silver: { step: 5, label: "Silver", icon: <Layers3 /> },
 };
+
+/** Pages beside the workflow: not steps, so no number and no place in the stepper. */
+export const WORKSPACE_META: Record<Exclude<Page, StepPage>, { label: string; icon: ReactNode; admin: boolean }> = {
+  history: { label: "History", icon: <History />, admin: false },
+  users: { label: "Users", icon: <UsersRound />, admin: true },
+};
+
+const isStep = (page: Page): page is StepPage => page in PAGE_META;
+
+export const pageLabel = (page: Page) => (isStep(page) ? PAGE_META[page] : WORKSPACE_META[page]).label;
 
 /** The Exavalu mark: a staircase of six squares with a red outline. */
 export function ExavaluMark({ className }: { className?: string }) {
@@ -46,16 +60,17 @@ export function ExavaluMark({ className }: { className?: string }) {
   );
 }
 
-export function Logo({ compact }: { compact?: boolean }) {
+/** The mark on its white tile with the wordmark; `light` for use on a white surface. */
+export function Logo({ compact, light }: { compact?: boolean; light?: boolean }) {
   return (
     <div className="flex items-center gap-3">
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-white p-1.5">
+      <span className={clsx("flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-white p-1.5", light && "ring-1 ring-ink-200")}>
         <ExavaluMark className="h-full w-full" />
       </span>
       {!compact && (
         <div className="leading-none">
-          <p className="font-display text-[15px] font-semibold tracking-[0.08em] text-white">EXAVALU</p>
-          <p className="mt-1 text-[11px] font-medium text-white/50">Data Cleaning Studio</p>
+          <p className={clsx("font-display text-[15px] font-semibold tracking-[0.08em]", light ? "text-ink-900" : "text-white")}>EXAVALU</p>
+          <p className={clsx("mt-1 text-[11px] font-medium", light ? "text-ink-500" : "text-white/50")}>Data Processing Studio</p>
         </div>
       )}
     </div>
@@ -64,7 +79,7 @@ export function Logo({ compact }: { compact?: boolean }) {
 
 /* -------------------------------------------------------------------------- */
 
-function useStepState(page: Page): { done: boolean; locked: string | null; busy: boolean } {
+function useStepState(page: StepPage): { done: boolean; locked: string | null; busy: boolean } {
   const flow = useWorkflow();
   const configured = flow.files.length > 0 && flow.files.every((entry) => entry.selected.length > 0);
   if (page === "configuration") return { done: configured, locked: null, busy: false };
@@ -80,7 +95,7 @@ function useStepState(page: Page): { done: boolean; locked: string | null; busy:
   return { done: false, locked: flow.reviewBlockedReason, busy: false };
 }
 
-function NavItem({ page, active, compact, onNavigate }: { page: Page; active: boolean; compact: boolean; onNavigate: (page: Page) => void }) {
+function NavItem({ page, active, compact, onNavigate }: { page: StepPage; active: boolean; compact: boolean; onNavigate: (page: Page) => void }) {
   const meta = PAGE_META[page];
   const { done, locked, busy } = useStepState(page);
   const button = (
@@ -90,7 +105,7 @@ function NavItem({ page, active, compact, onNavigate }: { page: Page; active: bo
       aria-current={active ? "page" : undefined}
       aria-disabled={locked ? true : undefined}
       className={clsx(
-        "group relative flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-[15px] transition-colors",
+        "group relative flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-[15px] transition-colors [@media(max-height:820px)]:py-2",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400",
         active
           ? "bg-white/[0.08] text-white ring-1 ring-inset ring-white/[0.06]"
@@ -128,6 +143,112 @@ function NavItem({ page, active, compact, onNavigate }: { page: Page; active: bo
     </Tooltip>
   ) : (
     button
+  );
+}
+
+function WorkspaceItem({
+  page,
+  active,
+  compact,
+  onNavigate,
+}: {
+  page: Exclude<Page, StepPage>;
+  active: boolean;
+  compact: boolean;
+  onNavigate: (page: Page) => void;
+}) {
+  const meta = WORKSPACE_META[page];
+  const button = (
+    <button
+      type="button"
+      onClick={() => onNavigate(page)}
+      aria-current={active ? "page" : undefined}
+      className={clsx(
+        "relative flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[14px] transition-colors [@media(max-height:820px)]:py-2",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400",
+        active ? "bg-white/[0.08] text-white ring-1 ring-inset ring-white/[0.06]" : "text-white/60 hover:bg-white/[0.05] hover:text-white",
+        compact && "justify-center px-0",
+      )}
+    >
+      {active && <span className="absolute inset-y-2 left-0 w-[2px] rounded-r bg-white" aria-hidden />}
+      <span className="flex shrink-0 [&>svg]:h-[17px] [&>svg]:w-[17px]" aria-hidden>
+        {meta.icon}
+      </span>
+      {!compact && <span className="flex-1 font-medium">{meta.label}</span>}
+    </button>
+  );
+  return compact ? (
+    <Tooltip content={meta.label} side="top" className="w-full">
+      {button}
+    </Tooltip>
+  ) : (
+    button
+  );
+}
+
+/** Who is signed in, and the way out. */
+function UserChip({ compact }: { compact: boolean }) {
+  const { user, signOut } = useAuth();
+  const [confirm, setConfirm] = useState(false);
+  const flow = useWorkflow();
+  if (!user) return null;
+  const leave = () => (flow.running ? setConfirm(true) : void signOut());
+  const avatar = (
+    <span
+      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-white/[0.1] font-display text-[12px] font-semibold text-white"
+      aria-hidden
+    >
+      {initials(user.user_name) || "?"}
+    </span>
+  );
+  return (
+    <>
+      {compact ? (
+        <Tooltip content={`${user.user_name} · Sign out`} side="top" className="w-full">
+          <button
+            type="button"
+            onClick={leave}
+            aria-label={`Sign out ${user.user_name}`}
+            className="mx-auto flex rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400"
+          >
+            {avatar}
+          </button>
+        </Tooltip>
+      ) : (
+        <div className="flex min-w-0 flex-1 items-center gap-2.5">
+          {avatar}
+          <div className="min-w-0 flex-1 leading-tight">
+            <p className="truncate text-[13px] font-medium text-white" title={user.user_email_id}>
+              {user.user_name}
+            </p>
+            <p className="text-caption text-white/45">{user.is_admin ? "Admin" : "Member"}</p>
+          </div>
+          <button
+            type="button"
+            onClick={leave}
+            aria-label="Sign out"
+            title="Sign out"
+            className="rounded-md p-1.5 text-white/50 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400"
+          >
+            <LogOut className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+      <Modal
+        open={confirm}
+        onClose={() => setConfirm(false)}
+        title="Sign out while cleaning?"
+        description="The job keeps running on the server and stays in History. This browser forgets the files."
+        footer={
+          <>
+            <Button onClick={() => setConfirm(false)}>Stay signed in</Button>
+            <Button variant="primary" icon={<LogOut />} onClick={() => void signOut()}>
+              Sign out
+            </Button>
+          </>
+        }
+      />
+    </>
   );
 }
 
@@ -223,33 +344,53 @@ function WorkbookCard({ compact }: { compact: boolean }) {
 
 function SidebarContent({ page, compact, onNavigate, onToggle }: { page: Page; compact: boolean; onNavigate: (page: Page) => void; onToggle?: () => void }) {
   const flow = useWorkflow();
+  const { user } = useAuth();
+  const workspace = (Object.keys(WORKSPACE_META) as Exclude<Page, StepPage>[]).filter(
+    (key) => !WORKSPACE_META[key].admin || user?.is_admin,
+  );
   return (
-    <nav aria-label="Workflow" className="flex h-full flex-col border-r border-nav-line bg-nav px-4 py-6 text-white/70">
-      <div className={clsx("mb-10 flex items-center", compact ? "justify-center" : "justify-between px-2")}>
+    <nav aria-label="Workflow" className="flex h-full flex-col border-r border-nav-line bg-nav py-6 text-white/70 [@media(max-height:820px)]:py-4">
+      <div className={clsx("mb-8 flex shrink-0 items-center px-4 [@media(max-height:820px)]:mb-5", compact ? "justify-center" : "justify-between px-6")}>
         <Logo compact={compact} />
       </div>
-      {!compact && <p className="mb-3 px-3 text-caption font-medium text-white/40">Workflow</p>}
+      {/* Scrolls on its own when the screen is short, so the account footer stays in view. */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 scroll-thin [scrollbar-color:rgba(255,255,255,0.15)_transparent]">
+      {!compact && <p className="mb-3 px-3 text-caption font-medium text-white/40 [@media(max-height:820px)]:mb-2">Workflow</p>}
       <ol className="space-y-1.5">
-        {(Object.keys(PAGE_META) as Page[]).map((key) => (
+        {(Object.keys(PAGE_META) as StepPage[]).map((key) => (
           <li key={key}>
             <NavItem page={key} active={key === page} compact={compact} onNavigate={onNavigate} />
           </li>
         ))}
       </ol>
-      <div className="my-6 border-t border-white/[0.07]" />
+      {!compact && <p className="mb-2 mt-7 px-3 text-caption font-medium text-white/40 [@media(max-height:820px)]:mt-5">Workspace</p>}
+      <ul className={clsx("space-y-1", compact && "mt-6")}>
+        {workspace.map((key) => (
+          <li key={key}>
+            <WorkspaceItem page={key} active={key === page} compact={compact} onNavigate={onNavigate} />
+          </li>
+        ))}
+      </ul>
+      <div className="my-6 border-t border-white/[0.07] [@media(max-height:820px)]:my-4" />
       {!compact && flow.files.length > 0 && (
         <p className="mb-3 px-3 text-caption font-medium text-white/40">{flow.files.length > 1 ? "Workbooks" : "Workbook"}</p>
       )}
       <WorkbookCard compact={compact} />
-      <div className="mt-auto flex items-center justify-between gap-2 border-t border-white/[0.07] px-2 pt-4 text-caption text-white/40">
-        {!compact && <span className="num">v1.0.0</span>}
+      </div>
+      <div
+        className={clsx(
+          "mx-4 mt-4 flex shrink-0 items-center gap-2 border-t border-white/[0.07] px-1 pt-4 text-caption text-white/40",
+          compact ? "flex-col" : "justify-between",
+        )}
+      >
+        <UserChip compact={compact} />
         {onToggle && (
           <button
             type="button"
             onClick={onToggle}
             aria-label={compact ? "Expand sidebar" : "Collapse sidebar"}
             title={compact ? "Expand sidebar" : "Collapse sidebar"}
-            className={clsx("hidden rounded-md p-1.5 hover:bg-white/10 hover:text-white lg:inline-flex", compact && "mx-auto")}
+            className={clsx("hidden shrink-0 rounded-md p-1.5 hover:bg-white/10 hover:text-white lg:inline-flex", compact && "mx-auto")}
           >
             {compact ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
           </button>
@@ -310,7 +451,7 @@ export function AppShell({ page, onNavigate, children }: { page: Page; onNavigat
             </button>
             <ChevronRight className="h-3.5 w-3.5 text-ink-300" aria-hidden />
             <span aria-current="page" className="truncate font-medium text-ink-800">
-              {PAGE_META[page].label}
+              {pageLabel(page)}
             </span>
           </nav>
           <div className="ml-auto flex items-center gap-3">
@@ -329,8 +470,8 @@ export function AppShell({ page, onNavigate, children }: { page: Page; onNavigat
             )}
           </div>
         </header>
-        <main id="main" tabIndex={-1} className="flex-1 px-4 py-6 focus:outline-none md:px-10 md:py-10">
-          <div key={page} className="mx-auto w-full max-w-[1320px] animate-fade-in">
+        <main id="main" tabIndex={-1} className="flex-1 px-4 py-6 focus:outline-none md:px-8 md:py-8 xl:px-10 [@media(max-height:820px)]:md:py-6">
+          <div key={page} className="mx-auto w-full max-w-[1320px] animate-fade-in 3xl:max-w-[1560px] 4xl:max-w-[1880px]">
             {children}
           </div>
         </main>
@@ -352,27 +493,28 @@ export function PageHeader({
   description?: string;
   actions?: ReactNode;
 }) {
-  const meta = PAGE_META[page];
+  const step = isStep(page) ? PAGE_META[page] : null;
+  const meta = step ?? WORKSPACE_META[page as Exclude<Page, StepPage>];
   return (
-    <div className="mb-6 flex flex-col gap-4 border-b border-ink-200/80 pb-6 lg:flex-row lg:items-end lg:justify-between">
+    <div className="mb-6 flex flex-col gap-4 border-b border-ink-200/80 pb-6 lg:flex-row lg:items-end lg:justify-between [@media(max-height:820px)]:mb-5 [@media(max-height:820px)]:pb-4">
       <div className="min-w-0">
         <p className="eyebrow flex items-center gap-2">
           <span className="flex [&>svg]:h-3.5 [&>svg]:w-3.5" aria-hidden>{meta.icon}</span>
-          Step {String(meta.step).padStart(2, "0")}
+          {step ? `Step ${String(step.step).padStart(2, "0")}` : "Workspace"}
         </p>
         <h1 className="mt-1.5 text-[24px] font-semibold leading-8 text-ink-900 sm:text-page">{title}</h1>
         {description && <p className="mt-1 max-w-xl text-body text-ink-500">{description}</p>}
       </div>
       <div className="flex items-center gap-4">
         {actions}
-        <WorkflowStepper current={page} />
+        {step && <WorkflowStepper current={page as StepPage} />}
       </div>
     </div>
   );
 }
 
-function WorkflowStepper({ current }: { current: Page }) {
-  const pages = Object.keys(PAGE_META) as Page[];
+function WorkflowStepper({ current }: { current: StepPage }) {
+  const pages = Object.keys(PAGE_META) as StepPage[];
   return (
     <ol className="hidden shrink-0 items-center xl:flex" aria-label="Workflow progress">
       {pages.map((page, i) => (
@@ -383,7 +525,7 @@ function WorkflowStepper({ current }: { current: Page }) {
 }
 
 /** One step: ticked only when its work is actually done, not because it comes earlier. */
-function StepperItem({ page, index, current, last }: { page: Page; index: number; current: boolean; last: boolean }) {
+function StepperItem({ page, index, current, last }: { page: StepPage; index: number; current: boolean; last: boolean }) {
   const { done } = useStepState(page);
   const state = current ? "current" : done ? "done" : "upcoming";
   return (

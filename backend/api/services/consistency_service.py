@@ -36,7 +36,7 @@ PASSED, FAILED, NOT_APPLICABLE = "passed", "failed", "not_applicable"
 
 
 def build(grids, results, outputs, violations: list[dict]) -> dict[str, dict]:
-    """One report per output, keyed by the output's job id."""
+    """One report per output, keyed by the output's own id."""
     by_sheet: dict[str, list] = {}
     for result in results:
         by_sheet.setdefault(result.sheet_name, []).append(result)
@@ -48,7 +48,7 @@ def build(grids, results, outputs, violations: list[dict]) -> dict[str, dict]:
         tables = [by_label[label] for label in output.sheets if label in by_label]
         sheets = [accounting[name] for name in dict.fromkeys(output.sheet_names) if name in accounting]
         failures = [item for item in violations if item["table"] in output.sheets]
-        reports[output.job_id] = _report(output.job_id, tables, sheets, failures)
+        reports[output.output_id] = _report(output.output_id, tables, sheets, failures)
     return reports
 
 

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
 from .. import config
+from ..auth import User, require_user
 from ..schemas import (
     HeaderReset, HeaderUpdate, JobCreate, JobResults, JobStatus, OutputSummary, Preview,
 )
@@ -46,8 +47,8 @@ def status_of(job: Job) -> JobStatus:
 
 
 @router.post("", response_model=JobStatus, status_code=202)
-def create_job(request: JobCreate) -> JobStatus:
-    return status_of(cleaning_service.start_job(request))
+def create_job(request: JobCreate, user: User = Depends(require_user)) -> JobStatus:
+    return status_of(cleaning_service.start_job(request, user.user_id))
 
 
 @router.get("/{job_id}", response_model=JobStatus)
@@ -56,8 +57,8 @@ def get_job(job_id: str) -> JobStatus:
 
 
 @router.post("/{job_id}/cancel", response_model=JobStatus)
-def cancel_job(job_id: str) -> JobStatus:
-    return status_of(cleaning_service.cancel_job(job_id))
+def cancel_job(job_id: str, user: User = Depends(require_user)) -> JobStatus:
+    return status_of(cleaning_service.cancel_job(job_id, user.user_id))
 
 
 @router.get("/{job_id}/results", response_model=JobResults)

@@ -140,7 +140,7 @@ function AccountingCard({ sheet }: { sheet: RowAccounting }) {
       )}
 
       {sheet.unaccounted_rows.length > 0 && (
-        <div className="mx-4 mb-3 overflow-x-auto rounded-md border border-danger-200 scroll-thin">
+        <div className="relative mx-4 mb-3 overflow-x-auto rounded-md border border-danger-200 scroll-thin">
           <table className="w-full min-w-[480px] text-caption">
             <caption className="bg-danger-50 px-3 py-1.5 text-left font-semibold text-danger-800">
               Unaccounted {unit}
@@ -176,7 +176,7 @@ function AccountingCard({ sheet }: { sheet: RowAccounting }) {
             {open ? "Hide" : "Show"} removed {unit} ({formatNumber(sheet.removed)})
           </Button>
           {open && (
-            <div className="mx-4 mb-3 overflow-x-auto rounded-md border border-ink-200 scroll-thin">
+            <div className="relative mx-4 mb-3 overflow-x-auto rounded-md border border-ink-200 scroll-thin">
               <table className="w-full min-w-[560px] text-caption">
                 <caption className="sr-only">Removed {unit} on {sheet.sheet}</caption>
                 <thead className="bg-ink-50 text-left text-ink-600">

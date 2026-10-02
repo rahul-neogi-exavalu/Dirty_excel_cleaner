@@ -505,3 +505,76 @@ export interface SilverSummaryRow {
   row_count: number;
   premium_total: number | null;
 }
+
+/* ---- Sign-in, users and job history ---- */
+
+export type UserState = "active" | "inactive" | "expired";
+
+export interface AuthUser {
+  user_id: string;
+  user_name: string;
+  user_email_id: string;
+  user_phone_number: string | null;
+  is_admin: boolean;
+  is_active: boolean;
+  state: UserState;
+  must_change_password: boolean;
+  last_login_at: string | null;
+  expiry_date: string | null;
+  created_at: string | null;
+  modified_at: string | null;
+}
+
+export interface UserDraft {
+  user_name?: string;
+  user_email_id?: string;
+  user_phone_number?: string | null;
+  is_admin?: boolean;
+  is_active?: boolean;
+  expiry_date?: string | null;
+}
+
+export type HistoryJobType = "clean" | "bronze_ingest" | "silver_load";
+export type HistoryStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "skipped" | "interrupted";
+
+export interface HistoryOutput {
+  job_row_id: string;
+  output_name: string;
+  output_file: string | null;
+  row_count: number | null;
+  rows_removed: number | null;
+  status: HistoryStatus;
+  source_file: string | null;
+}
+
+export interface HistoryRun {
+  job_id: string;
+  job_type: HistoryJobType;
+  status: HistoryStatus;
+  batch_id: string | null;
+  source_job_ids: string[];
+  source_files: string[];
+  source_sha256: string[];
+  source_sheets: string[];
+  created_at: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  created_by: { user_id: string; user_name: string } | null;
+  modified_by: { user_id: string; user_name: string } | null;
+  outputs: HistoryOutput[];
+  log?: string | null;
+}
+
+export interface HistoryPage {
+  jobs: HistoryRun[];
+  next_before: string | null;
+}
+
+export interface HistoryFilters {
+  type?: HistoryJobType | null;
+  status?: HistoryStatus | null;
+  q?: string;
+  user_id?: string | null;
+  before?: string | null;
+  limit?: number;
+}

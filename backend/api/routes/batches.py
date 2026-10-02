@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
 
+from ..auth import User, require_user
 from ..schemas import BatchCreate, BatchStatus
 from ..services import cleaning_service, export_service
 from ..store import ACTIVE, CANCELLED, FAILED, SUCCEEDED, Batch, store
@@ -40,8 +41,8 @@ def batch_status(batch: Batch) -> BatchStatus:
 
 
 @router.post("", response_model=BatchStatus, status_code=202)
-def create_batch(request: BatchCreate) -> BatchStatus:
-    return batch_status(cleaning_service.start_batch(request))
+def create_batch(request: BatchCreate, user: User = Depends(require_user)) -> BatchStatus:
+    return batch_status(cleaning_service.start_batch(request, user.user_id))
 
 
 @router.get("/{batch_id}", response_model=BatchStatus)
@@ -50,8 +51,8 @@ def get_batch(batch_id: str) -> BatchStatus:
 
 
 @router.post("/{batch_id}/cancel", response_model=BatchStatus)
-def cancel_batch(batch_id: str) -> BatchStatus:
-    return batch_status(cleaning_service.cancel_batch(batch_id))
+def cancel_batch(batch_id: str, user: User = Depends(require_user)) -> BatchStatus:
+    return batch_status(cleaning_service.cancel_batch(batch_id, user.user_id))
 
 
 @router.get("/{batch_id}/export/zip")

@@ -107,6 +107,9 @@ class Job:
     batch_id: str | None = None
     # The source file's content hash, copied from the upload when the job is created.
     source_sha256: str = ""
+    # Who started it, and who asked to cancel it (user ids), for the job history.
+    created_by: str | None = None
+    cancelled_by: str | None = None
 
     def output(self, output_id: str) -> OutputRecord:
         for record in self.outputs:
@@ -129,6 +132,7 @@ class Batch:
     started_at: float | None = None
     finished_at: float | None = None
     cancel_requested: bool = False
+    cancelled_by: str | None = None
 
 
 class Store:
@@ -140,7 +144,9 @@ class Store:
 
     @staticmethod
     def new_id() -> str:
-        return uuid.uuid4().hex[:12]
+        # A full UUID: a job's id is also the id in its output file names and the key of
+        # its rows in the job history table.
+        return str(uuid.uuid4())
 
     def add_upload(self, upload: Upload) -> None:
         with self._lock:
