@@ -42,10 +42,13 @@ class Output:
     sheet_names: list[str] = field(default_factory=list)
     # Every edge case per column, joined, for the metadata's type_flag (see flags.py).
     type_flags: dict[str, str] = field(default_factory=dict)
-    # Set when the output is written: one job id names the CSV and its metadata file.
+    # Set when the output is written (name_files): the run's job id, shared by every
+    # CSV and metadata file the run produces.
     job_id: str = ""
     file: str = ""
     metadata_file: str = ""
+    # This table's own id, for callers that address outputs one by one (the API).
+    output_id: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -341,6 +344,25 @@ def _flags(results) -> dict[str, str]:
         for column, column_flags in merged.items()
         if column_flags
     }
+
+
+def name_files(outputs: list[Output], job_id: str) -> None:
+    """One job id names every file of a run: ``{name}_{job_id}.csv`` and its metadata.
+
+    Output names are unique within a run -- the stem alone, or ``stem_<table>`` -- but two
+    table labels can slug alike, and Windows file names ignore case, so a clash gets a
+    numeric suffix instead of overwriting the other table.
+    """
+    used: set[str] = set()
+    for output in outputs:
+        name, counter = output.name, 1
+        while name.lower() in used:
+            counter += 1
+            name = f"{output.name}_{counter}"
+        used.add(name.lower())
+        output.job_id = job_id
+        output.file = f"{name}_{job_id}.csv"
+        output.metadata_file = f"{name}_metadata_{job_id}.csv"
 
 
 def _slug(text: str) -> str:

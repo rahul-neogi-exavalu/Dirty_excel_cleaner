@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api/client";
+import { useDebounced } from "../lib/hooks";
 import type { OutputSummary, Preview, PreviewColumn } from "../api/types";
 import { formatNumber } from "../lib/format";
 import { Button, IconButton } from "./ui/Button";
@@ -28,17 +29,18 @@ import { Alert, EmptyState, Skeleton, useToast } from "./ui/Feedback";
 import { PopoverPanel, Tooltip, usePopover } from "./ui/Overlay";
 import { Select } from "./ui/Select";
 
-const PAGE_SIZES = ["20", "50", "100"] as const;
-const MAX_HEADER = 128;
+const PAGE_SIZES = ["10", "20", "50", "100"] as const;
 
-function useDebounced<T>(value: T, ms: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const timer = setTimeout(() => setDebounced(value), ms);
-    return () => clearTimeout(timer);
-  }, [value, ms]);
-  return debounced;
-}
+/** About what sits above and below the rows on the Results page, and one row's height. */
+const CHROME_PX = 560;
+const ROW_PX = 37;
+
+/** The largest page size whose rows fit the screen, never under the smallest option. */
+const screenPageSize = (): (typeof PAGE_SIZES)[number] => {
+  const fits = Math.floor((window.innerHeight - CHROME_PX) / ROW_PX);
+  return [...PAGE_SIZES].reverse().find((size) => Number(size) <= fits) ?? PAGE_SIZES[0];
+};
+const MAX_HEADER = 128;
 
 function DtypeIcon({ dtype }: { dtype: string }) {
   const lower = dtype.toLowerCase();
@@ -66,7 +68,7 @@ export function DataTable({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiError | null>(null);
   const [offset, setOffset] = useState(0);
-  const [limit, setLimit] = useState<(typeof PAGE_SIZES)[number]>("20");
+  const [limit, setLimit] = useState<(typeof PAGE_SIZES)[number]>(screenPageSize);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<{ original: string; desc: boolean } | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(new Set());

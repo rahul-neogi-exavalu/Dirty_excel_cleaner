@@ -103,6 +103,26 @@ export function Checkbox({
   );
 }
 
+/** A checkbox with its label shown beside it, for filters ("Only tables to check"). */
+export function LabeledCheckbox({
+  label,
+  checked,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <label className={clsx("inline-flex cursor-pointer select-none items-center gap-2 text-body text-ink-700", disabled && "cursor-not-allowed opacity-50")}>
+      <Checkbox label={label} checked={checked} onChange={onChange} disabled={disabled} />
+      <span aria-hidden>{label}</span>
+    </label>
+  );
+}
+
 export const TextInput = forwardRef<
   HTMLInputElement,
   InputHTMLAttributes<HTMLInputElement> & { invalid?: boolean; valid?: boolean }

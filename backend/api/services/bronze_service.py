@@ -30,6 +30,7 @@ from ahi_bronze.periods import Period
 from .. import config, db
 from ..errors import ApiError, conflict, not_found
 from ..store import SUCCEEDED, Job, OutputRecord, store
+from . import job_history
 
 DRAFT = "draft"
 RUNNING = "running"
@@ -65,6 +66,8 @@ class Plan:
     message: str = ""
     error: dict | None = None
     reviewed_by: str | None = None
+    # The signed-in user who approved it (user id), for the job history.
+    approved_by: str | None = None
     results: dict[str, dict] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
@@ -172,7 +175,7 @@ def create_plan(job_ids: list[str], batch_id: str | None) -> Plan:
         ))
     if not files:
         raise conflict("None of these files produced a table to ingest.")
-    plan = Plan(id=uuid.uuid4().hex[:12], batch_id=batch_id, files=files)
+    plan = Plan(id=str(uuid.uuid4()), batch_id=batch_id, files=files)
     _replan(plan)
     with _plans_lock:
         _plans[plan.id] = plan
@@ -274,7 +277,7 @@ def problems(plan: Plan, confirmed: set[str] | None = None) -> list[str]:
 # --- running ---------------------------------------------------------------------
 
 
-def approve(plan_id: str, reviewed_by: str, confirmed: list[str]) -> Plan:
+def approve(plan_id: str, reviewed_by: str, confirmed: list[str], user_id: str | None = None) -> Plan:
     plan = get_plan(plan_id)
     reviewer = reviewed_by.strip()
     if len(reviewer) < 2:
@@ -295,8 +298,17 @@ def approve(plan_id: str, reviewed_by: str, confirmed: list[str]) -> Plan:
                            " ".join(issues[:3]) + (" …" if len(issues) > 3 else ""))
         if all(item.action == planner.SKIP for item in plan.items):
             raise conflict("Every table in this plan is skipped, so there is nothing to ingest.")
-        plan.status, plan.reviewed_by = RUNNING, reviewer
+        plan.status, plan.reviewed_by, plan.approved_by = RUNNING, reviewer, user_id
         plan.started_at, plan.message = time.time(), "Starting"
+    names = list(dict.fromkeys(file.file_name for file in plan.files))
+    job_history.begin(
+        job_history.BRONZE, plan.id, created_by=user_id, status=RUNNING, started_at=plan.started_at,
+        batch_id=plan.batch_id, source_file=names[0] if len(names) == 1 else None,
+        source_job_id=plan.files[0].job_id if len(plan.files) == 1 else None,
+    )
+    job_history.note(plan.id, f"Approved by {reviewer}: {len(plan.items)} table(s) from {len(names)} file(s)")
+    for item in plan.items:
+        job_history.note(plan.id, f"Plan: {item.action} -> {item.table_name}")
     threading.Thread(target=_run, args=(plan,), name=f"ingest-{plan.id}", daemon=True).start()
     return plan
 
@@ -315,6 +327,8 @@ def _run(plan: Plan) -> None:
         with db.connection() as conn:
             _execute(conn, plan)
         plan.status, plan.progress, plan.message = SUCCEEDED_PLAN, 1.0, "Ingested"
+        plan.finished_at = time.time()
+        job_history.finish(plan.id, "succeeded", _history_rows(plan), ended_at=plan.finished_at)
     except Exception as error:  # noqa: BLE001 - reported to the reviewer
         plan.status = FAILED
         plan.results = {}
@@ -327,8 +341,32 @@ def _run(plan: Plan) -> None:
         }
         plan.message = message
         _record_failure(plan)
-    finally:
         plan.finished_at = time.time()
+        job_history.note(plan.id, message, "ERROR")
+        job_history.note(plan.id, plan.error["technical"], "ERROR")
+        job_history.finish(plan.id, "failed", ended_at=plan.finished_at)
+    finally:
+        plan.finished_at = plan.finished_at or time.time()
+
+
+def _history_rows(plan: Plan) -> list[dict]:
+    """One job history row per plan item: where each cleaned table went."""
+    rows = []
+    try:
+        sources = {_key(job, record): (file, job, record) for file, job, record in _outputs(plan)}
+    except ApiError:  # the cleaning jobs are gone (restart); record what is known
+        sources = {}
+    for item in plan.items:
+        file, job, record = sources.get(item.key, (None, None, None))
+        rows.append({
+            "status": "skipped" if item.action == planner.SKIP else "succeeded",
+            "output_name": item.table_name, "output_file": record.file if record else None,
+            "row_count": plan.results.get(item.key, {}).get("rows_loaded", 0),
+            "source_file": file.file_name if file else None, "source_sha256": file.file_sha256 if file else None,
+            "source_sheets": list(record.sheet_names) if record else None,
+            "source_job_id": job.id if job else None,
+        })
+    return rows
 
 
 def _execute(conn, plan: Plan) -> None:
@@ -353,6 +391,7 @@ def _execute(conn, plan: Plan) -> None:
         ingestion_id = uuid.uuid4().hex
         if item.action == planner.SKIP:
             _audit(conn, control, plan, item, file, job, record, ingestion_id, 0, "skipped")
+            job_history.note(plan.id, f"Skipped {record.file}")
             continue
         done = sum(1 for other in work[: work.index(item)])
         plan.progress = done / max(len(work), 1)
@@ -365,6 +404,7 @@ def _execute(conn, plan: Plan) -> None:
                 [ingestion_id, [ref["id"] for ref in item.replaces]],
             )
         _audit(conn, control, plan, item, file, job, record, ingestion_id, rows, "ingested")
+        job_history.note(plan.id, f"Loaded {rows} rows from {record.file} into {item.table_name} ({item.action})")
         plan.results[item.key] = {"ingestion_id": ingestion_id, "rows_loaded": rows, "table_name": item.table_name}
 
     conn.execute(sql.SQL("UPDATE {}.ingest_plan SET status = 'succeeded', finished_at = now() "

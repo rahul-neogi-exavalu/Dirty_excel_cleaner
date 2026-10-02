@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.concurrency import run_in_threadpool
 
 from .. import db
+from ..auth import User, require_user
 from ..schemas import PlanApprove, PlanCreate, PlanFile, PlanFileUpdate, PlanItemUpdate, PlanOut
 from ..services import bronze_service
 from ..services.bronze_service import Plan
@@ -85,6 +86,7 @@ async def update_item(plan_id: str, key: str, request: PlanItemUpdate) -> PlanOu
 
 
 @router.post("/plans/{plan_id}/approve", response_model=PlanOut, status_code=202)
-async def approve(plan_id: str, request: PlanApprove) -> PlanOut:
-    plan = await run_in_threadpool(bronze_service.approve, plan_id, request.reviewed_by, request.confirmed)
+async def approve(plan_id: str, request: PlanApprove, user: User = Depends(require_user)) -> PlanOut:
+    # The reviewer is whoever is signed in, never a name typed into the request.
+    plan = await run_in_threadpool(bronze_service.approve, plan_id, user.user_name, request.confirmed, user.user_id)
     return plan_out(plan)

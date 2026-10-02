@@ -13,9 +13,15 @@ import type { BatchStatus, JobResults, JobStatus, OutputSummary, Workbook } from
 import { useToast } from "../components/ui/Feedback";
 import { plural } from "../lib/format";
 
-export type Page = "configuration" | "run" | "results" | "ingest" | "silver";
+/** The five workflow steps, in order. */
+export type StepPage = "configuration" | "run" | "results" | "ingest" | "silver";
+/** Every page: the steps plus the workspace pages beside them. */
+export type Page = StepPage | "history" | "users";
 
 const STORAGE_KEY = "exavalu.workflow.v2";
+/** Everything this browser keeps about a session's files; cleared on sign-out so the
+ *  next person to sign in starts clean. */
+export const STORAGE_KEYS = [STORAGE_KEY, "exavalu.ingest.plan"];
 const POLL_MS = 700;
 /** Matches the server's AHI_MAX_BATCH_FILES default. */
 export const MAX_FILES = 20;
@@ -444,9 +450,9 @@ export function useWorkflow(): Workflow {
   return context;
 }
 
-/* ---- hash routing: five pages, deep-linkable, back button works ---- */
+/* ---- hash routing: deep-linkable, back button works ---- */
 
-const PAGES: Page[] = ["configuration", "run", "results", "ingest", "silver"];
+const PAGES: Page[] = ["configuration", "run", "results", "ingest", "silver", "history", "users"];
 
 export const NavContext = createContext<(page: Page) => void>(() => {});
 export const useNavigate = () => useContext(NavContext);

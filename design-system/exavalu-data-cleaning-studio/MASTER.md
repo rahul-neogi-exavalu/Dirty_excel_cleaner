@@ -64,8 +64,16 @@ Lucide only (`lucide-react`) at one stroke weight (1.75, set globally in `index.
 - Never explain the mechanism inline when a tooltip can do it.
 
 ### Layout patterns
-- Shell: a dark green sidebar (workflow steps and workbook card), a sticky 56px top bar with a breadcrumb, and content capped at 1320px.
-- Page header: eyebrow (`STEP 0n`), title and one-line subtitle on the left, the 4-step stepper on the right (a step is ticked only when its work is actually done), then a hairline divider.
+- Shell: a charcoal sidebar (workflow steps, a Workspace group with History and Users, the workbook card, and the signed-in user at the foot), a sticky 56px top bar with a breadcrumb, and content capped at 1320px (1560px from 1920px wide, 1880px from 2400px).
+- Page header: eyebrow (`STEP 0n`, or `WORKSPACE` beside the workflow), title and one-line subtitle on the left, the 5-step stepper on the right (a step is ticked only when its work is actually done), then a hairline divider.
+
+### Screens and scrolling
+Every page must work from a 375px phone to a 2560px monitor, with no sideways page scroll anywhere, and should fit a 1366×768 laptop without vertical scrolling wherever the content allows.
+- **Lists are paged, not scrolled.** Use `Pagination` with `useFitPageSize` (`components/ui/Pagination.tsx`): the page size comes from the room left on screen, so a laptop shows fewer rows than a 24-inch monitor. No `max-h` scroll boxes around tables.
+- **Many files or tables: a dropdown, not a stack.** Show one at a time behind a `Select` ("File (3)", "Table (5)"), with what needs attention shown in each option's meta.
+- **Sections take turns.** Where a page has a few sequential sections (Configure: Upload / Sheets / Append; Ingest: Files / Plan), show one at a time with `SectionNav` (tab mode) or `Segmented`, marking which is done and which needs attention.
+- **Short screens** (`max-height: 820px`) tighten the sidebar and page header; the sidebar's middle scrolls on its own so the account footer stays in view; sticky side panels cap their height at the viewport.
+- **Horizontal scroll containers are `relative`,** so `sr-only` labels inside them can't widen the page.
 - `SectionCard`: an icon tile plus title in a bordered header row, then the body. Secondary meta (limits, counts) sits as a pill on the right.
 - `StatTile` rows for key numbers. The label should be one word.
 - Sticky right-hand summary panel on the Configure page (xl+).

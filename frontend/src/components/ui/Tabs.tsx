@@ -29,7 +29,7 @@ export function Tabs<T extends string>({
     onChange(items[next].id);
   };
   return (
-    <div role="tablist" aria-label={label} className="flex gap-1 overflow-x-auto overflow-y-hidden border-b border-ink-200 scroll-thin">
+    <div role="tablist" aria-label={label} className="relative flex gap-1 overflow-x-auto overflow-y-hidden border-b border-ink-200 scroll-thin">
       {items.map((item, index) => {
         const selected = item.id === value;
         return (

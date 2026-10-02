@@ -20,7 +20,7 @@ import {
   TriangleAlert,
   UserCheck,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api/client";
 import type {
   BronzeStatus,
@@ -39,12 +39,14 @@ import type {
 import { PageHeader, SectionCard } from "../components/layout/Layout";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
-import { Checkbox, SearchInput } from "../components/ui/Controls";
+import { Checkbox, LabeledCheckbox, SearchInput } from "../components/ui/Controls";
 import { Alert, EmptyState, ProgressBar, Skeleton, StatTile, useToast } from "../components/ui/Feedback";
 import { Tooltip } from "../components/ui/Overlay";
+import { Pagination, useFitPageSize, usePaged } from "../components/ui/Pagination";
 import { Select, type SelectOption } from "../components/ui/Select";
 import { TabPanel, Tabs } from "../components/ui/Tabs";
 import { formatNumber, humanize, plural } from "../lib/format";
+import { useAuth } from "../state/auth";
 
 const METHOD: Record<MatchMethod, string> = { saved: "Saved", exact: "Exact", fuzzy: "Fuzzy", semantic: "Semantic", ai: "AI" };
 const DOT: Record<MatchMethod, string> = {
@@ -197,6 +199,42 @@ function RunView({ catalog }: { catalog: SilverCatalog }) {
 
   const all = loads.length > 0 && loads.every((load) => selected.has(load.ingestion_id));
   return (
+    <EligibleLoads
+      loads={loads}
+      cleanup={eligible.cleanup}
+      selected={selected}
+      setSelected={setSelected}
+      all={all}
+      busy={busy}
+      refresh={refresh}
+      start={start}
+    />
+  );
+}
+
+function EligibleLoads({
+  loads,
+  cleanup,
+  selected,
+  setSelected,
+  all,
+  busy,
+  refresh,
+  start,
+}: {
+  loads: EligibleLoad[];
+  cleanup: CleanupLoad[];
+  selected: Set<string>;
+  setSelected: React.Dispatch<React.SetStateAction<Set<string>>>;
+  all: boolean;
+  busy: boolean;
+  refresh: () => void;
+  start: () => void;
+}) {
+  const list = useRef<HTMLDivElement>(null);
+  const paged = usePaged(loads, useFitPageSize(list, { reserve: 150 }));
+  const eligible = { cleanup };
+  return (
     <SectionCard
       icon={<Table2 />}
       title="Eligible loads"
@@ -208,7 +246,8 @@ function RunView({ catalog }: { catalog: SilverCatalog }) {
           {eligible.cleanup.map((item) => item.file_name).join(", ")}
         </Alert>
       )}
-      <div className="overflow-x-auto rounded-lg border border-ink-200 scroll-thin">
+      <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
+      <div className="relative overflow-x-auto scroll-thin">
         <table className="w-full min-w-[680px] border-collapse text-table">
           <caption className="sr-only">Bronze loads eligible for Silver</caption>
           <thead className="bg-ink-50">
@@ -224,7 +263,7 @@ function RunView({ catalog }: { catalog: SilverCatalog }) {
             </tr>
           </thead>
           <tbody>
-            {loads.map((load) => {
+            {paged.slice.map((load) => {
               const on = selected.has(load.ingestion_id);
               const toggle = (value: boolean) =>
                 setSelected((current) => {
@@ -234,7 +273,7 @@ function RunView({ catalog }: { catalog: SilverCatalog }) {
                   return next;
                 });
               return (
-                <tr key={load.ingestion_id} onClick={() => toggle(!on)} className={clsx("cursor-pointer border-b border-ink-100 last:border-0", on ? "bg-brand-50/50" : "hover:bg-ink-50")}>
+                <tr key={load.ingestion_id} data-row onClick={() => toggle(!on)} className={clsx("cursor-pointer border-b border-ink-100 last:border-0", on ? "bg-brand-50/50" : "hover:bg-ink-50")}>
                   <td className="px-4 py-2.5" onClick={(event) => event.stopPropagation()}>
                     <Checkbox label={`Select ${load.file_name}`} checked={on} onChange={toggle} />
                   </td>
@@ -247,6 +286,8 @@ function RunView({ catalog }: { catalog: SilverCatalog }) {
             })}
           </tbody>
         </table>
+      </div>
+      <Pagination {...paged} onPage={paged.setPage} noun="load" />
       </div>
       <div className="mt-5 flex items-center justify-between gap-3">
         <p className="text-caption text-ink-500">{selected.size} of {plural(loads.length, "load")} selected</p>
@@ -261,18 +302,12 @@ function RunView({ catalog }: { catalog: SilverCatalog }) {
 function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; catalog: SilverCatalog; onChange: (run: SilverRun) => void; onCancel: () => void }) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
-  const [reviewer, setReviewer] = useState(() => {
-    try {
-      return localStorage.getItem("exavalu.reviewer") ?? "";
-    } catch {
-      return "";
-    }
-  });
+  const reviewer = useAuth().user?.user_name ?? "";
   const rows = run.tables.reduce((sum, table) => sum + table.quality.rows, 0);
   const mapped = run.tables.reduce((sum, table) => sum + table.mapping.filter((row) => row.silver_column).length, 0);
   const prefilled = run.tables.reduce((sum, table) => sum + table.mapping.filter((row) => row.methods.includes("saved")).length, 0);
   const split = run.tables.reduce((sum, table) => sum + table.mapping.filter((row) => row.split).length, 0);
-  const canApprove = !run.blockers.length && reviewer.trim().length >= 2;
+  const canApprove = !run.blockers.length;
 
   const edit = async (table: string, column: string, value: string) => {
     setBusy(true);
@@ -290,12 +325,7 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
   const approve = async () => {
     setBusy(true);
     try {
-      localStorage.setItem("exavalu.reviewer", reviewer.trim());
-    } catch {
-      /* storage unavailable */
-    }
-    try {
-      onChange(await api.approveSilverRun(run.id, reviewer.trim()));
+      onChange(await api.approveSilverRun(run.id));
     } catch (err) {
       const apiError = toError(err);
       toast({ severity: "error", title: apiError.body.message, description: apiError.body.advice ?? undefined });
@@ -315,12 +345,10 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
             {run.cleanup.map((item) => `${item.file_name} (${item.table_name})`).join(", ")}
           </Alert>
         )}
-        {run.tables.map((table) => (
-          <TableMapping key={table.table_name} table={table} catalog={catalog} busy={busy} onEdit={(column, value) => edit(table.table_name, column, value)} />
-        ))}
+        <TablePicker tables={run.tables} catalog={catalog} busy={busy} onEdit={edit} />
       </div>
 
-      <aside className="xl:sticky xl:top-[80px] xl:self-start">
+      <aside className="scroll-thin xl:sticky xl:top-[80px] xl:max-h-[calc(100dvh-96px)] xl:self-start xl:overflow-y-auto">
         <section className="card p-6" aria-labelledby="silver-approve-title">
           <h2 id="silver-approve-title" className="label-caps">Approval</h2>
           <div className="mt-4 grid grid-cols-2 gap-3">
@@ -340,13 +368,10 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
               <ul className="space-y-0.5">{run.blockers.slice(0, 4).map((text) => <li key={text}>{text}</li>)}</ul>
             </Alert>
           )}
-          <label className="mt-5 block">
-            <span className="label-caps">Reviewed by</span>
-            <span className="mt-1.5 flex items-center gap-2 rounded border border-ink-200 bg-white px-3 focus-within:shadow-focus">
-              <UserCheck className="h-4 w-4 shrink-0 text-ink-400" aria-hidden />
-              <input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="Your name" maxLength={120} className="h-9 w-full bg-transparent text-body outline-none" />
-            </span>
-          </label>
+          <p className="mt-5 flex items-center gap-2 text-body text-ink-600">
+            <UserCheck className="h-4 w-4 shrink-0 text-ink-400" aria-hidden />
+            Approving as <span className="font-medium text-ink-900">{reviewer}</span>
+          </p>
           <Button variant="primary" size="lg" className="mt-5 w-full" icon={<Check />} disabled={!canApprove || busy} onClick={approve}>
             Approve & load
           </Button>
@@ -362,7 +387,68 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
   );
 }
 
-function TableMapping({ table, catalog, busy, onEdit }: { table: SilverTableReview; catalog: SilverCatalog; busy: boolean; onEdit: (column: string, value: string) => void }) {
+/** Several bronze tables are reviewed one at a time, picked from a list, rather than stacked. */
+function TablePicker({
+  tables,
+  catalog,
+  busy,
+  onEdit,
+}: {
+  tables: SilverTableReview[];
+  catalog: SilverCatalog;
+  busy: boolean;
+  onEdit: (table: string, column: string, value: string) => void;
+}) {
+  const [name, setName] = useState(tables[0]?.table_name ?? "");
+  const table = tables.find((item) => item.table_name === name) ?? tables[0];
+  if (!table) return null;
+  const open = (item: SilverTableReview) => item.mapping.filter((row) => !row.silver_column && !row.ignored).length;
+  const picker =
+    tables.length > 1 ? (
+      <Select<string>
+        label={`Table (${tables.length})`}
+        value={table.table_name}
+        onChange={setName}
+        icon={<Table2 className="h-4 w-4" />}
+        className="w-full sm:w-80"
+        options={tables.map((item) => ({
+          value: item.table_name,
+          label: item.table_name,
+          description: `${plural(item.mapping.length, "column")} · ${formatNumber(item.quality.rows)} rows`,
+          meta: open(item) ? <Badge tone="warning">{open(item)} to choose</Badge> : <Badge tone="success">Mapped</Badge>,
+        }))}
+      />
+    ) : null;
+  return (
+    <TableMapping
+      key={table.table_name}
+      table={table}
+      catalog={catalog}
+      busy={busy}
+      picker={picker}
+      onEdit={(column, value) => onEdit(table.table_name, column, value)}
+    />
+  );
+}
+
+function TableMapping({
+  table,
+  catalog,
+  busy,
+  onEdit,
+  picker,
+}: {
+  table: SilverTableReview;
+  catalog: SilverCatalog;
+  busy: boolean;
+  onEdit: (column: string, value: string) => void;
+  picker?: React.ReactNode;
+}) {
+  const list = useRef<HTMLDivElement>(null);
+  const [onlyOpen, setOnlyOpen] = useState(false);
+  const openRows = table.mapping.filter((row) => !row.silver_column && !row.ignored);
+  const rows = onlyOpen && openRows.length ? openRows : table.mapping;
+  const paged = usePaged(rows, useFitPageSize(list, { min: 4, fallbackRow: 76, reserve: 140 }), onlyOpen);
   // Which bronze column currently holds each Silver column, to flag a second use.
   const usedBy = useMemo(() => {
     const map = new Map<string, string>();
@@ -385,7 +471,16 @@ function TableMapping({ table, catalog, busy, onEdit }: { table: SilverTableRevi
         </span>
       }
     >
-      <div className="overflow-x-auto rounded-lg border border-ink-200 scroll-thin">
+      {(picker || openRows.length > 0) && (
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          {picker ?? <span />}
+          {openRows.length > 0 && (
+            <LabeledCheckbox label={`Only columns to choose (${openRows.length})`} checked={onlyOpen} onChange={setOnlyOpen} />
+          )}
+        </div>
+      )}
+      <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
+      <div className="relative overflow-x-auto scroll-thin">
         <table className="w-full min-w-[560px] border-collapse text-table">
           <caption className="sr-only">Column mapping for {table.table_name}</caption>
           <thead className="bg-ink-50">
@@ -395,11 +490,13 @@ function TableMapping({ table, catalog, busy, onEdit }: { table: SilverTableRevi
             </tr>
           </thead>
           <tbody>
-            {table.mapping.map((row) => (
+            {paged.slice.map((row) => (
               <MappingRow key={row.bronze_column} row={row} catalog={catalog} usedBy={usedBy} busy={busy} onEdit={(value) => onEdit(row.bronze_column, value)} />
             ))}
           </tbody>
         </table>
+      </div>
+      <Pagination {...paged} onPage={paged.setPage} noun="column" />
       </div>
       {(invalid.length > 0 || pcs.length > 0 || quality.unmapped_silver_columns?.length > 0) && (
         <div className="mt-4 grid gap-3 md:grid-cols-3">
@@ -492,7 +589,7 @@ function MappingRow({ row, catalog, usedBy, busy, onEdit }: { row: SilverMapping
   );
 
   return (
-    <tr className={clsx("border-b border-ink-100 last:border-0", open && "bg-amber-50/50")}>
+    <tr data-row className={clsx("border-b border-ink-100 last:border-0", open && "bg-amber-50/50")}>
       <td className="max-w-0 px-4 py-3 align-top">
         <p className="truncate font-mono font-medium text-ink-900" title={row.bronze_column}>{row.bronze_column}</p>
         {row.samples.length > 0 && <p className="truncate text-caption text-ink-500" title={row.samples.join(" · ")}>{row.samples.join(" · ")}</p>}
@@ -573,6 +670,9 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
   const toast = useToast();
   const [rows, setRows] = useState<SavedMapping[] | null>(null);
   const [query, setQuery] = useState("");
+  const [tableKey, setTableKey] = useState("all");
+  const list = useRef<HTMLDivElement>(null);
+  const pageSize = useFitPageSize(list, { reserve: 130 });
   const load = useCallback(() => {
     setRows(null);
     api.silverMapping().then(setRows).catch((err) => toast({ severity: "error", title: toError(err).body.message }));
@@ -583,10 +683,32 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
     [catalog],
   );
 
+  const keyOf = (row: SavedMapping) => `${row.pc_id}|${row.bronze_table_name}`;
+  const tableOptions = useMemo(() => {
+    const counts = new Map<string, { row: SavedMapping; count: number }>();
+    for (const row of rows ?? []) {
+      const found = counts.get(keyOf(row));
+      counts.set(keyOf(row), { row, count: (found?.count ?? 0) + 1 });
+    }
+    return [
+      { value: "all", label: "All tables", description: plural(rows?.length ?? 0, "column") },
+      ...[...counts.entries()].map(([value, { row, count }]) => ({
+        value,
+        label: row.bronze_table_name,
+        description: `pc_id ${row.pc_id || "—"} · ${plural(count, "column")}`,
+      })),
+    ];
+  }, [rows]);
+  const needle = query.trim().toLowerCase();
+  const visible = (rows ?? []).filter(
+    (row) =>
+      (tableKey === "all" || keyOf(row) === tableKey) &&
+      (!needle || [row.pc_id, row.bronze_table_name, row.bronze_column_name, row.silver_column_name ?? ""].some((v) => v.toLowerCase().includes(needle))),
+  );
+  const paged = usePaged(visible, pageSize, `${tableKey}|${needle}`);
+
   if (!rows) return <div className="card space-y-2 p-6"><Skeleton className="h-10" /><Skeleton className="h-10" /></div>;
   if (!rows.length) return <div className="card"><EmptyState icon={<BookCheck />} title="No saved mappings yet" description="Approved Silver runs save their mapping here." /></div>;
-  const needle = query.trim().toLowerCase();
-  const visible = rows.filter((row) => !needle || [row.pc_id, row.bronze_table_name, row.bronze_column_name, row.silver_column_name ?? ""].some((v) => v.toLowerCase().includes(needle)));
 
   const save = async (row: SavedMapping, value: string) => {
     const silver = value === IGNORE ? null : value;
@@ -600,20 +722,33 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
   };
 
   return (
-    <SectionCard icon={<BookCheck />} title="Saved mapping" description="Approved bronze → Silver columns." actions={<SearchInput value={query} onChange={setQuery} placeholder="Search" label="Search mappings" className="w-56" />}>
-      <div className="max-h-[560px] overflow-auto rounded-lg border border-ink-200 scroll-thin">
+    <SectionCard
+      icon={<BookCheck />}
+      title="Saved mapping"
+      description="Approved bronze → Silver columns."
+      actions={
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          {tableOptions.length > 2 && (
+            <Select<string> label="Bronze table" hideLabel value={tableKey} options={tableOptions} onChange={setTableKey} icon={<Table2 className="h-4 w-4" />} className="sm:w-64" />
+          )}
+          <SearchInput value={query} onChange={setQuery} placeholder="Search" label="Search mappings" className="sm:w-56" />
+        </div>
+      }
+    >
+      <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
+      <div className="relative overflow-x-auto scroll-thin">
         <table className="w-full min-w-[760px] border-separate border-spacing-0 text-table">
           <caption className="sr-only">Saved column mapping</caption>
           <thead>
             <tr className="text-left text-caption font-semibold text-ink-600">
               {["pc_id", "Bronze table", "Bronze column", "DRT column", "Silver column"].map((label) => (
-                <th key={label} scope="col" className="sticky top-0 z-10 border-b border-ink-200 bg-ink-50 px-3 py-2.5">{label}</th>
+                <th key={label} scope="col" className="border-b border-ink-200 bg-ink-50 px-3 py-2.5">{label}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {visible.map((row) => (
-              <tr key={`${row.pc_id}|${row.bronze_table_name}|${row.bronze_column_name}`}>
+            {paged.slice.map((row) => (
+              <tr key={`${row.pc_id}|${row.bronze_table_name}|${row.bronze_column_name}`} data-row>
                 <td className="num border-b border-ink-100 px-3 py-2 text-ink-700">{row.pc_id}</td>
                 <td className="border-b border-ink-100 px-3 py-2 font-mono text-ink-800">{row.bronze_table_name}</td>
                 <td className="border-b border-ink-100 px-3 py-2 font-mono font-medium text-ink-900">{row.bronze_column_name}</td>
@@ -625,6 +760,9 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
             ))}
           </tbody>
         </table>
+        {!visible.length && <EmptyState compact icon={<BookCheck />} title="No matching mappings" description="Try another table or search." />}
+      </div>
+      <Pagination {...paged} onPage={paged.setPage} noun="column" />
       </div>
     </SectionCard>
   );
@@ -633,6 +771,8 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
 function SummaryView() {
   const [rows, setRows] = useState<SilverSummaryRow[] | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const paged = usePaged(rows ?? [], useFitPageSize(list, { fallbackRow: 37, reserve: 130 }));
   useEffect(() => {
     api.silverSummary().then(setRows).catch((err) => setError(toError(err)));
   }, []);
@@ -643,19 +783,20 @@ function SummaryView() {
   const premium = rows.reduce((sum, row) => sum + (row.premium_total ?? 0), 0);
   return (
     <SectionCard icon={<Sigma />} title="Summary" description="Rows and premium by profit center and accounting month." actions={<span className="num text-caption text-ink-600">{formatNumber(total)} rows · {premium.toLocaleString("en-US", { style: "currency", currency: "USD" })}</span>}>
-      <div className="max-h-[560px] overflow-auto rounded-lg border border-ink-200 scroll-thin">
+      <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
+      <div className="relative overflow-x-auto scroll-thin">
         <table className="w-full min-w-[640px] border-separate border-spacing-0 text-table">
           <caption className="sr-only">Silver summary</caption>
           <thead>
             <tr className="text-left text-caption font-semibold text-ink-600">
               {["pc_id", "Profit center", "Number", "Month", "Rows", "Premium"].map((label) => (
-                <th key={label} scope="col" className={clsx("sticky top-0 z-10 border-b border-ink-200 bg-ink-50 px-3 py-2.5", ["Rows", "Premium"].includes(label) && "text-right")}>{label}</th>
+                <th key={label} scope="col" className={clsx("border-b border-ink-200 bg-ink-50 px-3 py-2.5", ["Rows", "Premium"].includes(label) && "text-right")}>{label}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, index) => (
-              <tr key={index}>
+            {paged.slice.map((row, index) => (
+              <tr key={`${paged.page}-${index}`} data-row>
                 <td className="num border-b border-ink-100 px-3 py-2 text-ink-700">{row.pc_id}</td>
                 <td className="border-b border-ink-100 px-3 py-2 text-ink-900">{row.profit_center_name ?? "—"}</td>
                 <td className="num border-b border-ink-100 px-3 py-2 text-ink-700">{row.profit_center_number ?? "—"}</td>
@@ -666,6 +807,8 @@ function SummaryView() {
             ))}
           </tbody>
         </table>
+      </div>
+      <Pagination {...paged} onPage={paged.setPage} noun="row" />
       </div>
     </SectionCard>
   );

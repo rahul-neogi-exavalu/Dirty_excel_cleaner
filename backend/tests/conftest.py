@@ -17,6 +17,27 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tools"))
 
+
+@pytest.fixture(autouse=True)
+def signed_in(monkeypatch):
+    """API tests run as a signed-in admin, and never write job history to the real
+    app database that backend/.env may point at. Auth itself is tested in test_auth.py."""
+    try:
+        from api import auth, config
+        from api.main import app
+    except ImportError:  # the cleaning-only suites run without the API's dependencies
+        yield None
+        return
+    monkeypatch.setattr(config, "APP_DB_CONFIGURED", False)
+    user = auth.User(
+        user_id="00000000-0000-4000-8000-000000000001", user_name="Test Reviewer",
+        user_email_id="reviewer@example.com", password_hash="", is_admin=True, user_phone_number=None,
+        is_active=True, must_change_password=False, last_login_at=None, expiry_date=None,
+    )
+    app.dependency_overrides[auth.current_user] = lambda: user
+    yield user
+    app.dependency_overrides.pop(auth.current_user, None)
+
 SAMPLES = ROOT / "sample_files_uncleaned"
 SKIP_SHEETS = ("SCENARIO_INFO", "README")
 

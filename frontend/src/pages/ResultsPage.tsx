@@ -23,7 +23,7 @@ import {
   Table2,
   TriangleAlert,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, download, exportUrls } from "../api/client";
 import type { BatchStatus, ColumnProfile, ConsistencyReport, JobResults, OutputSummary } from "../api/types";
 import { AppendMismatchModal, AppendOutcomeAlert, appendIncomplete } from "../components/AppendOutcome";
@@ -34,12 +34,13 @@ import { Badge } from "../components/ui/Badge";
 import { Button, type ButtonState } from "../components/ui/Button";
 import { Alert, EmptyState, Skeleton, StatTile, useToast } from "../components/ui/Feedback";
 import { Modal, Tooltip } from "../components/ui/Overlay";
+import { Pagination, useFitPageSize, usePaged } from "../components/ui/Pagination";
 import { Select } from "../components/ui/Select";
 import { TabPanel, Tabs } from "../components/ui/Tabs";
 import { formatNumber, formatTimestamp, parseFlags, plural } from "../lib/format";
 import { useNavigate, useWorkflow } from "../state/workflow";
 
-type Tab = "preview" | "columns" | "consistency";
+type Tab = "preview" | "columns" | "consistency" | "export";
 
 export function ResultsPage() {
   const flow = useWorkflow();
@@ -106,9 +107,14 @@ export function ResultsPage() {
     <>
       {header}
       <div className="space-y-6">
-        {batch && batch.files_total > 1 && <FilePicker batch={batch} jobId={jobId} />}
+        {batch && batch.files_total > 1 && !results && <FilePicker batch={batch} jobId={jobId} />}
         {results ? (
-          <ResultsContent key={jobId} results={results} />
+          <ResultsContent
+            key={jobId}
+            results={results}
+            picker={batch && batch.files_total > 1 ? <FileSelect batch={batch} jobId={jobId} /> : null}
+            batchExport={batch && batch.files_total > 1 ? <BatchExport batch={batch} embedded /> : null}
+          />
         ) : (
           <div className="card">
             {error ? (
@@ -123,14 +129,27 @@ export function ResultsPage() {
             )}
           </div>
         )}
-        {batch && batch.files_total > 1 && <BatchExport batch={batch} />}
+        {!results && batch && batch.files_total > 1 && <BatchExport batch={batch} />}
       </div>
     </>
   );
 }
 
-/** Which file's results are shown. Files that didn't finish are listed, but can't be opened. */
+/** Which file's results are shown, as a card: used while that file's results load. */
 function FilePicker({ batch, jobId }: { batch: BatchStatus; jobId: string }) {
+  return (
+    <section className="card flex flex-col gap-4 p-5 md:flex-row md:items-end md:justify-between md:p-6" aria-labelledby="file-picker-title">
+      <div>
+        <h2 id="file-picker-title" className="text-card text-ink-900">Files</h2>
+        <p className="num text-caption text-ink-500">{batch.files_succeeded} of {plural(batch.files_total, "file")} cleaned</p>
+      </div>
+      <FileSelect batch={batch} jobId={jobId} />
+    </section>
+  );
+}
+
+/** Which file's results are shown. Files that didn't finish are listed, but can't be opened. */
+function FileSelect({ batch, jobId }: { batch: BatchStatus; jobId: string }) {
   const flow = useWorkflow();
   const options = batch.jobs.map((job) => {
     const summary = flow.results[job.id]?.summary;
@@ -162,25 +181,19 @@ function FilePicker({ batch, jobId }: { batch: BatchStatus; jobId: string }) {
   const position = batch.jobs.findIndex((job) => job.id === jobId) + 1;
 
   return (
-    <section className="card flex flex-col gap-4 p-5 md:flex-row md:items-end md:justify-between md:p-6" aria-labelledby="file-picker-title">
-      <div>
-        <h2 id="file-picker-title" className="text-card text-ink-900">Files</h2>
-        <p className="num text-caption text-ink-500">{batch.files_succeeded} of {plural(batch.files_total, "file")} cleaned</p>
-      </div>
-      <Select
-        value={jobId}
-        options={options}
-        onChange={flow.setResultsJobId}
-        label={`File ${position} of ${batch.files_total}`}
-        icon={<FileSpreadsheet />}
-        className="w-full md:w-[420px]"
-        width={460}
-      />
-    </section>
+    <Select
+      value={jobId}
+      options={options}
+      onChange={flow.setResultsJobId}
+      label={`File ${position} of ${batch.files_total} · ${batch.files_succeeded} cleaned`}
+      icon={<FileSpreadsheet />}
+      className="w-full sm:w-[320px]"
+      width={460}
+    />
   );
 }
 
-function ResultsContent({ results }: { results: JobResults }) {
+function ResultsContent({ results, picker, batchExport }: { results: JobResults; picker?: ReactNode; batchExport?: ReactNode }) {
   const flow = useWorkflow();
   const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>("preview");
@@ -233,37 +246,34 @@ function ResultsContent({ results }: { results: JobResults }) {
         </>
       )}
 
-      {/* Completion banner */}
-      <section className="card flex flex-col gap-4 p-5 md:flex-row md:items-center md:p-6" aria-labelledby="done-title">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-emerald-50 text-emerald-700" aria-hidden>
-          <FileCheck2 className="h-6 w-6" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="label-caps !text-emerald-700">Cleaned</p>
-          <h2 id="done-title" className="truncate text-section text-ink-900">{summary.source_name}</h2>
-          <p className="num text-caption text-ink-500">
-            {plural(summary.sheets_selected, "sheet")} · {plural(summary.outputs, "table")} · {formatTimestamp(job.finished_at)}
-          </p>
-        </div>
-        <Badge tone="success" icon={<CheckCircle2 />} className="self-start md:self-auto">Completed</Badge>
-      </section>
-
-      {/* Table workspace */}
-      <section className="card" aria-labelledby="preview-title">
-        <div className="flex flex-col gap-4 px-5 pt-5 md:px-6 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <h2 id="preview-title" className="text-section text-ink-900">Tables</h2>
-            {summary.append && summary.appended_outputs > 0 && <p className="text-caption text-ink-500">Matching sheets are shown combined.</p>}
+      {/* One card: which file (and table) is shown, then the table itself. */}
+      <section className="card" aria-labelledby="done-title">
+        <div className="flex flex-col gap-4 px-5 pt-5 md:px-6 xl:flex-row xl:items-end xl:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-emerald-50 text-emerald-700" aria-hidden>
+              <FileCheck2 className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <p className="label-caps !text-emerald-700">Cleaned</p>
+              <h2 id="done-title" className="truncate text-section text-ink-900" title={summary.source_name}>{summary.source_name}</h2>
+              <p className="num text-caption text-ink-500">
+                {plural(summary.sheets_selected, "sheet")} · {plural(summary.outputs, "table")} · {formatTimestamp(job.finished_at)}
+                {summary.append && summary.appended_outputs > 0 && " · matching sheets combined"}
+              </p>
+            </div>
           </div>
-          <Select
-            value={output.id}
-            options={options}
-            onChange={(id) => flow.setOutputId(job.id, id)}
-            label={`Table (${outputs.length})`}
-            icon={<Table2 />}
-            className="w-full lg:w-[380px]"
-            width={420}
-          />
+          <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-end xl:w-auto">
+            {picker}
+            <Select
+              value={output.id}
+              options={options}
+              onChange={(id) => flow.setOutputId(job.id, id)}
+              label={`Table (${outputs.length})`}
+              icon={<Table2 />}
+              className="w-full sm:w-[320px]"
+              width={420}
+            />
+          </div>
         </div>
 
         <OutputStats
@@ -288,6 +298,7 @@ function ResultsContent({ results }: { results: JobResults }) {
                 icon: consistency?.issues ? <ShieldAlert /> : <ShieldCheck />,
                 count: consistency?.issues || undefined,
               },
+              { id: "export", label: "Export", icon: <Download /> },
             ]}
           />
         </div>
@@ -301,17 +312,22 @@ function ResultsContent({ results }: { results: JobResults }) {
           <TabPanel idPrefix="results" id="consistency" active={tab === "consistency"}>
             <ConsistencyView report={consistency} />
           </TabPanel>
+          <TabPanel idPrefix="results" id="export" active={tab === "export"}>
+            <div className="space-y-4">
+              <ExportSection
+                jobId={job.id}
+                sourceName={summary.source_name}
+                output={output}
+                outputs={outputs}
+                consistency={results.consistency}
+                onReview={() => setTab("consistency")}
+                embedded
+              />
+              {batchExport}
+            </div>
+          </TabPanel>
         </div>
       </section>
-
-      <ExportSection
-        jobId={job.id}
-        sourceName={summary.source_name}
-        output={output}
-        outputs={outputs}
-        consistency={results.consistency}
-        onReview={() => setTab("consistency")}
-      />
     </div>
   );
 }
@@ -376,6 +392,8 @@ function ColumnProfileView({ jobId, output }: { jobId: string; output: OutputSum
 
   const visible = useMemo(() => (rows ?? []).filter((row) => !onlyFlagged || parseFlags(row.type_flag).some((flag) => flag.level === "CHECK")), [rows, onlyFlagged]);
   const perSheet = output.kind === "stacked";
+  const list = useRef<HTMLDivElement>(null);
+  const paged = usePaged(visible, useFitPageSize(list, { min: 6, fallbackRow: 41, reserve: 130 }), onlyFlagged);
 
   if (error)
     return (
@@ -394,24 +412,25 @@ function ColumnProfileView({ jobId, output }: { jobId: string; output: OutputSum
           Flagged only
         </label>
       </div>
-      <div className="max-h-[560px] overflow-auto rounded-lg border border-ink-200 scroll-thin">
+      <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
+      <div className="relative overflow-x-auto scroll-thin">
         <table className="w-full min-w-[960px] border-separate border-spacing-0 text-table">
           <caption className="sr-only">Column profile for {output.name}</caption>
           <thead>
             <tr className="text-left text-caption font-semibold text-ink-600">
               {["Column", perSheet ? "Sheet" : null, "Type", "Filled", "Distinct", "Empty %", "Min", "Max", "Sum", "Notes"].filter(Boolean).map((label) => (
-                <th key={label} scope="col" className={clsx("sticky top-0 z-10 border-b border-ink-200 bg-ink-50 px-3 py-2", ["Filled", "Distinct", "Empty %", "Sum"].includes(label!) && "text-right")}>
+                <th key={label} scope="col" className={clsx("border-b border-ink-200 bg-ink-50 px-3 py-2", ["Filled", "Distinct", "Empty %", "Sum"].includes(label!) && "text-right")}>
                   {label}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {visible.map((row, index) => {
+            {paged.slice.map((row, index) => {
               const flags = parseFlags(row.type_flag);
               const empty = Number(row.null_percentage);
               return (
-                <tr key={`${row.header_name}-${row.sheet_name}-${index}`} className="align-top hover:bg-ink-50">
+                <tr key={`${row.header_name}-${row.sheet_name}-${paged.from + index}`} data-row className="align-top hover:bg-ink-50">
                   <td className="border-b border-ink-100 px-3 py-2 font-medium text-ink-900">{row.header_name}</td>
                   {perSheet && <td className="border-b border-ink-100 px-3 py-2 text-ink-600">{row.sheet_name}</td>}
                   <td className="border-b border-ink-100 px-3 py-2">
@@ -455,6 +474,8 @@ function ColumnProfileView({ jobId, output }: { jobId: string; output: OutputSum
           <EmptyState compact icon={<CheckCircle2 />} title="Nothing flagged" description="All columns look consistent." />
         )}
       </div>
+      <Pagination {...paged} onPage={paged.setPage} noun="column" />
+      </div>
     </div>
   );
 }
@@ -489,6 +510,7 @@ function ExportSection({
   outputs,
   consistency,
   onReview,
+  embedded,
 }: {
   jobId: string;
   sourceName: string;
@@ -496,6 +518,8 @@ function ExportSection({
   outputs: OutputSummary[];
   consistency: JobResults["consistency"];
   onReview: () => void;
+  /** Inside the results card's Export tab: no card or heading of its own. */
+  embedded?: boolean;
 }) {
   const { states, run } = useDownload();
   const renamed = output.renamed_columns;
@@ -509,9 +533,9 @@ function ExportSection({
     else void run(key, url, label);
   };
   return (
-    <section className="card p-5 md:p-6" aria-labelledby="export-title">
+    <section className={embedded ? undefined : "card p-5 md:p-6"} aria-labelledby={embedded ? undefined : "export-title"} aria-label={embedded ? "Export" : undefined}>
       <div className="flex flex-col gap-5 xl:flex-row xl:items-start">
-        <div className="flex items-start gap-3 xl:w-[320px] xl:shrink-0">
+        <div className={clsx("flex items-start gap-3 xl:w-[320px] xl:shrink-0", embedded && "hidden")}>
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-ink-50 text-ink-600" aria-hidden>
             <Download className="h-5 w-5" />
           </div>
@@ -625,7 +649,7 @@ function ExportCard({ icon, title, description, action }: { icon: React.ReactNod
 }
 
 /** One zip for every cleaned file, a folder per file. */
-function BatchExport({ batch }: { batch: BatchStatus }) {
+function BatchExport({ batch, embedded }: { batch: BatchStatus; embedded?: boolean }) {
   const flow = useWorkflow();
   const { states, run } = useDownload();
   const [confirm, setConfirm] = useState(false);
@@ -641,7 +665,10 @@ function BatchExport({ batch }: { batch: BatchStatus }) {
   const go = () => void run("batch", exportUrls.batchZip(batch.id), "All files");
 
   return (
-    <section className="card flex flex-col gap-4 p-5 md:flex-row md:items-center md:p-6" aria-labelledby="batch-export-title">
+    <section
+      className={clsx("flex flex-col gap-4 md:flex-row md:items-center", embedded ? "rounded-lg border border-ink-200 p-4" : "card p-5 md:p-6")}
+      aria-labelledby="batch-export-title"
+    >
       <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-ink-50 text-ink-600" aria-hidden>
         <Archive className="h-5 w-5" />
       </div>

@@ -2,8 +2,9 @@
 
 Exports are regenerated each time rather than served from the files written at the end
 of the run, so a header rename saved a minute ago is in the file downloaded now. The
-file names keep the CLI's pattern -- ``{stem}_{job_id}.csv`` and
-``{stem}_metadata_{job_id}.csv`` -- so a downstream loader cannot tell which produced it.
+file names keep the CLI's pattern -- ``{name}_{job_id}.csv`` and
+``{name}_metadata_{job_id}.csv``, one job id for every file of a run -- so a downstream
+loader cannot tell which produced it.
 """
 
 from __future__ import annotations

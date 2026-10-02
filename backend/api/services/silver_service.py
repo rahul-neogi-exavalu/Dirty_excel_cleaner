@@ -33,6 +33,7 @@ from ahi_silver.matching import Suggestion
 
 from .. import config, db
 from ..errors import ApiError, conflict, not_found
+from . import job_history
 
 DRAFT, RUNNING, SUCCEEDED, FAILED = "draft", "running", "succeeded", "failed"
 SQL_TYPES = {"text": "text", "date": "date", "decimal": "numeric(18,2)"}
@@ -47,6 +48,9 @@ class Load:
     rows: int
     period_start: str | None
     period_end: str | None
+    # Lineage for the job history: the cleaning job and the file it came from.
+    job_id: str | None = None
+    file_sha256: str | None = None
 
 
 @dataclass
@@ -75,7 +79,10 @@ class Run:
     message: str = ""
     error: dict | None = None
     reviewed_by: str | None = None
+    approved_by: str | None = None
     result: dict = field(default_factory=dict)
+    # Silver rows written per bronze load (ingestion id), for the job history.
+    loaded: dict[str, int] = field(default_factory=dict, repr=False)
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     finished_at: float | None = None
@@ -260,8 +267,8 @@ def create_run(ingestion_ids: list[str]) -> Run:
     # load word2vec vectors, and neither should hold one of the pool's few connections.
     with db.connection() as conn:
         rows = conn.execute(sql.SQL(
-            "SELECT id, table_name, file_name, source_system, period_start, period_end, rows_loaded, status, silver_status "
-            "FROM {}.ingestion WHERE id = ANY(%s)").format(_ident(config.CONTROL_SCHEMA)), [ids]).fetchall()
+            "SELECT id, table_name, file_name, source_system, period_start, period_end, rows_loaded, status, silver_status, "
+            "job_id, file_sha256 FROM {}.ingestion WHERE id = ANY(%s)").format(_ident(config.CONTROL_SCHEMA)), [ids]).fetchall()
         found = {r[0]: r for r in rows}
         if any(i not in found for i in ids):
             raise not_found("A selected bronze load")
@@ -296,13 +303,13 @@ def create_run(ingestion_ids: list[str]) -> Run:
         notes.extend(note for note in step_notes if note not in notes)
         review = TableReview(
             table_name=table, source_system=source, pc_id=pc,
-            loads=[Load(m[0], m[2], m[6], m[4], m[5]) for m in members],
+            loads=[Load(m[0], m[2], m[6], m[4], m[5], job_id=m[9], file_sha256=m[10]) for m in members],
             columns=columns, suggestions=suggestions, frame=frame,
         )
         _quality(review, columns_catalog, lotl)
         tables.append(review)
 
-    run = Run(id=uuid.uuid4().hex[:12], tables=tables, notes=notes, cleanup=cleanup, lotl=lotl)
+    run = Run(id=str(uuid.uuid4()), tables=tables, notes=notes, cleanup=cleanup, lotl=lotl)
     if lotl.empty:
         run.notes.append("LOTL not loaded: profit centers are kept as they are and flagged lotl_unavailable.")
     with _runs_lock:
@@ -385,7 +392,7 @@ def _still_valid(conn, run: Run, columns_catalog: list[SilverColumn]) -> None:
                            "Start a new Silver run.")
 
 
-def approve(run_id: str, reviewed_by: str) -> Run:
+def approve(run_id: str, reviewed_by: str, user_id: str | None = None) -> Run:
     run = get_run(run_id)
     reviewer = reviewed_by.strip()
     if len(reviewer) < 2:
@@ -401,6 +408,15 @@ def approve(run_id: str, reviewed_by: str) -> Run:
         with db.connection() as conn:
             _still_valid(conn, run, catalog())
         run.status, run.reviewed_by, run.started_at, run.message = RUNNING, reviewer, time.time(), "Starting"
+        run.approved_by = user_id
+    loads = [load for review in run.tables for load in review.loads]
+    job_history.begin(
+        job_history.SILVER, run.id, created_by=user_id, status=RUNNING, started_at=run.started_at,
+        source_file=loads[0].file_name if len(loads) == 1 else None,
+        source_job_id=loads[0].job_id if len(loads) == 1 else None,
+    )
+    job_history.note(run.id, f"Approved by {reviewer}: {len(loads)} bronze load(s) from {len(run.tables)} table(s)"
+                     + (f", {len(run.cleanup)} replaced load(s) to remove" if run.cleanup else ""))
     threading.Thread(target=_run, args=(run,), name=f"silver-{run.id}", daemon=True).start()
     return run
 
@@ -410,6 +426,10 @@ def _run(run: Run) -> None:
         with db.connection() as conn:
             _execute(conn, run)
         run.status, run.progress, run.message = SUCCEEDED, 1.0, "Loaded"
+        run.finished_at = time.time()
+        job_history.note(run.id, f"Loaded {run.result.get('rows_loaded', 0)} rows, "
+                                 f"removed {run.result.get('rows_removed', 0)}")
+        job_history.finish(run.id, "succeeded", _history_rows(run), ended_at=run.finished_at)
     except Exception as error:  # noqa: BLE001 - reported to the reviewer
         run.status = FAILED
         message = error.message if isinstance(error, ApiError) else "The Silver load failed; nothing was written."
@@ -420,10 +440,24 @@ def _run(run: Run) -> None:
         }
         run.message = message
         _record_failure(run)
-    finally:
         run.finished_at = time.time()
+        job_history.note(run.id, message, "ERROR")
+        job_history.note(run.id, run.error["technical"], "ERROR")
+        job_history.finish(run.id, "failed", ended_at=run.finished_at)
+    finally:
+        run.finished_at = run.finished_at or time.time()
         for review in run.tables:
             review.frame = None  # the run is over; its rows are no longer needed
+
+
+def _history_rows(run: Run) -> list[dict]:
+    """One job history row per bronze load the run moved into Silver."""
+    target = f"{config.SILVER_SCHEMA}.detail"
+    return [
+        {"output_name": review.table_name, "output_file": target, "row_count": run.loaded.get(load.ingestion_id),
+         "source_file": load.file_name, "source_sha256": load.file_sha256, "source_job_id": load.job_id}
+        for review in run.tables for load in review.loads
+    ]
 
 
 def _ensure_tables(conn, columns_catalog: list[SilverColumn]) -> None:
@@ -514,6 +548,8 @@ def _execute(conn, run: Run) -> None:
         if any(counts.get(i, 0) != expected.get(i, 0) for i in ids):
             raise ApiError(500, "row_mismatch", f"{review.table_name}: Silver row counts do not match bronze.",
                            "Nothing was loaded. Retry, and report it if it happens again.")
+        run.loaded.update({i: counts.get(i, 0) for i in ids})
+        job_history.note(run.id, f"{review.table_name}: {silver.height} rows into {config.SILVER_SCHEMA}.detail")
         loaded += silver.height
         conn.execute(sql.SQL("UPDATE {}.ingestion SET silver_status = 'succeeded', silver_run_id = %s, "
                              "silver_loaded_at = now() WHERE id = ANY(%s)").format(control), [run.id, ids])

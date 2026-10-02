@@ -31,6 +31,28 @@ export function formatTimestamp(epochSeconds: number | null | undefined): string
   }).format(new Date(epochSeconds * 1000));
 }
 
+/** An ISO timestamp from the server, in the reader's time zone. */
+export function formatIso(iso: string | null | undefined): string {
+  return iso ? formatTimestamp(new Date(iso).getTime() / 1000) : "—";
+}
+
+/** Seconds between two ISO timestamps; the end defaults to now (still running). */
+export function secondsBetween(start: string | null | undefined, end?: string | null): number | null {
+  if (!start) return null;
+  const finish = end ? new Date(end).getTime() : Date.now();
+  return Math.max(0, (finish - new Date(start).getTime()) / 1000);
+}
+
+/** Up to two initials from a name: "Rahul Neogi" -> "RN". */
+export function initials(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]!.toUpperCase())
+    .join("");
+}
+
 export function plural(count: number, one: string, many = `${one}s`): string {
   return `${formatNumber(count)} ${count === 1 ? one : many}`;
 }

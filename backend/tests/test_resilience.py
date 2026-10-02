@@ -259,7 +259,7 @@ def test_parallel_output_is_identical_to_sequential(tmp_path, executor):
     parallel_dir = tmp_path / "parallel"
     cli.clean_batch(paths, parallel_dir, tmp_path / "pa", workers=4, executor=executor)
 
-    # Every output carries a fresh job id, so files are matched on the name without it.
+    # Every run carries a fresh job id, so files are matched on the name without it.
     serial = {_without_job_id(path): path.read_bytes() for path in serial_dir.glob("*.csv")}
     parallel = {_without_job_id(path): path.read_bytes() for path in parallel_dir.glob("*.csv")}
     assert serial and serial == parallel

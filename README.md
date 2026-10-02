@@ -108,6 +108,29 @@ What the UI can and cannot know, and when:
 Uploads, job outputs and exports go to `backend/.workspace/` (git-ignored). Jobs live in memory,
 so a server restart means uploading again.
 
+### Sign-in, users and job history
+
+Every `/api` route except `/api/health` and sign-in needs a signed-in user. Users and the
+job history live in the app database (`APP_DB_*` in `.env`, schema `APP_DB_SCHEMA`); their
+tables are created on first use from `backend/migrations_app/`. Create the first admin
+once, then add everyone else from **Users** in the app:
+
+```bash
+.venv\Scripts\python backend\tools\create_user.py --name "Your Name" --email you@example.com --admin
+```
+
+- **Hashing is SHA-256 throughout.** Passwords use PBKDF2-HMAC-SHA256 (salted, 600,000
+  rounds); the session cookie (HttpOnly, SameSite=Lax) is signed with HMAC-SHA256 using
+  `APP_SESSION_SECRET`; files are fingerprinted with SHA-256.
+- **Signing in always opens Configure.** Admin-issued passwords are temporary: the user
+  sets their own (8 characters minimum) before the app opens.
+- **One job id per run.** Every CSV and metadata file a run writes carries the run's id
+  (`{table}_{job_id}.csv`), and the `jobs` table holds one row per output, all sharing that
+  id. Bronze ingests and Silver loads are recorded the same way, with `source_job_id`
+  pointing back to the cleaning run. **History** shows them grouped by run, with the log.
+- Deactivation, expiry and password resets apply within 30 seconds; accounts are never
+  deleted, so history keeps pointing at whoever ran each job.
+
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/workbooks` | Upload; validates type, size and readability; lists sheets |

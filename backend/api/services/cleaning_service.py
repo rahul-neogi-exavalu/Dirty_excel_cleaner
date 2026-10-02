@@ -27,7 +27,7 @@ from ahi_clean.reader import count_embedded_images
 from .. import config
 from ..errors import ApiError, conflict
 from ..schemas import BatchCreate, JobCreate
-from . import append_report, consistency_service, sheet_pool
+from . import append_report, consistency_service, job_history, sheet_pool
 from ..store import (
     ACTIVE, CANCELLED, FAILED, QUEUED, RUNNING, SUCCEEDED, Batch, Job, OutputRecord, store,
 )
@@ -63,7 +63,7 @@ class _NoTable(Exception):
     pass
 
 
-def _prepare(request: JobCreate, batch_id: str | None = None) -> Job:
+def _prepare(request: JobCreate, batch_id: str | None = None, user_id: str | None = None) -> Job:
     """Validate one file's request and build its job, without starting it."""
     upload = store.upload(request.workbook_id)
     known = [sheet["name"] for sheet in upload.sheets]
@@ -94,22 +94,34 @@ def _prepare(request: JobCreate, batch_id: str | None = None) -> Job:
         append=request.append and len(ordered) > 1,
         batch_id=batch_id,
         source_sha256=upload.sha256,
+        created_by=user_id,
     )
     job.directory = config.JOB_DIR / job.id
     return job
 
 
-def start_job(request: JobCreate) -> Job:
-    job = _prepare(request)
+def _record_queued(job: Job) -> None:
+    job_history.begin(
+        job_history.CLEAN, job.id, created_by=job.created_by, batch_id=job.batch_id,
+        source_file=job.source_name, source_sha256=job.source_sha256, source_sheets=job.sheets,
+    )
+    job_history.note(job.id, f"{len(job.sheets)} sheet(s) selected: {', '.join(job.sheets)}"
+                     + ("; append matching tables" if job.append else ""))
+
+
+def start_job(request: JobCreate, user_id: str | None = None) -> Job:
+    job = _prepare(request, user_id=user_id)
     store.add_job(job)
+    _record_queued(job)
     threading.Thread(target=_run, args=(job,), name=f"clean-{job.id}", daemon=True).start()
     return job
 
 
-def cancel_job(job_id: str) -> Job:
+def cancel_job(job_id: str, user_id: str | None = None) -> Job:
     job = store.job(job_id)
     if job.status not in ACTIVE:
         raise conflict("This job has already finished and can't be cancelled.")
+    job.cancelled_by = user_id
     with _transition:
         if job.status == QUEUED and job.batch_id:
             # Still waiting its turn in a batch: it never starts.
@@ -117,6 +129,7 @@ def cancel_job(job_id: str) -> Job:
             return job
     job.cancel_requested = True
     job.message = "Cancelling after the current sheet"
+    job_history.note(job.id, "Cancel requested", "WARN")
     return job
 
 
@@ -125,7 +138,7 @@ def cancel_job(job_id: str) -> Job:
 # --------------------------------------------------------------------------- #
 
 
-def start_batch(request: BatchCreate) -> Batch:
+def start_batch(request: BatchCreate, user_id: str | None = None) -> Batch:
     if len(request.files) > config.MAX_BATCH_FILES:
         raise ApiError(
             422,
@@ -137,26 +150,33 @@ def start_batch(request: BatchCreate) -> Batch:
     batch_id = store.new_id()
     # Every file is validated before any job exists, so a bad selection in the last
     # file never leaves the first ones running on their own.
-    jobs = [_prepare(item, batch_id) for item in request.files]
+    jobs = [_prepare(item, batch_id, user_id) for item in request.files]
     batch = Batch(id=batch_id, job_ids=[job.id for job in jobs])
     store.add_batch(batch, jobs)
+    for job in jobs:
+        _record_queued(job)
     threading.Thread(target=_run_batch, args=(batch, jobs), name=f"batch-{batch.id}", daemon=True).start()
     return batch
 
 
-def cancel_batch(batch_id: str) -> Batch:
+def cancel_batch(batch_id: str, user_id: str | None = None) -> Batch:
     batch = store.batch(batch_id)
     jobs = store.batch_jobs(batch)
     if not any(job.status in ACTIVE for job in jobs):
         raise conflict("This batch has already finished and can't be cancelled.")
     with _transition:
         batch.cancel_requested = True
+        batch.cancelled_by = user_id
         for job in jobs:
+            if job.status not in ACTIVE:
+                continue
+            job.cancelled_by = user_id
             if job.status == QUEUED:
                 _mark_cancelled(job, "Cancelled before it started")
             elif job.status == RUNNING:
                 job.cancel_requested = True
                 job.message = "Cancelling after the current sheet"
+                job_history.note(job.id, "Cancel requested", "WARN")
     return batch
 
 
@@ -177,6 +197,8 @@ def _mark_cancelled(job: Job, message: str) -> None:
     job.status = CANCELLED
     job.message = message
     job.finished_at = time.time()
+    job_history.note(job.id, message, "WARN")
+    job_history.finish(job.id, CANCELLED, ended_at=job.finished_at, modified_by=job.cancelled_by)
 
 
 def _run_batch(batch: Batch, jobs: list[Job]) -> None:
@@ -205,6 +227,7 @@ def _run_batch_file(batch: Batch, job: Job) -> None:
         if job.status != QUEUED:
             return  # cancelled while it waited
         if batch.cancel_requested:
+            job.cancelled_by = job.cancelled_by or batch.cancelled_by
             _mark_cancelled(job, "Cancelled before it started")
             return
         job.status = RUNNING
@@ -223,6 +246,7 @@ def _run_batch_file(batch: Batch, job: Job) -> None:
         }
         job.message = "Cleaning could not be completed"
         job.finished_at = time.time()
+        _record_end(job, [])
 
 
 # --------------------------------------------------------------------------- #
@@ -232,9 +256,13 @@ def _enter(job: Job, stage: str, fraction: float = 0.0, message: str | None = No
     if job.cancel_requested:
         raise _Cancelled()
     start, end = _SPAN[stage]
+    changed = stage != job.stage
     job.stage = stage
     job.progress = round(start + (end - start) * fraction, 4)
     job.message = message or _STAGE_MESSAGES[stage]
+    job_history.note(job.id, job.message)
+    if changed:
+        job_history.update(job.id)  # flush the log at each stage
 
 
 def _run(job: Job) -> None:
@@ -251,11 +279,14 @@ def _run(job: Job) -> None:
         }
         job.message = "Cleaning could not be completed"
         job.finished_at = time.time()
+        _record_end(job, [])
         return
     source = upload.path
     stem = source.stem
     job.status = RUNNING
     job.started_at = time.time()
+    job_history.update(job.id, status=RUNNING, started_at=job.started_at)
+    results = []
     try:
         _enter(job, "read", message=f"Opening {upload.filename}")
         grids, results = _clean_sheets(job, source)
@@ -332,6 +363,29 @@ def _run(job: Job) -> None:
     finally:
         job.active_sheets = []
         job.finished_at = time.time()
+        _record_end(job, results)
+
+
+def _record_end(job: Job, results) -> None:
+    """Hand the finished run to the job history: one row per output when it succeeded."""
+    if job.error:
+        job_history.note(job.id, job.error.get("message") or "Failed", "ERROR")
+        for key in ("detail", "advice"):
+            if job.error.get(key):
+                job_history.note(job.id, f"{key.capitalize()}: {job.error[key]}", "ERROR")
+        if job.error.get("technical"):
+            job_history.note(job.id, "Traceback:\n" + job.error["technical"].rstrip(), "ERROR")
+    outputs = []
+    if job.status == SUCCEEDED:
+        removed = {result.label: len(result.trace.get("dropped_rows", [])) for result in results}
+        outputs = [
+            {"output_name": record.name, "output_file": record.file, "row_count": len(record.frame),
+             "rows_removed": sum(removed.get(label, 0) for label in record.tables),
+             "source_sheets": list(dict.fromkeys(record.sheet_names))}
+            for record in job.outputs
+        ]
+    job_history.finish(job.id, job.status, outputs, ended_at=job.finished_at,
+                       modified_by=job.cancelled_by if job.status == CANCELLED else None)
 
 
 def _clean_sheets(job: Job, source):
@@ -355,8 +409,11 @@ def _clean_sheets(job: Job, source):
 
     def on_done(name: str, grid, sheet_results) -> None:
         job.sheets_done += 1
-        job.rows_kept += sum(len(result.frame) for result in sheet_results)
-        job.rows_removed += sum(len(result.trace.get("dropped_rows", [])) for result in sheet_results)
+        kept = sum(len(result.frame) for result in sheet_results)
+        removed = sum(len(result.trace.get("dropped_rows", [])) for result in sheet_results)
+        job.rows_kept += kept
+        job.rows_removed += removed
+        job_history.note(job.id, f"Sheet {name}: {len(sheet_results)} table(s), {kept} rows kept, {removed} removed")
         start, end = _SPAN["clean"]
         job.progress = round(start + (end - start) * job.sheets_done / total, 4)
 
@@ -401,22 +458,21 @@ def _plan(results, stem: str, append: bool):
 def _write(job: Job, source, stem: str, outputs) -> list[OutputRecord]:
     job.directory.mkdir(parents=True, exist_ok=True)
     records = []
+    # Same naming as the CLI: the job's id names every CSV and metadata file it writes.
+    orchestrate.name_files(outputs, job.id)
     for index, output in enumerate(outputs):
-        _enter(job, "write", index / max(len(outputs), 1), f"Writing {output.name}")
-        # Same naming as the CLI: one id names the CSV and its metadata.
-        output.job_id = str(uuid.uuid4())
-        output.file = f"{stem}_{output.job_id}.csv"
-        output.metadata_file = f"{stem}_metadata_{output.job_id}.csv"
-
+        _enter(job, "write", index / max(len(outputs), 1), f"Writing {output.file}")
         path = job.directory / output.file
         output.frame.write_csv(path)
         inferred = metadata.inferred_schema(path)
         described = metadata.build(output.frame, source.name, output.sheet_names, inferred, output.type_flags)
         described.write_csv(job.directory / output.metadata_file)
 
+        # The files share the job id; each table keeps its own id for the API.
+        output.output_id = str(uuid.uuid4())
         records.append(
             OutputRecord(
-                id=output.job_id,
+                id=output.output_id,
                 name=output.name,
                 kind=output.kind,
                 frame=output.frame,
@@ -460,7 +516,7 @@ def _relationships(results, workbook_report, append: bool) -> list[dict]:
 
 def _sheet_reports(grids, results, outputs) -> list[dict]:
     """Per selected sheet: its raw extent, and each table the cleaner found in it."""
-    destination = {label: output.job_id for output in outputs for label in output.sheets}
+    destination = {label: output.output_id for output in outputs for label in output.sheets}
     reports = []
     for grid in grids:
         tables = []

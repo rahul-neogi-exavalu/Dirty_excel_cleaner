@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from .. import config
+from ..auth import User, require_user
 from ..services import silver_service
 from ..services.silver_service import Run
 
@@ -31,7 +32,8 @@ class SavedMappingEdit(BaseModel):
 
 
 class RunApprove(BaseModel):
-    reviewed_by: str = Field(min_length=2, max_length=120)
+    # Ignored: the signed-in user is the reviewer. Kept so older clients still validate.
+    reviewed_by: str | None = None
 
 
 def run_out(run: Run) -> dict:
@@ -127,8 +129,8 @@ async def edit_run_mapping(run_id: str, request: MappingEdit) -> dict:
 
 
 @router.post("/runs/{run_id}/approve", status_code=202)
-async def approve(run_id: str, request: RunApprove) -> dict:
-    return run_out(await run_in_threadpool(silver_service.approve, run_id, request.reviewed_by))
+async def approve(run_id: str, request: RunApprove, user: User = Depends(require_user)) -> dict:
+    return run_out(await run_in_threadpool(silver_service.approve, run_id, user.user_name, user.user_id))
 
 
 @router.get("/mapping")
