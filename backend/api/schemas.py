@@ -209,6 +209,9 @@ class PlanFile(BaseModel):
     division_matches: list[str] = []
     # What the reviewer may choose from: those, or every division when none is listed.
     division_options: list[str] = []
+    # Worth knowing, nothing to fix: no division listed, a file-name period the data
+    # disagrees with, two profit centers in the name.
+    warnings: list[str] = []
 
 
 class PlanOut(BaseModel):

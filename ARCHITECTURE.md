@@ -982,7 +982,7 @@ candidate with the methods behind it, then every other Silver column, then Ignor
 methods disagree is flagged **Split**. Within a table, when two columns' best candidates are
 the same Silver column, the better-supported column keeps it and the other falls back to its
 next candidate or is left open. A "nothing fits" vote never ignores a column by itself: only a
-reviewer, or a saved ignore, does that.
+reviewer does that, and an ignore is never saved.
 
 **A vote must be decisive.** Fuzzy and semantic vote only above a minimum score and with a
 margin over the next-best target (5 points; 0.05 cosine). Fuzzy also needs a shared
@@ -1007,7 +1007,7 @@ match a target. Then come 21 worked examples, built as contrast pairs: `eff_dt` 
 `effective_date` get the same answer at the same confidence; `acc_eff_dt` and
 `accountingeffectivedate` both give accounting_effective_date; a carrier code is not a carrier
 name; the insured is not the insurer; an expiration date is not an effective date. Mappings
-reviewers have approved (renamed or ignored columns, up to 40) are added as precedents that
+reviewers have approved (renamed or abbreviated columns, up to 40) are added as precedents that
 outrank the examples. The column being asked about is never shown as its own precedent, so
 the AI's vote stays independent of the saved one. Examples whose target is not in the active
 Silver list are dropped, so the prompt survives the business replacing the DRT. Inputs sit in
@@ -1017,16 +1017,18 @@ tagged blocks marked as data.
 business's `drt_column_mapping` workbook (`profit_center, pc_column, drt_column`) plus
 `silver_column_name`, resolved from the DRT label through the catalog. It is keyed per profit
 center, not per bronze table:
-- **Lookup:** a bronze column meets its rows on normalized words ("Net Premium" ~ `net_premium`).
+- **Lookup:** a bronze column meets its rows by its source header as written (case and spacing aside), kept from the cleaner through the bronze registry; a load from before headers were kept meets them on normalized words ("Net Premium" ~ `net_premium`). Every profit center the table's loads carry counts as its own.
 - **One-to-many:** when one header has two rows, the column loads into both Silver columns (`also`).
 - **Competing headers:** two different headers that normalize alike ("Agent Commission", "Agent Commission%") compete as votes instead.
 - **Notes are excluded:** rows the business keeps as notes ("check comments") never match a real column, and never reach the AI as precedents.
 
 **Approval is of the whole mapping.** Saved rows are pre-filled but appear in the review
 like every other row. Nothing is written to `drt_column_mapping` until approval. Then each
-column's rows are made exactly its approved targets: wrong ones are deleted, missing ones are
-added under the header as the mapping already writes it. An ignored column is a row with no
-DRT and no Silver column. For each row, `ingest.silver_run` records how the choice was made
+mapped column's rows are made exactly its approved targets: wrong ones are deleted, missing ones
+are added under the header the file wrote. Only rows of the same header are touched, so two
+headers that normalize alike never overwrite each other. `drt_column` is the business's own
+DRT label for the target (`<control>.drt_label`), or NULL. An ignored column saves nothing and
+is asked about again next time. For each row, `ingest.silver_run` records how the choice was made
 (recommended or manual), the methods behind it, any extra targets, whether the vote was split,
 and every vote.
 
@@ -1038,16 +1040,20 @@ mapping points at a Silver column that has been removed from the catalog.
 **No connection is held during slow work.** `create_run` reads the bronze rows, the saved
 mapping and the LOTL, releases the connection, and only then consults word2vec (a cold
 load takes about 9 s) and the AI. Otherwise a few concurrent reviews could exhaust the
-4-connection pool. The rows stay on the run, so each mapping edit recomputes the dry run
-in memory; they are released when the run ends.
+4-connection pool. The review itself is stored in `<control>.silver_draft`, so any process
+serves it and a restart loses nothing; the bronze rows are kept in a small per-process cache
+for the dry run each mapping edit recomputes, and read again on a miss.
 
 **One transaction per run**, serialized by an advisory lock:
 
 1. Save the approved mapping into `drt_column_mapping`.
-2. Delete the Silver rows of bronze loads that have since been superseded, and mark them `removed`.
-3. For each selected load: delete any earlier attempt, transform, `COPY`, and check the count of that load's rows against bronze.
+2. Delete the Silver rows of bronze loads that have since been superseded (from `silver_detail` and their cleansed table), and mark them `removed`.
+3. For each selected load: delete any earlier attempt, transform, `COPY` into the source-specific **Silver Cleansed** table (`<cleansed schema>.<bronze table>`), check the count of that load's rows against bronze, then insert them from there into **Final Silver** (`silver_detail`).
 4. Rebuild `silver_aggregate` for the affected source systems.
-5. Write `silver_run`.
+5. Write `silver_run`, and mark the review succeeded in the same commit.
+
+A failure rolls all of it back; the failure is then recorded on its own (`silver_status = 'failed'`, a
+`silver_run` row with the attempted mapping), and the loads stay eligible.
 
 **Exact tables.**
 - **`silver_detail`:** exactly the 69 columns of `backend/config/silver_columns.csv`, the business's `silver_schema`, in order and typed as stated. `timestamp` becomes `timestamptz`; `ahi_policy_transaction_id` is an identity. It has no internal lineage: a bronze load's rows are found by `(source_table, source_file, ingestion_timestamp)`, the last being the load's `processing_date`, indexed together.
@@ -1055,7 +1061,8 @@ in memory; they are released when the run ends.
   - derived: sums of premium, fees, gross and producer commission, and revenue; the policy count; the reporting period; `file_date` from the audit table; the source period; hashes;
   - left NULL: dimensions below the profit center, ratios, and customer counts.
 - **Creation:** both tables are created by the service, and a column the catalog gains is added.
-- **Control schema:** migrations `002_silver.sql` and `003_reference.sql` only touch the control schema.
+- **Cleansed tables:** one per bronze table, the same name, in `AHI_CLEANSED_SCHEMA`: the Silver columns (no generated key) plus `_ingestion_id`, `_pc_status`, `_invalid_columns`, `_silver_run_id` and `_cleansed_at`. Registered in `<control>.silver_cleansed_table`.
+- **Migrations:** `002_silver.sql` and `003_reference.sql` touch the control schema; `005_silver_cleansed.sql` creates the cleansed schema, `drt_column_mapping` and its index, `drt_label`, `silver_draft` and `silver_cleansed_table`, so no request runs DDL.
 
 **Profit center without a LOTL.** Rows are kept and flagged `lotl_unavailable`, never dropped
 or guessed. A name with a number but no LOTL entry is `no_match`. A number without a name is
@@ -1085,10 +1092,10 @@ or guessed. A name with a number but no LOTL entry is `no_match`. A number witho
 | The scorecard reads `.xlsx` only | Delimited inputs are covered by `backend/tests/test_delimited.py`, not by the oracle. |
 | Ingest plans live in memory | Like cleaning jobs, a server restart before approval means cleaning again. Everything already ingested is in Postgres. |
 | Period detection needs dates or month names | A file with neither is blocked until the reviewer enters its period. |
-| Bronze is untyped | Every bronze column is `text`; conversion to dates and decimals is the Silver stage's job. |
-| Silver runs live in memory until approved | A restart before approval means starting the run again; approved mappings and loaded rows are in Postgres. |
+| Bronze is stored as text | Every bronze column is `text`. The cleaner has already typed what it could read (dates, numbers, percent signs removed), with its own rules; Silver then applies the document's. |
+| Unapproved Silver reviews expire | A review untouched for `AHI_SILVER_DRAFT_TTL_HOURS` (72) is discarded; start a new run. |
 | The DRT reporting columns are not derived | `silver_detail.drt_reporting_*` and `ajg_apd` stay NULL until their rules are agreed (`ajg_apd` can be mapped). |
 | word2vec knows general English | Google News vectors match "carrier" to "insurer" but not house abbreviations. Those names get no word2vec vote; the AI and the reviewer read them. |
 | The AI is called for every column | One call per bronze table, also when every column is already saved, so its vote is always shown. Votes from the AI and word2vec are suggestions; nothing is loaded without approval. |
 | Reference data is loaded once | division_mapping, the LOTL and the DRT mapping are filled from `assets/` only while empty; new workbooks need `tools/seed_reference.py --replace`. Reloading the DRT mapping (`--replace-drt`) discards approved mappings. |
-| Two source headers can normalize alike | "Agent Commission" and "Agent Commission%" meet the same bronze column; their saved targets compete as votes rather than both loading. |
+| Two source headers can normalize alike | For loads made before source headers were kept, "Agent Commission" and "Agent Commission%" meet the same bronze column; their saved targets compete as votes rather than both loading. |

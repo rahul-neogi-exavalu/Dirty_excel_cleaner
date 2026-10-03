@@ -320,6 +320,8 @@ export interface PlanFile {
   division_matches: string[];
   /** What the reviewer may choose from. */
   division_options: string[];
+  /** Worth knowing, nothing to fix (no division listed, a file-name period the data disagrees with). */
+  warnings?: string[];
 }
 
 export interface PlanReplaceRef {

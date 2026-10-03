@@ -42,6 +42,7 @@ def plan_out(plan: Plan) -> PlanOut:
                 division_name=file.division_name,
                 division_matches=file.division_matches,
                 division_options=bronze_service.division_options(file, plan.divisions),
+                warnings=file.warnings,
             )
             for file in plan.files
         ],

@@ -41,12 +41,14 @@ def env(tmp_path_factory):
     work = tmp_path_factory.mktemp("workspace")
     saved = {name: getattr(config, name) for name in (
         "WORK_DIR", "UPLOAD_DIR", "JOB_DIR", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD",
-        "DB_SSLMODE", "BRONZE_SCHEMA", "CONTROL_SCHEMA", "DB_CONFIGURED", "INGEST_ENABLED")}
+        "DB_SSLMODE", "BRONZE_SCHEMA", "CONTROL_SCHEMA", "SILVER_SCHEMA", "CLEANSED_SCHEMA", "DB_CONFIGURED",
+        "INGEST_ENABLED")}
     config.WORK_DIR, config.UPLOAD_DIR, config.JOB_DIR = work, work / "uploads", work / "jobs"
     config.DB_HOST, config.DB_PORT = parts.get("host", "localhost"), int(parts.get("port", 5432))
     config.DB_NAME, config.DB_USER = parts.get("dbname", "postgres"), parts.get("user", "postgres")
     config.DB_PASSWORD, config.DB_SSLMODE = parts.get("password", ""), "disable"
     config.BRONZE_SCHEMA, config.CONTROL_SCHEMA = f"bronze_t{suffix}", f"ingest_t{suffix}"
+    config.SILVER_SCHEMA, config.CLEANSED_SCHEMA = f"silver_t{suffix}", f"cleansed_t{suffix}"
     config.DB_CONFIGURED = config.INGEST_ENABLED = True
     db.close()
     from api.main import app
@@ -54,7 +56,7 @@ def env(tmp_path_factory):
     yield TestClient(app), config
     db.close()
     with psycopg.connect(URL, autocommit=True) as conn:
-        for schema in (config.BRONZE_SCHEMA, config.CONTROL_SCHEMA):
+        for schema in (config.BRONZE_SCHEMA, config.CONTROL_SCHEMA, config.SILVER_SCHEMA, config.CLEANSED_SCHEMA):
             conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
     for name, value in saved.items():
         setattr(config, name, value)
@@ -198,7 +200,7 @@ def test_scenario_document_end_to_end(env):
     other = ["agency", "carrier", "accounting_effective_date"]
     _ingest(client, _clean(client, "ARR_oct_pc0515.xlsx", _workbook({"ARR": (other, _rows([10], other))})),
             expect_actions=["new_table"])
-    assert _query(config, "SELECT count(*) FROM {b}.ext_pc0515_arr_2025_10")[0][0] == 4
+    assert _query(config, "SELECT count(*) FROM {b}.ext_pc0515_arr_v2")[0][0] == 4  # no period in the name
 
     # Revised Jan-Sep file -> REPLACE every earlier load of the table (rebuild)
     revised = _clean(client, "ARR_rev_pc0515.xlsx", _workbook({"ARR": (BASE, _rows(list(range(1, 10)), BASE, 2))}))

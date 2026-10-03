@@ -482,7 +482,11 @@ def problems(table: str, suggestions: list[Suggestion]) -> list[str]:
 
 def suggestion_to_dict(suggestion: Suggestion) -> dict:
     """Everything about one column's suggestion, as JSON-ready values."""
-    return asdict(suggestion)
+    data = asdict(suggestion)
+    for candidate in data["candidates"]:
+        for vote in candidate["votes"]:
+            vote["score"] = float(vote["score"])  # a matcher may hand back a numpy scalar
+    return data
 
 
 def suggestion_from_dict(data: dict) -> Suggestion:

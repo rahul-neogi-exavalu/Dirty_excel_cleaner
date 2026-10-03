@@ -515,7 +515,7 @@ person still approves every change that matters.
 
 **What the tool works out on its own:**
 
-- **Source system:** read from the file name's suffix (`ARR_pc0515.xlsx` → `pc0515`).
+- **Source system:** read from the file name's `PC` code, the same one as the profit center (`ARR_PC515.xlsx` → `pc0515`). A name with two different PC codes is left for you to fill in.
 - **Profit center (pc_id):** read from the file name. `PC796_2026-06 796 TPI - AJG Data Submission_796 TPI` becomes `PC0796`.
 - **File date:** read from the file name, so `2026-06` becomes 1 June 2026. A year on its own is not enough, and you enter it.
 - **Division:** looked up in the business's division table by profit center. For the few profit centers listed under two divisions, you choose.

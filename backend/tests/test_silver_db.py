@@ -1,4 +1,4 @@
-"""The 10 test workbooks, clean -> bronze -> silver, through the HTTP API, on Postgres.
+"""The 14 test workbooks, clean -> bronze -> silver, through the HTTP API, on Postgres.
 
 Skipped unless AHI_TEST_DATABASE_URL points at a scratch database. Uses its own
 throwaway schemas and drops them afterwards. The files come from
@@ -34,7 +34,8 @@ def env(tmp_path_factory):
     suffix = uuid.uuid4().hex[:8]
     work = tmp_path_factory.mktemp("workspace")
     names = ("WORK_DIR", "UPLOAD_DIR", "JOB_DIR", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD",
-             "DB_SSLMODE", "BRONZE_SCHEMA", "CONTROL_SCHEMA", "SILVER_SCHEMA", "LOTL_TABLE", "DB_CONFIGURED",
+             "DB_SSLMODE", "BRONZE_SCHEMA", "CONTROL_SCHEMA", "SILVER_SCHEMA", "CLEANSED_SCHEMA", "LOTL_TABLE",
+             "DB_CONFIGURED",
              "INGEST_ENABLED", "AI_ENABLED", "WORD2VEC_PATH")
     saved = {name: getattr(config, name) for name in names}
     config.WORK_DIR, config.UPLOAD_DIR, config.JOB_DIR = work, work / "uploads", work / "jobs"
@@ -43,6 +44,7 @@ def env(tmp_path_factory):
     config.DB_PASSWORD, config.DB_SSLMODE = parts.get("password", ""), "disable"
     config.BRONZE_SCHEMA, config.CONTROL_SCHEMA = f"bronze_s{suffix}", f"ingest_s{suffix}"
     config.SILVER_SCHEMA, config.LOTL_TABLE = f"silver_s{suffix}", f"ingest_s{suffix}.lotl"
+    config.CLEANSED_SCHEMA = f"cleansed_s{suffix}"
     config.DB_CONFIGURED = config.INGEST_ENABLED = True
     config.AI_ENABLED, config.WORD2VEC_PATH = False, ""  # deterministic: no external calls
     db.close()
@@ -51,7 +53,7 @@ def env(tmp_path_factory):
     yield TestClient(app), config
     db.close()
     with psycopg.connect(URL, autocommit=True) as conn:
-        for schema in (config.BRONZE_SCHEMA, config.CONTROL_SCHEMA, config.SILVER_SCHEMA):
+        for schema in (config.BRONZE_SCHEMA, config.CONTROL_SCHEMA, config.SILVER_SCHEMA, config.CLEANSED_SCHEMA):
             conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
     for name, value in saved.items():
         setattr(config, name, value)
@@ -68,6 +70,16 @@ def _wait(client, url, active=("queued", "running", "draft")):
 
 def _bronze(client, filename: str) -> list[str]:
     """Clean and ingest one test file, confirming everything; returns its table names."""
+    plan = _plan(client, filename)
+    keys = [item["key"] for item in plan["items"]]
+    approved = client.post(f"/api/bronze/plans/{plan['id']}/approve", json={"reviewed_by": "Test Reviewer", "confirmed": keys})
+    assert approved.status_code == 202, approved.text
+    assert _wait(client, f"/api/bronze/plans/{plan['id']}")["status"] == "succeeded"
+    return [item["table_name"] for item in plan["items"]]
+
+
+def _plan(client, filename: str) -> dict:
+    """Clean one test file and plan its ingestion (file date filled in when the name has none)."""
     with open(FILES / filename, "rb") as handle:
         upload = client.post("/api/workbooks", files={"file": (filename, handle.read())}).json()
     sheets = [s["name"] for s in upload["sheets"] if not s["hidden"]]
@@ -81,11 +93,7 @@ def _bronze(client, filename: str) -> list[str]:
             assert response.status_code == 200, response.text
             plan = response.json()
     assert all(file["pc_id"] for file in plan["files"]), plan["files"]
-    keys = [item["key"] for item in plan["items"]]
-    approved = client.post(f"/api/bronze/plans/{plan['id']}/approve", json={"reviewed_by": "Test Reviewer", "confirmed": keys})
-    assert approved.status_code == 202, approved.text
-    assert _wait(client, f"/api/bronze/plans/{plan['id']}")["status"] == "succeeded"
-    return [item["table_name"] for item in plan["items"]]
+    return plan
 
 
 def _silver_run(client, file_names: list[str]) -> dict:
@@ -118,7 +126,8 @@ def _approve(client, run: dict) -> dict:
 
 def _q(config, statement: str, *args):
     with psycopg.connect(URL) as conn:
-        return conn.execute(statement.format(s=config.SILVER_SCHEMA, c=config.CONTROL_SCHEMA), args).fetchall()
+        return conn.execute(statement.format(s=config.SILVER_SCHEMA, c=config.CONTROL_SCHEMA,
+                                             cl=config.CLEANSED_SCHEMA), args).fetchall()
 
 
 def _methods(run: dict) -> dict[str, list[str]]:
@@ -157,14 +166,30 @@ def test_ten_files_through_silver(env):
     rows = _rows_of(run)
     assert not run["blockers"] and {row["selection"] for row in rows.values()} == {"recommended"}
     assert all(row["methods"] for row in rows.values()) and run["tables"][0]["pc_id"] == "PC0101"
-    assert run["lotl_rows"] == lotl_rows + 8
+    assert run["lotl_rows"] == lotl_rows + 10
     # The DRT mapping is the business's (660 rows); nothing for PC0101 until approval.
     mapping = client.get("/api/silver/mapping").json()
     assert len(mapping) >= 650 and not [r for r in mapping if r["profit_center"] == "PC0101"]
-    _approve(client, run)
+    state = _approve(client, run)
     saved = [r for r in client.get("/api/silver/mapping").json() if r["profit_center"] == "PC0101"]
     assert len(saved) == 9 and all(r["silver_column_name"] for r in saved)
+    assert state["result"]["mappings_saved"] == 9
+    # Saved under the headers the file wrote, with only the business's DRT labels.
+    from api.services import reference_service
+
+    labels = set(reference_service.drt_labels_from_file())
+    assert {r["pc_column"] for r in saved} == {"Profit Center Name", "Profit Center Number", "Insurance Company Name",
+                                               "Producer Name", "Policy Number", "Premium", "Accounting Effective Date",
+                                               "Policy Effective Date", "Transaction Effective Date"}
+    assert all(r["drt_column"] is None or r["drt_column"] in labels for r in saved)
+    assert {r["drt_column"] for r in saved if r["pc_column"] == "Premium"} == {"Premium"}
+    assert {r["drt_column"] for r in saved if r["pc_column"] == "Profit Center Name"} == {None}
     assert _q(config, "SELECT count(*) FROM {s}.silver_detail")[0][0] == 30
+    # Bronze -> Silver Cleansed (its own schema, the bronze table's name) -> Final Silver.
+    assert _q(config, "SELECT count(*) FROM {cl}.ext_pc0101_arr")[0][0] == 30
+    assert _q(config, "SELECT bronze_table, cleansed_table FROM {c}.silver_cleansed_table") == [
+        ("ext_pc0101_arr", f"{config.CLEANSED_SCHEMA}.ext_pc0101_arr")]
+    assert _q(config, "SELECT status FROM {c}.silver_draft WHERE id = %s", state["id"]) == [("succeeded",)]
     # Exactly the business's columns, in order.
     assert _columns(config, "silver_detail") == [c.name for c in catalog.load(config.SILVER_COLUMNS_FILE)]
     assert _columns(config, "silver_aggregate") == [c.name for c in catalog.load_plain(config.SILVER_AGGREGATE_COLUMNS_FILE)]
@@ -184,8 +209,13 @@ def test_ten_files_through_silver(env):
 
     # 4. Renamed + extra columns land in their own bronze table; Silver unifies them.
     tables = _bronze(client, "04_ARR_pc0101_2026_Sep_newcols.xlsx")
-    assert tables == ["ext_pc0101_arr_2026_09"]
+    assert tables == ["ext_pc0101_arr_v2"]
     run = _silver_run(client, ["04_ARR_pc0101_2026_Sep_newcols.xlsx"])
+    # The review lives in the database: it survives the API letting go of every connection.
+    from api import db
+
+    db.close()
+    assert client.get(f"/api/silver/runs/{run['id']}").json()["status"] == "draft"
     methods = _methods(run)
     assert "fuzzy" in methods["premium_amt"] and methods["profit_center_name"][0] == "saved"
     # "Carrier" is approved for other profit centers in the DRT mapping: a saved vote.
@@ -200,12 +230,12 @@ def test_ten_files_through_silver(env):
     snapshot = _q(config, "SELECT mapping FROM {c}.silver_run WHERE id = %s", state["id"])[0][0]
     audit = {row["bronze_column_name"]: row for row in snapshot}
     assert "fuzzy" in audit["premium_amt"]["methods"] and audit["notes"]["selection"] == "manual"
-    assert _q(config, "SELECT count(*) FROM {s}.silver_detail WHERE source_table LIKE '%%.ext_pc0101_arr_2026_09' "
+    assert _q(config, "SELECT count(*) FROM {s}.silver_detail WHERE source_table LIKE '%%.ext_pc0101_arr_v2' "
                       "AND insurance_company_name IS NOT NULL")[0][0] == 5
-    # An ignored column is saved as such.
-    ignored = [r for r in client.get("/api/silver/mapping").json()
-               if r["profit_center"] == "PC0101" and r["pc_column"] == "notes"]
-    assert ignored == [{"profit_center": "PC0101", "pc_column": "notes", "drt_column": None, "silver_column_name": None}]
+    # An ignored column is not saved: it is asked about again next time.
+    mapping = client.get("/api/silver/mapping").json()
+    assert not [r for r in mapping if r["silver_column_name"] is None and r["drt_column"] is None]
+    assert not [r for r in mapping if r["profit_center"] == "PC0101" and r["pc_column"].casefold() == "notes"]
 
     # 5. A second source with its own wording, unified into the same columns.
     _bronze(client, "05_Prem_pc0202_2026.xlsx")
@@ -257,6 +287,8 @@ def test_ten_files_through_silver(env):
     tables = _bronze(client, "10_Report_pc0606_2026_JanJul.xlsx")
     assert len(tables) == 2
     loads = client.get("/api/silver/eligible").json()["loads"]
+    # Both tables of the one sheet reached bronze (neither was taken for the other).
+    assert {l["table_name"] for l in loads if l["file_name"] == "10_Report_pc0606_2026_JanJul.xlsx"} == set(tables)
     fact = [l["ingestion_id"] for l in loads if l["table_name"] == "ext_pc0606_report"]
     run = client.post("/api/silver/runs", json={"ingestion_ids": fact}).json()
     _approve(client, run)
@@ -274,3 +306,54 @@ def test_ten_files_through_silver(env):
     rows = client.get("/api/silver/aggregate").json()
     assert rows and {"premium", "policy_count", "reporting_period"} <= set(rows[0])
     assert _q(config, "SELECT count(*) FROM {c}.silver_run WHERE status = 'succeeded'")[0][0] == 11
+
+
+def test_audit_scenarios_11_to_14(env):
+    """Run after the ten files: pc0101's table holds the revised Jan-Jun, July and August."""
+    client, config = env
+    with psycopg.connect(URL) as conn:
+        bronze = config.BRONZE_SCHEMA
+
+        def q(statement):
+            return conn.execute(statement.format(b=bronze)).fetchall()
+
+        # 11. May-Jul overlaps the loaded Jan-Jun only partly: nothing runs until the reviewer chooses.
+        plan = _plan(client, "11_ARR_pc0101_2026_MayJul_overlap.xlsx")
+        item = plan["items"][0]
+        assert any("only partly" in blocker for blocker in item["blockers"])
+        assert plan["files"][0]["period_start"] == "2026-05" and plan["files"][0]["period_end"] == "2026-07"
+        refused = client.post(f"/api/bronze/plans/{plan['id']}/approve",
+                              json={"reviewed_by": "Test Reviewer", "confirmed": [item["key"]]})
+        assert refused.status_code == 409
+
+        # 12. Reordered columns plus a new one: evolve the same table, keeping its order.
+        before = [r[0] for r in q("SELECT column_name FROM information_schema.columns WHERE table_schema = '{b}' "
+                                  "AND table_name = 'ext_pc0101_arr' ORDER BY ordinal_position")]
+        plan = _plan(client, "12_ARR_pc0101_2026_Oct_reorder_newcol.xlsx")
+        assert [(i["action"], i["table_name"]) for i in plan["items"]] == [("evolve", "ext_pc0101_arr")]
+        assert plan["items"][0]["comparison"]["reordered"]
+        assert _bronze(client, "12_ARR_pc0101_2026_Oct_reorder_newcol.xlsx") == ["ext_pc0101_arr"]
+        after = [r[0] for r in q("SELECT column_name FROM information_schema.columns WHERE table_schema = '{b}' "
+                                 "AND table_name = 'ext_pc0101_arr' ORDER BY ordinal_position")]
+        assert "commission" in after and [c for c in after if c in before] == before
+
+        # 13. Amounts the document's list does not cover, read exactly and strictly.
+        _bronze(client, "13_MoneyDates_pc0909_2026.xlsx")
+        _approve(client, _silver_run(client, ["13_MoneyDates_pc0909_2026.xlsx"]))
+        premiums = sorted((r[0] for r in _q(config, "SELECT premium FROM {s}.silver_detail WHERE source_system = 'pc0909'")),
+                          key=lambda v: (v is None, v))
+        from decimal import Decimal
+
+        assert premiums == [Decimal("-250.00"), Decimal("0.13"), Decimal("1.01"), Decimal("9999999999999999.99"),
+                            None, None]
+        # Each cleansed row says which values could not be read.
+        unreadable = _q(config, "SELECT count(*) FROM {cl}.ext_pc0909_edge WHERE 'premium' = ANY(_invalid_columns)")
+        assert unreadable == [(2,)]
+
+        # 14. Duplicate headers listed the other way round still land in their own columns.
+        _bronze(client, "14_Clash_pc0707_2026_Jan.xlsx")
+        plan = _plan(client, "14_Clash_pc0707_2026_Feb_swapped.xlsx")
+        assert plan["items"][0]["column_map"] == {"amount": "amount_2", "amount_2": "amount"}
+        _bronze(client, "14_Clash_pc0707_2026_Feb_swapped.xlsx")
+        dollars = q("SELECT amount::numeric FROM {b}.ext_pc0707_clash ORDER BY policy_number")
+        assert all(row[0] >= 100 for row in dollars) and len(dollars) == 8

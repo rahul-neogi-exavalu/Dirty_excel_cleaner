@@ -49,7 +49,7 @@ Every statement of the scenario document, plus the requirements agreed during de
 
 | # | Requirement | How it is solved | Code | Test |
 |---|---|---|---|---|
-| S1 | Two stages: **Bronze → Silver Cleansed → Final Silver** | **Silver Cleansed** is the cleanse-and-map step (`transform.transform`). It runs first as a *dry run* the reviewer sees (quality report), and then again identically during the load. **Final Silver** is `silver_detail`, with `silver_aggregate` built from it. The agreed design uses three Silver tables (`drt_column_mapping`, `silver_detail`, `silver_aggregate`), so the cleansed stage is a transform rather than a stored table. | `ahi_silver/transform.py` | `test_silver_db` |
+| S1 | Two stages: **Bronze → Silver Cleansed → Final Silver** | **Silver Cleansed** is a stored, source-specific table per bronze table, of the same name, in `AHI_CLEANSED_SCHEMA` (`ahi_bronze_cleansed.ext_pc0101_arr`). The cleanse-and-map step (`transform.transform`) runs first as a *dry run* the reviewer sees (quality report), and then identically during the load, writing the cleansed table with each row's load, profit-center status and unreadable values. **Final Silver** is `silver_detail`, loaded from the cleansed table in the same transaction, with `silver_aggregate` built from it. | `ahi_silver/transform.py`, `silver_service._execute` | `test_silver_db` |
 | S2 | The bronze file is identified through the **ingestion audit table**; eligible only if **bronze ingestion succeeded** and **no successful Silver status exists** | `eligible()` selects from `ingest.ingestion` where `status = 'ingested' AND silver_status IS DISTINCT FROM 'succeeded'`. Migration `002_silver.sql` adds `silver_status`, `silver_run_id` and `silver_loaded_at`. | `silver_service.eligible` | `test_silver_db` |
 | S3 | The selected file is processed into Silver | The reviewer picks loads (all eligible are pre-selected). One run can cover several bronze tables. | `silver_service.create_run` | `test_silver_db` |
 | S4 | Cleansing: **strings trimmed** | `cleanse.text` | `ahi_silver/cleanse.py` | `test_strings_are_trimmed_and_blanks_become_null` |
@@ -193,7 +193,7 @@ sequenceDiagram
 
 - **Rules are pure** (`ahi_silver`); the service owns I/O.
 - **One transform, used twice:** the dry run the reviewer sees and the load both call `transform.transform`, so what was reviewed is what is written.
-- **No database connection is held during slow work:** bronze rows, the saved mapping and the LOTL are read first, the connection is released, and only then are the AI and word2vec consulted. A run's rows are kept in memory for the review, so every edit re-checks quality without another database read. They are released when the run ends.
+- **No database connection is held during slow work:** bronze rows, the saved mapping and the LOTL are read first, the connection is released, and only then are the AI and word2vec consulted. The review is stored in `<control>.silver_draft`; a run's bronze rows are kept in a small per-process cache, so most edits re-check quality without another database read.
 
 ---
 
@@ -203,7 +203,7 @@ sequenceDiagram
 
 | Table | Columns | Meaning |
 |---|---|---|
-| `drt_column_mapping` | `profit_center, pc_column, drt_column, silver_column_name`: the business's DRT column mapping plus `silver_column_name`, the silver_detail column a DRT label means (`InsuranceCompany Name` → `insurance_company_name`). | The saved mapping. It is seeded from `assets/drt_column_mapping.xlsx` (660 rows, 46 profit centers) and grows with every approved run. One source column may have two rows (two Silver columns). A row with no DRT and no Silver column is an approved Ignore. A unique index stops duplicate rows. |
+| `drt_column_mapping` | `profit_center, pc_column, drt_column, silver_column_name`: the business's DRT column mapping plus `silver_column_name`, the silver_detail column a DRT label means (`InsuranceCompany Name` → `insurance_company_name`). | The saved mapping. It is seeded from `assets/drt_column_mapping.xlsx` (660 rows, 46 profit centers) and grows with every approved mapping, saved under the header the file wrote. `drt_column` is only one of the workbook's 21 labels (`<control>.drt_label`), else NULL. One source column may have two rows (two Silver columns). Ignores are never saved. A unique index stops duplicate rows. |
 | `silver_detail` | **Exactly** the 69 columns of the business's `silver_schema`, in order, typed as stated: `string` → text, `int` → integer, `bigint`, `boolean`, `date`, `timestamp` → timestamptz, `decimal(p,s)` → numeric(p,s). `ahi_policy_transaction_id` is an identity. | **Final Silver:** every source unified under one set of names. There are no internal columns: a bronze load's rows are found by `(source_table, source_file, ingestion_timestamp)`. |
 | `silver_aggregate` | **Exactly** the 75 columns of `silver_aggregate_schema` (`ahi_aggregate_id` identity). | Rebuilt per source system at profit center × accounting month (`PROFIT_CENTER_MONTH`); see §8. |
 
@@ -263,7 +263,7 @@ The row is flagged *Split*. `test_every_method_votes_and_the_best_supported_cand
 | **The kind of value must agree** (name, identifier, date, amount) for fuzzy and semantic. | A carrier *code* is not a carrier *name*; a policy *id* is not a policy *date*. |
 | **word2vec skips names with an unexpanded abbreviation, or any word it doesn't know.** | News vectors read `acc` as a sports conference. Averaging only the known words would read `acc_eff_dt` as plain "effective date". |
 | **One Silver column per table.** If two columns' best candidates are the same Silver column, the better-supported one keeps it; the other falls back to its next candidate or is left open. | The taken column stays in the dropdown, marked *Used by …*. |
-| **"Nothing fits" is a vote, not a decision.** When it outranks the alternatives, the column is left open with *Ignore* offered as a suggestion. | Only a reviewer, or a saved ignore, stops a column from loading. |
+| **"Nothing fits" is a vote, not a decision.** When it outranks the alternatives, the column is left open with *Ignore* offered as a suggestion. | Only a reviewer stops a column from loading, and that decision is not saved. |
 | **The AI's second choice is listed, not counted.** | It helps the reviewer with an ambiguous name without inflating support. |
 
 **What the reviewer sees,** per row:
@@ -311,7 +311,7 @@ The row is flagged *Split*. `test_every_method_votes_and_the_best_supported_cand
    | `prdcr_nm` → producer, `prod_nm` → producer, with line of business as second choice | Ambiguity is shown as a second choice and a lower confidence |
    | `grs_wrtn_prm` → premium, `prem_tax_amt` → none, `amount` → none | A qualifier that names another measure means no match |
    | `upload_ts` → none | System columns have no target |
-3. **Live precedents:** mappings reviewers approved in this deployment are added in an `<approved>` block that outranks the examples. These are renamed or abbreviated columns, or deliberate ignores, up to 40. A column being asked about is never shown as its own precedent, so the AI's vote stays independent of the saved vote.
+3. **Live precedents:** mappings reviewers approved in this deployment are added in an `<approved>` block that outranks the examples. These are renamed or abbreviated columns, up to 40. A column being asked about is never shown as its own precedent, so the AI's vote stays independent of the saved vote.
 4. **Resilience:**
    - An example whose target is not in the active Silver list is dropped, so the prompt keeps working when the business replaces the DRT.
    - The answer schema is `{bronze_column, reason, silver_column, alternative, confidence}`, with temperature 0.
@@ -336,7 +336,7 @@ Per row, in `transform.transform`:
 2. **Type**, per the column's `data_type`:
    - **string:** trim, empty → NULL.
    - **date:** the document's formats in order, then `yyyyMMdd`, then Excel serials; anything else → NULL, counted.
-   - **decimal(p,s):** strip currency, separators and accounting brackets, then round to the column's scale (`decimal(18,2)` amounts, `decimal(10,6)` rates); a percent keeps its number (`12%` → 12); unreadable or too large → NULL, counted.
+   - **decimal(p,s):** strip currency, separators and accounting brackets, then round to the column's scale (`decimal(18,2)` amounts, `decimal(10,6)` rates); a percent sign divides by 100 (`12%` → 0.12); values are read exactly and rounded half up; unreadable or too large → NULL, counted. Dates need a four-digit year; `yyyyMMdd` and Excel serials count only between 1900 and 2100.
    - **int / bigint:** whole numbers; a `*_month` column also reads month names.
    - **boolean:** `true/false`, `yes/no`, `y/n`, `1/0`.
    - **timestamp:** ISO date-times, or a date.
@@ -510,5 +510,5 @@ Dependencies (in `requirements.txt`): `rapidfuzz`, `wordninja`, `google-genai`. 
 - **Loads before this change** have no processing_date. Their creation time stands in for it, and their rows in the earlier `detail` table are not migrated to `silver_detail`.
 - **word2vec knows general English,** not house abbreviations. Those names get no word2vec vote; the AI's few-shot prompt and the reviewer read them.
 - **The AI is called once per bronze table for every column,** including already-saved ones, so its vote is always visible. With the AI off, the other methods still vote.
-- **Runs live in memory until approved;** a restart means starting the review again. Approved mappings and loaded rows are in Postgres.
+- **Reviews are stored in `<control>.silver_draft`** and expire after `AHI_SILVER_DRAFT_TTL_HOURS` (72) without an edit.
 - **The hashes are not used yet,** per the document. Using them for de-duplication or change detection is a later decision.

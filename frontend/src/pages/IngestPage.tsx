@@ -487,6 +487,12 @@ function FileRow({ file, busy, onChange }: { file: PlanFile; busy: boolean; onCh
             <span className="truncate">From {file.period_source ?? "— not found"}</span>
           </span>
         </Tooltip>
+        {(file.warnings ?? []).map((text) => (
+          <p key={text} className="mt-0.5 flex items-start gap-1 text-caption text-amber-800">
+            <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+            <span className="whitespace-normal">{text}</span>
+          </p>
+        ))}
         </div>
       </td>
       <td className="px-3 py-2.5">
