@@ -8,6 +8,9 @@ Source files are named like ``PC796_2026-06 796 TPI - AJG Data Submission_796 TP
 * **file_date** -- the date the file is for: ``2026-06`` -> 2026-06-01. Several shapes are
   understood (``2026-06-15``, ``202606``, ``06-2026``, ``Jun 2026``); a year alone is not
   a date. The profit-center token is removed first, so ``PC2024`` is never read as 2024.
+* **period** -- the months the data covers, when the name says so in words:
+  ``ARR_JanJun_2026`` -> 2026-01..2026-06, ``Q2 2026``, ``H1_2026``, ``Jul 2026``. A numeric
+  ``2026-06`` is the file's date, not its period (a June file may hold the year to date).
 
 Either can be missing from a name; the Ingest review then asks the reviewer for it.
 """
@@ -18,9 +21,12 @@ import re
 from datetime import date
 from pathlib import Path
 
+from . import period_tokens
+
 # "PC796", "pc_0796", "PC-796", "PC 796", "PC069_01". Not preceded by a letter or digit
-# ("NPC12" is not a profit center), and the number is not followed by another digit.
-_PC = re.compile(r"(?<![a-z0-9])pc[\s_\-]?(\d{1,5})(?:_(\d{2}))?(?!\d)", re.IGNORECASE)
+# ("NPC12" is not a profit center), and the number is not followed by another digit. A
+# two-digit sub-office suffix is not the month of a date ("PC796_06-2026" is PC0796).
+_PC = re.compile(r"(?<![a-z0-9])pc[\s_\-]?(\d{1,5})(?:_(\d{2})(?![\d\-/.]))?(?!\d)", re.IGNORECASE)
 
 _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -71,12 +77,41 @@ def pc_number(pc_id: str | None) -> str | None:
     return normalized[2:] if normalized else None
 
 
+def pc_tokens(filename: str) -> list[str]:
+    """Every distinct ``PCnnn`` token in the file name, normalised, in the order written."""
+    found = []
+    for match in _PC.finditer(Path(filename or "").stem):
+        pc = normalize_pc_id(f"{match.group(1)}_{match.group(2)}" if match.group(2) else match.group(1))
+        if pc and pc not in found:
+            found.append(pc)
+    return found
+
+
 def pc_id_from_filename(filename: str) -> str | None:
-    """The first ``PCnnn`` token in the file name, normalised; None when there is none."""
-    match = _PC.search(Path(filename or "").stem)
-    if not match:
+    """The file's profit center: its one ``PCnnn`` token, normalised. None when the name
+    has none, or names two different ones (the reviewer then says which)."""
+    tokens = pc_tokens(filename)
+    return tokens[0] if len(tokens) == 1 else None
+
+
+def source_system_for(pc_id: str | None) -> str | None:
+    """The source system a profit center's files carry: PC0515 -> pc0515."""
+    return pc_id.casefold().replace("_", "") if pc_id else None
+
+
+def period_from_filename(filename: str) -> tuple[str, str] | None:
+    """(first month, last month) as ``YYYY-MM`` when the name states its period in words
+    with one year: ``ARR_JanJun_2026``, ``Jan-Jul 2026``, ``Q2_2026``, ``H1 2026``."""
+    stem = _PC.sub(" ", Path(filename or "").stem)
+    years = set(period_tokens.years_in(stem))
+    span = period_tokens.period_months(stem)
+    if len(years) != 1 or span is None:
         return None
-    return normalize_pc_id(f"{match.group(1)}_{match.group(2)}" if match.group(2) else match.group(1))
+    year = years.pop()
+    first, last = span
+    if last < first:
+        return None
+    return f"{year:04d}-{first:02d}", f"{year:04d}-{last:02d}"
 
 
 def file_date_from_filename(filename: str) -> date | None:

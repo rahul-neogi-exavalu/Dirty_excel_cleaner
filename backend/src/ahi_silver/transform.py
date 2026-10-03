@@ -36,6 +36,8 @@ NAME, NUMBER = "profit_center_name", "profit_center_number"
 IDENTITY = "ahi_policy_transaction_id"
 # What the bronze rows are read with, besides their data columns.
 LINEAGE = ["_ingestion_id", "_source_file", "_source_sheet"]
+# What ``transform(..., extras=True)`` adds after the catalog columns, for the cleansed table.
+EXTRAS = ["_ingestion_id", "_pc_status", "_invalid_columns"]
 
 
 @dataclass
@@ -46,6 +48,8 @@ class LoadInfo:
     processing_date: datetime | None = None
     period_start: str | None = None  # YYYY-MM
     period_end: str | None = None
+    # The load's own profit center (PC0796): a table can hold loads of several.
+    pc_id: str | None = None
 
 
 @dataclass
@@ -92,12 +96,15 @@ def transform(
     pc: str | None,
     lotl: profit_center.Lotl,
     context: Context | None = None,
+    extras: bool = False,
 ) -> tuple[pl.DataFrame, dict]:
     """``frame``: bronze rows as text (data columns plus LINEAGE). ``mapping``: which bronze
-    column feeds which Silver column (see ``_pairs``). ``pc``: the loads' pc_id (PC0796).
+    column feeds which Silver column (see ``_pairs``). ``pc``: the loads' pc_id (PC0796),
+    used for a row whose load does not name its own.
 
     Returns the Silver frame (catalog columns in order, without the generated key) and a
-    quality report.
+    quality report. With ``extras``, the frame also ends with EXTRAS: each row's load,
+    how its profit center was settled, and which of its values could not be read.
     """
     context = context or Context()
     height = frame.height
@@ -106,6 +113,7 @@ def transform(
         source_for.setdefault(silver, bronze)
     columns: dict[str, pl.Series] = {}
     invalid: dict[str, int] = {}
+    unreadable: dict[str, pl.Series] = {}
     mapped = [column for column in catalog if column.role == MAPPED]
     for column in mapped:
         bronze = source_for.get(column.name)
@@ -114,13 +122,17 @@ def transform(
         columns[column.name] = typed
         if failures:
             invalid[column.name] = failures
+            unreadable[column.name] = cleanse.text(series).is_not_null() & typed.is_null()
 
-    # Profit center: the document's four scenarios, row by row.
+    ids = frame["_ingestion_id"].to_list() if "_ingestion_id" in frame.columns else [None] * height
+    loads = [context.loads.get(i) or LoadInfo() for i in ids]
+
+    # Profit center: the document's four scenarios, row by row, each row by its own load.
     statuses: list[str | None] = [None] * height
     if NAME in columns or NUMBER in columns:
         names = columns[NAME].to_list() if NAME in columns else [None] * height
         numbers = columns[NUMBER].to_list() if NUMBER in columns else [None] * height
-        resolved = [profit_center.resolve(n, m, pc, lotl) for n, m in zip(names, numbers)]
+        resolved = [profit_center.resolve(n, m, load.pc_id or pc, lotl) for n, m, load in zip(names, numbers, loads)]
         if NAME in columns:
             columns[NAME] = pl.Series(NAME, [r[0] for r in resolved], dtype=columns[NAME].dtype)
         if NUMBER in columns:
@@ -141,8 +153,6 @@ def transform(
     business = [hashing.digest([row[i] for i in key_index]) if key_index else None for row in rows]
     whole = [hashing.digest(row) for row in rows]
 
-    ids = frame["_ingestion_id"].to_list() if "_ingestion_id" in frame.columns else [None] * height
-    loads = [context.loads.get(i) or LoadInfo() for i in ids]
     files = frame["_source_file"].to_list() if "_source_file" in frame.columns else [None] * height
     periods = [_period(load.period_start, load.period_end) for load in loads]
     system: dict[str, list] = {
@@ -169,6 +179,12 @@ def transform(
             ordered.append(_series(column, system[column.name]))
         else:  # a system column nothing derives yet (drt_reporting_*): NULL
             ordered.append(_series(column, [None] * height))
+    if extras:
+        ordered += [
+            pl.Series("_ingestion_id", ids, dtype=pl.String),
+            pl.Series("_pc_status", statuses, dtype=pl.String),
+            _unreadable_names(unreadable, height),
+        ]
     silver = pl.DataFrame(ordered) if ordered else pl.DataFrame()
 
     quality = {
@@ -178,6 +194,17 @@ def transform(
         "unmapped_silver_columns": [name for name in names if name not in source_for],
     }
     return silver, quality
+
+
+def _unreadable_names(unreadable: dict[str, pl.Series], height: int) -> pl.Series:
+    """Per row, the Silver columns whose value was there but could not be read."""
+    if not unreadable:
+        return pl.Series("_invalid_columns", [[] for _ in range(height)], dtype=pl.List(pl.String))
+    flags = pl.DataFrame(unreadable)
+    names = flags.select(pl.concat_list(
+        [pl.when(pl.col(name)).then(pl.lit(name)).otherwise(pl.lit(None, dtype=pl.String)) for name in unreadable]
+    ).list.drop_nulls().alias("_invalid_columns"))
+    return names.to_series()
 
 
 _DTYPES = {"string": pl.String, "int": pl.Int32, "bigint": pl.Int64, "boolean": pl.Boolean, "date": pl.Date,

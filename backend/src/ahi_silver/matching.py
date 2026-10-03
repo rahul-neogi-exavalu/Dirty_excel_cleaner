@@ -22,7 +22,7 @@ Nothing here decides. A person approves the whole mapping, and only then is it s
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Callable
 
 from . import normalize
@@ -53,7 +53,7 @@ WEIGHT = {SAVED: 1.0, EXACT: 1.0, AI: 0.9, SEMANTIC: 0.85, FUZZY: 0.8}
 @dataclass
 class Vote:
     method: str
-    # None: "no Silver column fits" (the AI) or "ignored" (a saved decision).
+    # None: "no Silver column fits" (the AI).
     silver_column: str | None
     score: float
     reason: str = ""
@@ -98,7 +98,7 @@ class Candidate:
 class Suggestion:
     bronze_column: str
     silver_column: str | None = None
-    # An explicit "do not load this column" decision (a saved one, or the reviewer's).
+    # The reviewer's explicit "do not load this column" decision (never saved).
     ignored: bool = False
     selection: str = NONE
     reason: str = ""
@@ -194,25 +194,23 @@ def synonyms(column: SilverColumn) -> list[str]:
 # --- the voters -------------------------------------------------------------------
 
 
-def _targets(value) -> list[str | None]:
-    """A saved decision as a list: [silver], [silver, silver] (1:N) or [None] (ignored)."""
+def _targets(value) -> list[str]:
+    """A saved decision as a list: [silver] or [silver, silver] (1:N). Ignores are not saved."""
     if isinstance(value, (list, tuple)):
-        return list(value) or [None]
-    return [value]
+        return [target for target in value if target]
+    return [value] if value else []
 
 
 def _saved_votes(columns, saved, known, by_name, votes, stale) -> None:
     for column in columns:
-        if column in saved:
-            gone = [t for t in _targets(saved[column]) if t is not None and t not in by_name]
-            live = [t for t in _targets(saved[column]) if t is None or t in by_name]
+        if _targets(saved.get(column)):
+            gone = [t for t in _targets(saved[column]) if t not in by_name]
+            live = [t for t in _targets(saved[column]) if t in by_name]
             if gone:
                 # Approved earlier, but that Silver column is no longer in the list.
                 stale[column] = f"Was mapped to {', '.join(gone)}, which is no longer a Silver column."
             for target in live:
-                reason = ("Approved earlier for this profit center" if target
-                          else "Ignored when approved earlier for this profit center")
-                votes[column].append(Vote(SAVED, target, 1.0, reason, own=True))
+                votes[column].append(Vote(SAVED, target, 1.0, "Approved earlier for this profit center", own=True))
         elif known.get(normalize.compact(column)) in by_name:
             votes[column].append(Vote(SAVED, known[normalize.compact(column)], 0.95,
                                       "Same column approved for another table"))
@@ -347,8 +345,8 @@ def suggest(
     """One suggestion per bronze column, with every method's vote, plus notes on methods
     that could not run.
 
-    ``saved``: this profit center's approved mapping (column -> silver, a list of silver
-    columns when one column feeds several, or None = ignored).
+    ``saved``: this profit center's approved mapping (column -> silver, or a list of silver
+    columns when one column feeds several).
     ``known``: approved mappings elsewhere, by normalized column name.
     ``one_to_many``: columns whose saved targets all load (one header mapped twice);
     for the others several saved targets are competing votes. None: every list loads.
@@ -381,7 +379,7 @@ def suggest(
     # Recommend: strongest candidates first across the table, so when two columns want
     # the same Silver column the better-supported one gets it and the other falls back
     # to its next candidate. "Nothing fits" stops a column's fallback: it is left for
-    # the reviewer (only a saved decision pre-selects Ignore).
+    # the reviewer, who decides whether to Ignore it (nothing pre-selects Ignore).
     pairs = [(c.rank(), column, c) for column in columns for c in candidates[column] if c.support]
     pairs.sort(key=lambda p: (p[0], p[2].silver_column is not None), reverse=True)
     chosen: dict[str, Candidate] = {}
@@ -392,10 +390,7 @@ def suggest(
         if column in chosen or column in stopped:
             continue
         if candidate.silver_column is None:
-            if candidate.own:
-                chosen[column] = candidate
-            else:
-                stopped[column] = candidate
+            stopped[column] = candidate
             continue
         if candidate.silver_column in taken:
             blocked.setdefault(column, (candidate.silver_column, taken[candidate.silver_column]))
@@ -424,15 +419,11 @@ def suggest(
         if candidate is not None:
             candidate.recommended = True
             suggestion.silver_column = candidate.silver_column
-            suggestion.ignored = candidate.silver_column is None
             suggestion.also = also.get(column, [])
             suggestion.selection = RECOMMENDED
-            if suggestion.ignored:
-                why = "Ignored, as approved earlier for this profit center."
-            else:
-                why = f"Recommended by {' + '.join(LABELS[m] for m in candidate.methods)}."
-                if suggestion.also:
-                    why += f" Also loads into {', '.join(suggestion.also)}, as approved earlier."
+            why = f"Recommended by {' + '.join(LABELS[m] for m in candidate.methods)}."
+            if suggestion.also:
+                why += f" Also loads into {', '.join(suggestion.also)}, as approved earlier."
         elif column in stopped:
             why = f"AI: {stopped[column].counted[0].reason.rstrip('.')}. Choose a column or Ignore."
         elif column in blocked:
@@ -484,3 +475,23 @@ def problems(table: str, suggestions: list[Suggestion]) -> list[str]:
         if len(sources) > 1:
             issues.append(f"{table}: {', '.join(sources)} all map to {target}; keep one.")
     return issues
+
+
+# --- storing a review ---------------------------------------------------------------
+
+
+def suggestion_to_dict(suggestion: Suggestion) -> dict:
+    """Everything about one column's suggestion, as JSON-ready values."""
+    return asdict(suggestion)
+
+
+def suggestion_from_dict(data: dict) -> Suggestion:
+    candidates = [
+        Candidate(c.get("silver_column"), [Vote(**vote) for vote in c.get("votes", [])], bool(c.get("recommended")))
+        for c in data.get("candidates", [])
+    ]
+    return Suggestion(
+        bronze_column=data["bronze_column"], silver_column=data.get("silver_column"),
+        ignored=bool(data.get("ignored")), selection=data.get("selection", NONE), reason=data.get("reason", ""),
+        candidates=candidates, samples=list(data.get("samples", [])), also=list(data.get("also", [])),
+    )

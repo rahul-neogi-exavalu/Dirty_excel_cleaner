@@ -670,6 +670,9 @@ function MappingRow({
     <tr data-row className={clsx("border-b border-ink-100 last:border-0", open && "bg-amber-50/50")}>
       <td className="max-w-0 px-4 py-3 align-top">
         <p className="truncate font-mono font-medium text-ink-900" title={row.bronze_column}>{row.bronze_column}</p>
+        {row.source_header && row.source_header !== row.bronze_column && (
+          <p className="truncate text-caption text-ink-600" title={`Header in the file: ${row.source_header}`}>“{row.source_header}”</p>
+        )}
         {row.samples.length > 0 && <p className="truncate text-caption text-ink-500" title={row.samples.join(" · ")}>{row.samples.join(" · ")}</p>}
       </td>
       <td className="w-[58%] px-3 py-2.5 align-top">
@@ -767,8 +770,7 @@ function ResultView({ run, onNew }: { run: SilverRun; onNew: () => void }) {
         <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3">
           <StatTile icon={<Rows3 />} label="Rows loaded" value={formatNumber(run.result.rows_loaded ?? 0)} tone="success" />
           <StatTile icon={<Trash2 />} label="Replaced rows removed" value={formatNumber(run.result.rows_removed ?? 0)} />
-          <StatTile icon={<BookCheck />} label="Mappings saved"
-            value={run.tables.reduce((sum, table) => sum + table.mapping.reduce((n, row) => n + Math.max(1, (row.silver_column ? 1 : 0) + row.also.length), 0), 0)} />
+          <StatTile icon={<BookCheck />} label="New mappings saved" value={formatNumber(run.result.mappings_saved ?? 0)} />
         </div>
       )}
     </section>
@@ -794,7 +796,7 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
   }, [toast]);
   useEffect(load, [load]);
   const options = useMemo(
-    () => [...targetsOf(catalog).map((column) => ({ value: column.name, label: column.name, description: column.drt_name })), { value: IGNORE, label: "Ignore" }],
+    () => targetsOf(catalog).map((column) => ({ value: column.name, label: column.name, description: column.drt_name })),
     [catalog],
   );
   const centers = useMemo(() => {
@@ -817,15 +819,22 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
   if (!rows.length) return <div className="card"><EmptyState icon={<BookCheck />} title="No mappings" description="Add drt_column_mapping.xlsx to assets/." /></div>;
 
   const save = async (row: DrtMapping, value: string) => {
-    const silver = value === IGNORE ? null : value;
     try {
-      const saved = await api.editSilverMapping({
-        profit_center: row.profit_center, pc_column: row.pc_column, silver_column_name: row.silver_column_name, new_silver_column_name: silver,
-      });
-      setRows((current) => current?.map((item) => (item === row ? { ...item, silver_column_name: silver, drt_column: saved.drt_column } : item)) ?? null);
+      const saved = await api.editSilverMapping({ ...row, new_silver_column_name: value });
+      setRows((current) => current?.map((item) => (item === row ? { ...item, silver_column_name: value, drt_column: saved.drt_column } : item)) ?? null);
       toast({ severity: "success", title: "Mapping updated", description: "Applies from the next Silver run." });
     } catch (err) {
       toast({ severity: "error", title: "Change not saved", description: toError(err).body.message });
+    }
+  };
+
+  const remove = async (row: DrtMapping) => {
+    try {
+      await api.deleteSilverMapping(row);
+      setRows((current) => current?.filter((item) => item !== row) ?? null);
+      toast({ severity: "success", title: "Mapping removed", description: "The column will be asked about again in the next Silver run." });
+    } catch (err) {
+      toast({ severity: "error", title: "Not removed", description: toError(err).body.message });
     }
   };
 
@@ -847,7 +856,7 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
           <caption className="sr-only">DRT column mapping</caption>
           <thead>
             <tr className="text-left text-caption font-semibold text-ink-600">
-              {["Profit center", "Source column", "DRT column", "Silver column"].map((label) => (
+              {["Profit center", "Source column", "DRT column", "Silver column", ""].map((label) => (
                 <th key={label} scope="col" className="border-b border-ink-200 bg-ink-50 px-3 py-2.5">{label}</th>
               ))}
             </tr>
@@ -857,9 +866,14 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
               <tr key={`${row.profit_center}|${row.pc_column}|${row.silver_column_name}|${row.drt_column}`} data-row>
                 <td className="border-b border-ink-100 px-3 py-2 font-mono text-ink-700">{row.profit_center}</td>
                 <td className="max-w-[280px] truncate border-b border-ink-100 px-3 py-2 font-mono font-medium text-ink-900" title={row.pc_column}>{row.pc_column}</td>
-                <td className="border-b border-ink-100 px-3 py-2 text-ink-600">{row.drt_column ?? "—"}</td>
+                <td className="border-b border-ink-100 px-3 py-2 text-ink-600">{row.drt_column ?? ""}</td>
                 <td className="w-[240px] border-b border-ink-100 px-3 py-1.5">
-                  <Select<string> value={row.silver_column_name ?? (row.drt_column ? null : IGNORE)} options={options} onChange={(value) => save(row, value)} label={`Silver column for ${row.pc_column}`} hideLabel placeholder="Not resolved" width={300} />
+                  <Select<string> value={row.silver_column_name} options={options} onChange={(value) => save(row, value)} label={`Silver column for ${row.pc_column}`} hideLabel placeholder="Not resolved" width={300} />
+                </td>
+                <td className="w-10 border-b border-ink-100 px-2 py-1.5 text-right">
+                  <IconButton label={`Remove the mapping of ${row.pc_column} for ${row.profit_center}`} onClick={() => remove(row)}>
+                    <Trash2 />
+                  </IconButton>
                 </td>
               </tr>
             ))}

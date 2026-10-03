@@ -243,6 +243,9 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
 
     body = rows[body_start:]
     names = _fit_names(found.names, width)
+    # The source header of each column name, for the layers that report back to the
+    # business in its own words (the DRT column mapping keeps the header as written).
+    written = {name: label for name, label in zip(names, found.labels) if label}
     # The header as the sheet wrote it, per column name: typing reads it for one tie only.
     labels = (
         {name: label for name, label in zip(names, header_row) if not is_blank(label)}
@@ -278,6 +281,7 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
 
     _report_empty_columns(frame, grid, trace)
     trace["column_names"] = names
+    trace["source_headers"] = {name: written[name] for name in frame.columns if name in written}
     trace["clean_shape"] = list(frame.shape)
     return SheetResult(grid.name, frame, trace, region_index=index)
 

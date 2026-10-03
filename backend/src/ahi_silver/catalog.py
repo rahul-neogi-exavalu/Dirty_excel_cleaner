@@ -124,10 +124,11 @@ def targets(columns: list[SilverColumn]) -> list[SilverColumn]:
 
 def by_drt_name(columns: list[SilverColumn]) -> dict[str, str]:
     """DRT label -> silver column name, matched loosely (case, spaces, punctuation)."""
-    return {_loose(column.drt_name): column.name for column in columns if column.drt_name}
+    return {loose(column.drt_name): column.name for column in columns if column.drt_name}
 
 
-def _loose(text: str) -> str:
+def loose(text: str) -> str:
+    """A label without case, spaces or punctuation: 'InsuranceCompany Name' -> insurancecompanyname."""
     return re.sub(r"[^a-z0-9]", "", (text or "").casefold())
 
 
@@ -135,4 +136,4 @@ def silver_name_for_drt(drt_column: str | None, columns: list[SilverColumn]) -> 
     """The silver column a DRT label means: 'InsuranceCompany Name' -> insurance_company_name."""
     if not drt_column:
         return None
-    return by_drt_name(columns).get(_loose(drt_column))
+    return by_drt_name(columns).get(loose(drt_column))

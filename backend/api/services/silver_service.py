@@ -11,30 +11,39 @@ Human-in-the-loop, like Ingest:
 3. The reviewer picks any candidate (or any Silver column, or Ignore) for any row, and
    can load one bronze column into more than one Silver column. ``approve`` refuses
    until every column is mapped or explicitly ignored, then -- in one transaction --
-   saves the approved mapping into ``drt_column_mapping`` (and only then: suggestions
-   are never saved), removes rows of superseded bronze loads, loads the cleansed rows
-   into ``silver_detail``, rebuilds ``silver_aggregate`` and marks each load done.
+   saves the approved mappings into ``drt_column_mapping`` (only then, and never an
+   Ignore), removes rows of superseded bronze loads, writes each load's cleansed rows
+   into its source-specific Silver Cleansed table (``<cleansed schema>.<bronze table>``),
+   loads them from there into Final Silver (``silver_detail``), rebuilds
+   ``silver_aggregate`` and marks each load done.
+
+A review lives in ``<control>.silver_draft`` from creation to the end of its load, so
+every API process sees the same one and it survives a restart. Bronze rows are not stored
+with it: they are read again (and kept briefly in memory) when the quality report is
+recomputed.
 
 ``silver_detail`` and ``silver_aggregate`` have exactly the business's columns (see
 ``backend/config``). A bronze load's rows are identified in Silver by
-(source_table, source_file, ingestion_timestamp = the load's processing_date).
+(source_table, source_file, ingestion_timestamp = the load's processing_date), and in its
+cleansed table by ``_ingestion_id``.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import traceback
 import uuid
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import polars as pl
 
-from ahi_bronze import file_meta
+from ahi_bronze import file_meta, naming
 from ahi_silver import catalog as catalog_module
 from ahi_silver import matching, normalize, profit_center, semantic, transform
 from ahi_silver.catalog import MAPPED, SilverColumn
@@ -44,12 +53,26 @@ from .. import config, db
 from ..errors import ApiError, conflict, not_found
 from . import job_history, reference_service
 
+log = logging.getLogger("ahi.silver")
+
 DRAFT, RUNNING, SUCCEEDED, FAILED = "draft", "running", "succeeded", "failed"
 DETAIL = "silver_detail"
 AGGREGATE = "silver_aggregate"
 DRT_TABLE = reference_service.DRT_TABLE
+DRAFTS = "silver_draft"
+CLEANSED_REGISTRY = "silver_cleansed_table"
 # How many bronze rows are read to pick sample values for the review.
 SAMPLE_ROWS = 200
+# Bronze frames kept in memory for quality re-checks while a review is edited.
+FRAME_CACHE = 4
+# A running load that has not reported progress for this long, while no load holds the
+# Silver lock, was interrupted (the process stopped).
+STALE_RUNNING_MINUTES = 10
+# Finished reviews are kept this long; silver_run keeps the audit for good.
+FINISHED_KEEP_DAYS = 30
+# What the cleansed table holds besides the Silver columns.
+CLEANSED_EXTRA = [("_ingestion_id", "text NOT NULL"), ("_pc_status", "text"), ("_invalid_columns", "text[]"),
+                  ("_silver_run_id", "text"), ("_cleansed_at", "timestamptz")]
 
 
 @dataclass
@@ -73,15 +96,15 @@ class Load:
 class TableReview:
     table_name: str
     source_system: str | None
-    # The loads' profit center (PC0796): the key of the DRT column mapping.
+    # The loads' main profit center (PC0796), and every one the loads carry.
     pc_id: str | None
     loads: list[Load]
     columns: list[str]
     suggestions: list[Suggestion]
     quality: dict = field(default_factory=dict)
-    # The selected loads' bronze rows, read once: every mapping edit re-checks quality
-    # against them without going back to the database. Released when the run ends.
-    frame: pl.DataFrame | None = field(default=None, repr=False)
+    pc_ids: list[str] = field(default_factory=list)
+    # Bronze column -> the header as the source file wrote it ("Net Premium").
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -90,7 +113,7 @@ class Run:
     tables: list[TableReview]
     notes: list[str]
     cleanup: list[dict]
-    lotl: profit_center.Lotl
+    lotl_rows: int = 0
     status: str = DRAFT
     progress: float = 0.0
     message: str = ""
@@ -103,11 +126,8 @@ class Run:
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     finished_at: float | None = None
-    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-
-
-_runs: dict[str, Run] = {}
-_runs_lock = threading.Lock()
+    updated_at: float = field(default_factory=time.time)
+    version: int = 1
 
 
 def _ident(name: str):
@@ -140,6 +160,11 @@ def _table_exists(conn, schema: str, table: str) -> bool:
 def _source_table(table: str) -> str:
     """silver_detail.source_table: the bronze table, schema-qualified."""
     return f"{config.BRONZE_SCHEMA}.{table}"
+
+
+def _header_key(text: str | None) -> str:
+    """A header as written, without case or extra spaces: 'Net  Premium\\n' -> 'net premium'."""
+    return " ".join(str(text or "").split()).casefold()
 
 
 # --- reading ---------------------------------------------------------------------
@@ -185,14 +210,33 @@ def _lotl(conn) -> profit_center.Lotl:
     return profit_center.Lotl.from_rows(reference_service.lotl(conn))
 
 
-def _bronze_columns(conn, table: str) -> list[str]:
+def _registry(conn, table: str) -> list[dict]:
+    """The bronze registry's columns for a table: {name, datatype, source_header, ...}."""
     from psycopg import sql
 
     row = conn.execute(sql.SQL("SELECT columns FROM {}.bronze_table WHERE table_name = %s")
                        .format(_ident(config.CONTROL_SCHEMA)), [table]).fetchone()
     if not row:
         raise conflict(f"{table} is not in the bronze registry.")
-    return [column["name"] for column in row[0]]
+    return list(row[0])
+
+
+def _bronze_columns(conn, table: str) -> list[str]:
+    return [column["name"] for column in _registry(conn, table)]
+
+
+def _bronze_headers(conn, table: str, ingestion_ids: list[str]) -> dict[str, str]:
+    """Bronze column -> its source header: the registry's, then any the loads recorded."""
+    from psycopg import sql
+
+    headers = {c["name"]: c["source_header"] for c in _registry(conn, table) if c.get("source_header")}
+    rows = conn.execute(sql.SQL("SELECT source_headers FROM {}.ingestion WHERE id = ANY(%s) ORDER BY created_at")
+                        .format(_ident(config.CONTROL_SCHEMA)), [ingestion_ids]).fetchall()
+    for (recorded,) in rows:
+        for name, header in (recorded or {}).items():
+            if header:
+                headers.setdefault(name, header)
+    return headers
 
 
 def _bronze_frame(conn, table: str, columns: list[str], ingestion_ids: list[str], limit: int | None = None) -> pl.DataFrame:
@@ -208,14 +252,44 @@ def _bronze_frame(conn, table: str, columns: list[str], ingestion_ids: list[str]
     return pl.DataFrame(rows, schema={name: pl.String for name in wanted}, orient="row")
 
 
+# The selected loads' bronze rows, read once per process and reused for every quality
+# re-check while a review is edited. Safe: an ``ingested`` load's rows never change.
+_frames: OrderedDict[tuple, pl.DataFrame] = OrderedDict()
+_frames_lock = threading.Lock()
+
+
+def _frame(conn, review: TableReview) -> pl.DataFrame:
+    ids = [load.ingestion_id for load in review.loads]
+    key = (review.table_name, tuple(sorted(ids)), tuple(review.columns))
+    with _frames_lock:
+        if key in _frames:
+            _frames.move_to_end(key)
+            return _frames[key]
+    frame = _bronze_frame(conn, review.table_name, review.columns, ids)
+    with _frames_lock:
+        _frames[key] = frame
+        while len(_frames) > FRAME_CACHE:
+            _frames.popitem(last=False)
+    return frame
+
+
+def _forget_frames(run: Run) -> None:
+    keys = {(r.table_name, tuple(sorted(load.ingestion_id for load in r.loads)), tuple(r.columns)) for r in run.tables}
+    with _frames_lock:
+        for key in keys:
+            _frames.pop(key, None)
+
+
 def _mapping_rows(conn) -> list[tuple]:
-    """Every DRT column mapping row: (profit_center, pc_column, drt_column, silver_column_name)."""
+    """Every DRT column mapping row: (profit_center, pc_column, drt_column, silver_column_name),
+    in a fixed order, so the first of several rows is always the same one."""
     from psycopg import sql
 
     if not _table_exists(conn, config.SILVER_SCHEMA, DRT_TABLE):
         return []
     return conn.execute(sql.SQL(
-        "SELECT profit_center, pc_column, drt_column, silver_column_name FROM {}.{}")
+        "SELECT profit_center, pc_column, drt_column, silver_column_name FROM {}.{} "
+        "ORDER BY profit_center, pc_column, silver_column_name NULLS LAST, drt_column NULLS LAST")
         .format(_ident(config.SILVER_SCHEMA), _ident(DRT_TABLE))).fetchall()
 
 
@@ -223,44 +297,45 @@ def _same_pc(left: str | None, right: str | None) -> bool:
     return bool(left and right) and file_meta.normalize_pc_id(left) == file_meta.normalize_pc_id(right)
 
 
-def _saved(rows: list[tuple], pc: str | None, columns: list[str]) -> tuple[dict, dict[str, str], set[str]]:
-    """This profit center's approved mapping for these bronze columns, and approved names
-    elsewhere (by normalized name).
+def _saved(rows: list[tuple], pcs: list[str], columns: list[str],
+           headers: dict[str, str] | None = None) -> tuple[dict, dict[str, str], set[str]]:
+    """The table's profit centers' approved mapping for these bronze columns, and approved
+    names elsewhere (by normalized name).
 
-    The DRT mapping names a source column as the file wrote it ("Net Premium"); a bronze
-    column is its cleaned form ("net_premium"). They meet on their normalized words.
-    Returns ({column: [silver, ...] or None (ignored)}, {normalized name: silver}, and the
+    The DRT mapping names a source column as the file wrote it ("Net Premium"). A bronze
+    column meets it by its own source header, exactly (spaces and case aside); a column
+    whose header is unknown (loaded before headers were kept) meets it on normalized words
+    ("net_premium"). Returns ({column: [silver, ...]}, {normalized name: silver}, and the
     columns whose several targets are one header mapped twice -- a real one-to-many).
     Two different headers that normalize alike ("Agent Commission" and "Agent
-    Commission%") are not one-to-many: their targets compete as votes.
+    Commission%") are not one-to-many: their targets compete as votes. A row naming a DRT
+    label with no Silver column is not a decision and is skipped.
     """
+    headers = headers or {}
+    by_header: dict[str, str] = {}
+    for column in columns:
+        by_header.setdefault(_header_key(headers.get(column) or column), column)
     by_compact = {normalize.compact(column): column for column in columns}
-    own: dict[str, list[str] | None] = {}
-    headers: dict[str, set[str]] = {}
-    ignored: set[str] = set()
+    own: dict[str, list[str]] = {}
+    seen_headers: dict[str, set[str]] = {}
     votes: dict[str, Counter] = {}
-    for profit_center_code, pc_column, drt_column, silver in rows:
+    for profit_center_code, pc_column, _drt_column, silver in rows:
         key = normalize.compact(pc_column or "")
-        if not key:
+        if not key or not silver:
             continue
-        if _same_pc(profit_center_code, pc):
-            column = by_compact.get(key)
+        if any(_same_pc(profit_center_code, pc) for pc in pcs):
+            column = by_header.get(_header_key(pc_column)) or by_compact.get(key)
             if column is None:
                 continue
-            if silver:
-                targets = own.get(column) or []
-                if silver not in targets:
-                    own[column] = targets + [silver]
-                headers.setdefault(column, set()).add(" ".join(pc_column.split()).casefold())
-            elif drt_column is None:
-                ignored.add(column)
-        elif silver:
+            targets = own.get(column) or []
+            if silver not in targets:
+                own[column] = targets + [silver]
+            seen_headers.setdefault(column, set()).add(_header_key(pc_column))
+        else:
             votes.setdefault(key, Counter())[silver] += 1
-    for column in ignored:
-        own.setdefault(column, None)
     known = {name: counter.most_common(1)[0][0] for name, counter in votes.items()}
-    one_to_many = {column for column, targets in own.items() if targets and len(targets) > 1
-                   and len(headers.get(column, ())) == 1}
+    one_to_many = {column for column, targets in own.items()
+                   if len(targets) > 1 and len(seen_headers.get(column, ())) == 1}
     return own, known, one_to_many
 
 
@@ -269,22 +344,22 @@ def _saved(rows: list[tuple], pc: str | None, columns: list[str]) -> tuple[dict,
 _NOT_A_COLUMN = ("comment", "disregard", "sara", "check ", "suggested", "backfill", "(tab", "data profile")
 
 
-def _precedents(rows: list[tuple], pc: str | None = None) -> list[tuple[str, str | None]]:
+def _precedents(rows: list[tuple], pc: str | None = None) -> list[tuple[str, str]]:
     """Approved decisions worth showing the AI as examples, this profit center's first:
-    a renamed or abbreviated column (Bk MGA Comm -> gross_commission_amount) or a
-    deliberate ignore. A column named exactly like its Silver column teaches nothing."""
-    picked: dict[tuple[str, str | None], bool] = {}
-    for profit_center_code, pc_column, drt_column, silver in rows:
+    a renamed or abbreviated column (Bk MGA Comm -> gross_commission_amount). A column
+    named exactly like its Silver column teaches nothing."""
+    picked: dict[tuple[str, str], bool] = {}
+    for profit_center_code, pc_column, _drt_column, silver in rows:
         header = " ".join((pc_column or "").split())
         if not header or len(header) > 40 or any(word in header.casefold() for word in _NOT_A_COLUMN):
             continue
-        if silver is None and drt_column is not None:
+        if silver is None:
             continue  # a DRT label without a Silver column: not a decision
-        if silver is not None and normalize.compact(header) == normalize.compact(silver):
+        if normalize.compact(header) == normalize.compact(silver):
             continue
         pair = (header, silver)
         picked[pair] = picked.get(pair, False) or _same_pc(profit_center_code, pc)
-    return sorted(picked, key=lambda pair: (not picked[pair], pair[0].casefold(), pair[1] or ""))
+    return sorted(picked, key=lambda pair: (not picked[pair], pair[0].casefold(), pair[1]))
 
 
 def _samples(frame: pl.DataFrame, columns: list[str]) -> dict[str, list[str]]:
@@ -318,6 +393,166 @@ def _matchers(precedents=()):
     return similarity, llm, notes
 
 
+# --- storing a review ------------------------------------------------------------
+
+
+def _load_state(load: Load) -> dict:
+    data = dict(vars(load))
+    data["processing_date"] = load.processing_date.isoformat() if load.processing_date else None
+    data["file_date"] = load.file_date.isoformat() if load.file_date else None
+    return data
+
+
+def _load_from(data: dict) -> Load:
+    data = dict(data)
+    data["processing_date"] = datetime.fromisoformat(data["processing_date"]) if data.get("processing_date") else None
+    data["file_date"] = date.fromisoformat(data["file_date"]) if data.get("file_date") else None
+    return Load(**data)
+
+
+def _state(run: Run) -> dict:
+    """The whole review as JSON: what silver_draft.state holds."""
+    return {
+        "tables": [
+            {"table_name": r.table_name, "source_system": r.source_system, "pc_id": r.pc_id, "pc_ids": r.pc_ids,
+             "loads": [_load_state(load) for load in r.loads], "columns": r.columns, "headers": r.headers,
+             "suggestions": [matching.suggestion_to_dict(s) for s in r.suggestions], "quality": r.quality}
+            for r in run.tables
+        ],
+        "notes": run.notes,
+        "cleanup": run.cleanup,
+        "lotl_rows": run.lotl_rows,
+        "loaded": run.loaded,
+    }
+
+
+def _stamp(value) -> float | None:
+    return value.timestamp() if value else None
+
+
+_DRAFT_SELECT = ("SELECT id, status, state, version, progress, message, error, result, reviewed_by, approved_by, "
+                 "created_at, started_at, finished_at, updated_at, expires_at FROM {}.{} WHERE id = %s")
+
+
+def _from_row(row) -> tuple[Run, datetime | None]:
+    (run_id, status, state, version, progress, message, error, result, reviewed_by, approved_by,
+     created_at, started_at, finished_at, updated_at, expires_at) = row
+    tables = [
+        TableReview(
+            table_name=t["table_name"], source_system=t.get("source_system"), pc_id=t.get("pc_id"),
+            loads=[_load_from(load) for load in t.get("loads", [])], columns=list(t.get("columns", [])),
+            suggestions=[matching.suggestion_from_dict(s) for s in t.get("suggestions", [])],
+            quality=t.get("quality") or {}, pc_ids=list(t.get("pc_ids") or []), headers=dict(t.get("headers") or {}),
+        )
+        for t in state.get("tables", [])
+    ]
+    run = Run(
+        id=run_id, tables=tables, notes=list(state.get("notes", [])), cleanup=list(state.get("cleanup", [])),
+        lotl_rows=int(state.get("lotl_rows") or 0), status=status, progress=float(progress or 0),
+        message=message or "", error=error, reviewed_by=reviewed_by, approved_by=approved_by, result=result or {},
+        loaded=dict(state.get("loaded") or {}), created_at=_stamp(created_at) or time.time(),
+        started_at=_stamp(started_at), finished_at=_stamp(finished_at), updated_at=_stamp(updated_at) or time.time(),
+        version=version,
+    )
+    return run, expires_at
+
+
+def _read_run(conn, run_id: str, lock: bool = False) -> Run:
+    from psycopg import sql
+
+    query = _DRAFT_SELECT + (" FOR UPDATE" if lock else "")
+    row = conn.execute(sql.SQL(query).format(_ident(config.CONTROL_SCHEMA), _ident(DRAFTS)), [run_id]).fetchone()
+    if row is None:
+        raise ApiError(404, "not_found", "That Silver run was not found.",
+                       "It may have expired or been removed. Start a new Silver run.")
+    run, expires_at = _from_row(row)
+    if run.status == DRAFT and expires_at is not None and expires_at < datetime.now(timezone.utc):
+        raise ApiError(410, "run_expired", "This Silver review expired before it was approved.",
+                       "Start a new Silver run; nothing was loaded.")
+    return run
+
+
+def _ttl():
+    from datetime import timedelta
+
+    return timedelta(hours=config.SILVER_DRAFT_TTL_HOURS)
+
+
+def _insert_run(conn, run: Run) -> None:
+    from psycopg import sql
+    from psycopg.types.json import Jsonb
+
+    conn.execute(sql.SQL(
+        "INSERT INTO {}.{} (id, ingestion_ids, status, state, version, progress, message, expires_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, now() + %s)").format(_ident(config.CONTROL_SCHEMA), _ident(DRAFTS)),
+        [run.id, [load.ingestion_id for r in run.tables for load in r.loads], run.status, Jsonb(_state(run)),
+         run.version, run.progress, run.message, _ttl()])
+
+
+def _write_run(conn, run: Run) -> None:
+    """Save the review; a draft's expiry starts again from now."""
+    from psycopg import sql
+    from psycopg.types.json import Jsonb
+
+    def when(value):
+        return datetime.fromtimestamp(value, timezone.utc) if value else None
+
+    conn.execute(sql.SQL(
+        "UPDATE {}.{} SET status = %s, state = %s, version = version + 1, progress = %s, message = %s, "
+        "error = %s, result = %s, reviewed_by = %s, approved_by = %s, started_at = %s, finished_at = %s, "
+        "updated_at = now(), expires_at = CASE WHEN %s = 'draft' THEN now() + %s ELSE expires_at END "
+        "WHERE id = %s").format(_ident(config.CONTROL_SCHEMA), _ident(DRAFTS)),
+        [run.status, Jsonb(_state(run)), run.progress, run.message, Jsonb(run.error) if run.error else None,
+         Jsonb(_json_ready(run.result)) if run.result else None, run.reviewed_by, run.approved_by,
+         when(run.started_at), when(run.finished_at), run.status, _ttl(), run.id])
+    run.version += 1
+
+
+def _json_ready(value):
+    if isinstance(value, dict):
+        return {key: _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    return _json(value)
+
+
+def _progress(run: Run, progress: float, message: str) -> None:
+    """Tell pollers how far the load is, on a connection of its own (the load's own
+    transaction is not visible until it commits)."""
+    from psycopg import sql
+
+    run.progress, run.message = progress, message
+    try:
+        with db.connection() as conn:
+            conn.execute(sql.SQL("UPDATE {}.{} SET progress = %s, message = %s, updated_at = now() WHERE id = %s")
+                         .format(_ident(config.CONTROL_SCHEMA), _ident(DRAFTS)), [progress, message, run.id])
+    except Exception:  # noqa: BLE001 - progress is a courtesy; the load goes on
+        log.warning("Silver run %s: progress could not be saved", run.id, exc_info=True)
+
+
+def _prune() -> None:
+    """Drop expired drafts and old finished runs; mark loads that stopped mid-way as failed."""
+    from psycopg import sql
+    from psycopg.types.json import Jsonb
+
+    drafts = sql.SQL("{}.{}").format(_ident(config.CONTROL_SCHEMA), _ident(DRAFTS))
+    with db.connection() as conn:
+        conn.execute(sql.SQL("DELETE FROM {} WHERE status = 'draft' AND expires_at < now()").format(drafts))
+        conn.execute(sql.SQL("DELETE FROM {} WHERE status IN ('succeeded', 'failed') "
+                             "AND coalesce(finished_at, updated_at) < now() - make_interval(days => %s)")
+                     .format(drafts), [FINISHED_KEEP_DAYS])
+        stale = conn.execute(sql.SQL("SELECT id FROM {} WHERE status = 'running' "
+                                     "AND updated_at < now() - make_interval(mins => %s)")
+                             .format(drafts), [STALE_RUNNING_MINUTES]).fetchall()
+        # Only when no load holds the Silver lock: a slow load is not a stopped one.
+        if stale and conn.execute("SELECT pg_try_advisory_xact_lock(hashtext('ahi-silver'))").fetchone()[0]:
+            error = {"message": "The Silver load was interrupted before it finished; nothing was written.",
+                     "advice": "Start a new Silver run.", "technical": "interrupted"}
+            conn.execute(sql.SQL("UPDATE {} SET status = 'failed', error = %s, message = %s, finished_at = now(), "
+                                 "updated_at = now() WHERE id = ANY(%s)").format(drafts),
+                         [Jsonb(error), error["message"], [row[0] for row in stale]])
+
+
 # --- planning --------------------------------------------------------------------
 
 
@@ -338,6 +573,7 @@ def create_run(ingestion_ids: list[str]) -> Run:
     ids = list(dict.fromkeys(ingestion_ids))
     gathered = []
     notes: list[str] = []
+    _prune()
     # Read everything first, then let go of the connection: matching may call the AI or
     # load word2vec vectors, and neither should hold one of the pool's few connections.
     with db.connection() as conn:
@@ -355,48 +591,49 @@ def create_run(ingestion_ids: list[str]) -> Run:
         groups: dict[str, list] = {}
         for i in ids:
             groups.setdefault(found[i][1], []).append(found[i])
-        # The DRT column mapping: created and filled from assets/ the first time.
-        reference_service.ensure_drt_table(conn, columns_catalog)
         approved = _mapping_rows(conn)
         for table, members in groups.items():
             source = members[0][3]
             pc, seen = _table_pc(members, source)
             if len(seen) > 1:
-                notes.append(f"{table}: loads from {', '.join(seen)}; the mapping uses {pc}.")
-            columns = _bronze_columns(conn, table)
-            frame = _bronze_frame(conn, table, columns, [m[0] for m in members])
-            own, known, one_to_many = _saved(approved, pc, columns)
-            gathered.append((table, members, source, pc, columns, frame, own, known, one_to_many))
+                notes.append(f"{table}: loads from {', '.join(seen)}. Each row keeps its own load's profit "
+                             f"center; the approved mapping is saved for each of them.")
+            review = TableReview(
+                table_name=table, source_system=source, pc_id=pc, pc_ids=seen,
+                loads=[Load(m[0], m[2], m[6], m[4], m[5], job_id=m[9], file_sha256=m[10],
+                            pc_id=file_meta.normalize_pc_id(m[11]) or m[11], processing_date=m[12],
+                            file_date=m[13], division_name=m[14]) for m in members],
+                columns=_bronze_columns(conn, table), suggestions=[],
+            )
+            review.headers = _bronze_headers(conn, table, [m[0] for m in members])
+            frame = _frame(conn, review)
+            own, known, one_to_many = _saved(approved, seen or ([pc] if pc else []), review.columns, review.headers)
+            gathered.append((review, frame, own, known, one_to_many))
         lotl = _lotl(conn)
         cleanup = _superseded(conn)
     if not ids and not cleanup:
         raise conflict("There is nothing to load or remove.", "Select at least one bronze load.")
 
-    first_pc = gathered[0][3] if gathered else None
+    first_pc = gathered[0][0].pc_id if gathered else None
     similarity, llm, matcher_notes = _matchers(_precedents(approved, first_pc))
     notes.extend(matcher_notes)
     tables = []
-    for table, members, source, pc, columns, frame, own, known, one_to_many in gathered:
+    for review, frame, own, known, one_to_many in gathered:
         suggestions, step_notes = matching.suggest(
-            columns, columns_catalog, own, known, _samples(frame.head(SAMPLE_ROWS), columns),
+            review.columns, columns_catalog, own, known, _samples(frame.head(SAMPLE_ROWS), review.columns),
             similarity=similarity, llm=llm, fuzzy_min=config.MATCH_FUZZY_MIN,
             semantic_min=config.MATCH_SEMANTIC_MIN, one_to_many=one_to_many,
         )
         notes.extend(note for note in step_notes if note not in notes)
-        review = TableReview(
-            table_name=table, source_system=source, pc_id=pc,
-            loads=[Load(m[0], m[2], m[6], m[4], m[5], job_id=m[9], file_sha256=m[10], pc_id=m[11],
-                        processing_date=m[12], file_date=m[13], division_name=m[14]) for m in members],
-            columns=columns, suggestions=suggestions, frame=frame,
-        )
-        _quality(review, columns_catalog, lotl)
+        review.suggestions = suggestions
+        _quality(review, columns_catalog, lotl, frame)
         tables.append(review)
 
-    run = Run(id=str(uuid.uuid4()), tables=tables, notes=notes, cleanup=cleanup, lotl=lotl)
+    run = Run(id=str(uuid.uuid4()), tables=tables, notes=notes, cleanup=cleanup, lotl_rows=lotl.rows)
     if lotl.empty:
         run.notes.append("LOTL not loaded: profit centers are kept as they are and flagged lotl_unavailable.")
-    with _runs_lock:
-        _runs[run.id] = run
+    with db.connection() as conn:
+        _insert_run(conn, run)
     return run
 
 
@@ -411,23 +648,24 @@ def _context(review: TableReview, processed_at: datetime | None = None) -> trans
         source_table=_source_table(review.table_name),
         processed_at=processed_at,
         loads={load.ingestion_id: transform.LoadInfo(load.file_name, load.processing_date, load.period_start,
-                                                      load.period_end) for load in review.loads},
+                                                      load.period_end, load.pc_id) for load in review.loads},
     )
 
 
-def _quality(review: TableReview, columns_catalog, lotl) -> None:
-    """The dry run the reviewer sees: the load's own transform, on the rows read at review time."""
-    _, quality = transform.transform(review.frame, _mapping(review), columns_catalog, review.pc_id, lotl,
-                                     _context(review))
+def _quality(review: TableReview, columns_catalog, lotl, frame: pl.DataFrame) -> None:
+    """The dry run the reviewer sees: the load's own transform, on the loads' bronze rows."""
+    _, quality = transform.transform(frame, _mapping(review), columns_catalog, review.pc_id, lotl, _context(review))
     review.quality = quality
 
 
 def get_run(run_id: str) -> Run:
-    with _runs_lock:
-        found = _runs.get(run_id)
-    if found is None:
-        raise not_found("That Silver run")
-    return found
+    with db.connection() as conn:
+        run = _read_run(conn, run_id)
+    if run.status == RUNNING and time.time() - run.updated_at > STALE_RUNNING_MINUTES * 60:
+        _prune()  # the process running it may have stopped
+        with db.connection() as conn:
+            run = _read_run(conn, run_id)
+    return run
 
 
 def problems(run: Run) -> list[str]:
@@ -442,7 +680,6 @@ def update_mapping(run_id: str, table: str, column: str, silver_column: str | No
     """The reviewer's choice for one column. ``fields``: which of silver_column / ignored /
     also were sent (all of the first two when not given). ``also``: the extra Silver
     columns the bronze column loads into, as a whole list."""
-    run = get_run(run_id)
     columns_catalog = catalog()
     targets = {c.name for c in columns_catalog if c.role == MAPPED}
     fields = {"silver_column", "ignored"} if fields is None else fields
@@ -450,7 +687,8 @@ def update_mapping(run_id: str, table: str, column: str, silver_column: str | No
         if name is not None and name not in targets:
             raise ApiError(422, "unknown_silver_column", f"'{name}' is not a Silver column a bronze column can map to.",
                            field="silver_column")
-    with run.lock:
+    with db.connection() as conn:
+        run = _read_run(conn, run_id, lock=True)
         if run.status != DRAFT:
             raise conflict("This run has already been approved.")
         review = next((t for t in run.tables if t.table_name == table), None)
@@ -461,7 +699,8 @@ def update_mapping(run_id: str, table: str, column: str, silver_column: str | No
             matching.choose(suggestion, silver_column, ignored)
         if "also" in fields and also is not None:
             matching.set_also(suggestion, also)
-        _quality(review, columns_catalog, run.lotl)
+        _quality(review, columns_catalog, _lotl(conn), _frame(conn, review))
+        _write_run(conn, run)
     return run
 
 
@@ -470,26 +709,28 @@ def ignore_unmapped(run_id: str, table_name: str | None = None) -> Run:
 
     Avoids dozens of round trips when the reviewer wants to dismiss every column
     no method could match. Each column is set exactly as ``choose(… ignored=True)``
-    would: the quality report is rebuilt once at the end.
+    would, and each changed table's quality report is rebuilt once. Ignores are never
+    saved to the DRT column mapping.
     """
-    run = get_run(run_id)
     columns_catalog = catalog()
-    with run.lock:
+    with db.connection() as conn:
+        run = _read_run(conn, run_id, lock=True)
         if run.status != DRAFT:
             raise conflict("This run has already been approved.")
-        reviews = run.tables if table_name is None else [
-            t for t in run.tables if t.table_name == table_name
-        ]
+        reviews = run.tables if table_name is None else [t for t in run.tables if t.table_name == table_name]
         if table_name is not None and not reviews:
             raise not_found("That table in the run")
-        changed = 0
+        lotl = None
         for review in reviews:
+            changed = 0
             for suggestion in review.suggestions:
                 if not suggestion.decided:
                     matching.choose(suggestion, None, True)
                     changed += 1
             if changed:
-                _quality(review, columns_catalog, run.lotl)
+                lotl = lotl or _lotl(conn)
+                _quality(review, columns_catalog, lotl, _frame(conn, review))
+        _write_run(conn, run)
     return run
 
 
@@ -528,11 +769,11 @@ def _still_valid(conn, run: Run, columns_catalog: list[SilverColumn]) -> None:
 
 
 def approve(run_id: str, reviewed_by: str, user_id: str | None = None) -> Run:
-    run = get_run(run_id)
     reviewer = reviewed_by.strip()
     if len(reviewer) < 2:
         raise ApiError(422, "reviewer_required", "Enter the reviewer's name.", field="reviewed_by")
-    with run.lock:
+    with db.connection() as conn:
+        run = _read_run(conn, run_id, lock=True)
         if run.status != DRAFT:
             raise conflict("This run has already been approved.")
         issues = problems(run)
@@ -540,10 +781,10 @@ def approve(run_id: str, reviewed_by: str, user_id: str | None = None) -> Run:
             raise ApiError(409, "mapping_incomplete", "The mapping can't be approved yet.",
                            " ".join(issues[:3]) + (" …" if len(issues) > 3 else ""))
         # Fast feedback now; checked again under the lock when the load runs.
-        with db.connection() as conn:
-            _still_valid(conn, run, catalog())
+        _still_valid(conn, run, catalog())
         run.status, run.reviewed_by, run.started_at, run.message = RUNNING, reviewer, time.time(), "Starting"
         run.approved_by = user_id
+        _write_run(conn, run)
     loads = [load for review in run.tables for load in review.loads]
     job_history.begin(
         job_history.SILVER, run.id, created_by=user_id, status=RUNNING, started_at=run.started_at,
@@ -560,8 +801,6 @@ def _run(run: Run) -> None:
     try:
         with db.connection() as conn:
             _execute(conn, run)
-        run.status, run.progress, run.message = SUCCEEDED, 1.0, "Loaded"
-        run.finished_at = time.time()
         job_history.note(run.id, f"Loaded {run.result.get('rows_loaded', 0)} rows, "
                                  f"removed {run.result.get('rows_removed', 0)}")
         job_history.finish(run.id, "succeeded", _history_rows(run), ended_at=run.finished_at)
@@ -574,15 +813,13 @@ def _run(run: Run) -> None:
             "technical": "".join(traceback.format_exception_only(type(error), error)).strip()[:2000],
         }
         run.message = message
-        _record_failure(run)
         run.finished_at = time.time()
+        _record_failure(run)
         job_history.note(run.id, message, "ERROR")
         job_history.note(run.id, run.error["technical"], "ERROR")
         job_history.finish(run.id, "failed", ended_at=run.finished_at)
     finally:
-        run.finished_at = run.finished_at or time.time()
-        for review in run.tables:
-            review.frame = None  # the run is over; its rows are no longer needed
+        _forget_frames(run)  # the run is over; its rows are no longer needed
 
 
 def _history_rows(run: Run) -> list[dict]:
@@ -595,26 +832,35 @@ def _history_rows(run: Run) -> list[dict]:
     ]
 
 
-def _column_sql(column: SilverColumn, identity: str):
+def _column_sql(name: str, type_sql: str):
     from psycopg import sql
 
-    generated = " GENERATED BY DEFAULT AS IDENTITY" if column.name == identity else ""
-    return sql.SQL("{} {}").format(_ident(column.name), sql.SQL(column.sql_type + generated))
+    return sql.SQL("{} {}").format(_ident(name), sql.SQL(type_sql))
 
 
-def _ensure_table(conn, table: str, columns: list[SilverColumn], identity: str) -> None:
-    """Create a Silver table with exactly these columns, or add the ones it lacks."""
+def _ensure_table(conn, schema_name: str, table: str, columns: list[SilverColumn], identity: str,
+                  extra: list[tuple[str, str]] = ()) -> None:
+    """Create a table with exactly these columns (then ``extra``: (name, SQL type) pairs),
+    or add the ones it lacks."""
     from psycopg import sql
 
-    schema = _ident(config.SILVER_SCHEMA)
-    conn.execute(sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
-        schema, _ident(table), sql.SQL(", ").join(_column_sql(c, identity) for c in columns)))
+    def definition(column: SilverColumn, generated: bool):
+        return _column_sql(column.name, column.sql_type + (" GENERATED BY DEFAULT AS IDENTITY" if generated else ""))
+
+    schema = _ident(schema_name)
+    wanted = [definition(c, c.name == identity) for c in columns] + [_column_sql(n, t) for n, t in extra]
+    conn.execute(sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(schema, _ident(table), sql.SQL(", ").join(wanted)))
     present = {row[0] for row in conn.execute(
         "SELECT column_name FROM information_schema.columns WHERE table_schema = %s AND table_name = %s",
-        [config.SILVER_SCHEMA, table])}
+        [schema_name, table])}
     for column in columns:
         if column.name not in present:
-            conn.execute(sql.SQL("ALTER TABLE {}.{} ADD COLUMN {}").format(schema, _ident(table), _column_sql(column, "")))
+            conn.execute(sql.SQL("ALTER TABLE {}.{} ADD COLUMN {}").format(schema, _ident(table), definition(column, False)))
+    for name, type_sql in extra:
+        if name not in present:
+            # Added to a table with rows: a NOT NULL extra starts out nullable.
+            conn.execute(sql.SQL("ALTER TABLE {}.{} ADD COLUMN {}").format(
+                schema, _ident(table), _column_sql(name, type_sql.replace(" NOT NULL", ""))))
 
 
 def _ensure_tables(conn, columns_catalog: list[SilverColumn], aggregate_columns: list[SilverColumn]) -> None:
@@ -622,14 +868,44 @@ def _ensure_tables(conn, columns_catalog: list[SilverColumn], aggregate_columns:
 
     schema = _ident(config.SILVER_SCHEMA)
     conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
-    reference_service.ensure_drt_table(conn, columns_catalog)
-    _ensure_table(conn, DETAIL, columns_catalog, transform.IDENTITY)
+    _ensure_table(conn, config.SILVER_SCHEMA, DETAIL, columns_catalog, transform.IDENTITY)
     # A bronze load's rows: what replacing or reloading it deletes.
     conn.execute(sql.SQL("CREATE INDEX IF NOT EXISTS silver_detail_load ON {}.{} "
                          "(source_table, source_file, ingestion_timestamp)").format(schema, _ident(DETAIL)))
-    _ensure_table(conn, AGGREGATE, aggregate_columns, "ahi_aggregate_id")
+    _ensure_table(conn, config.SILVER_SCHEMA, AGGREGATE, aggregate_columns, "ahi_aggregate_id")
     conn.execute(sql.SQL("CREATE INDEX IF NOT EXISTS silver_aggregate_source ON {}.{} (source_system)")
                  .format(schema, _ident(AGGREGATE)))
+
+
+def _cleansed_columns(columns_catalog: list[SilverColumn]) -> list[SilverColumn]:
+    """The Silver columns a cleansed table holds: all of them but the generated key."""
+    return [column for column in columns_catalog if column.name != transform.IDENTITY]
+
+
+def _ensure_cleansed(conn, table: str, columns_catalog: list[SilverColumn]) -> None:
+    """The bronze table's source-specific Silver Cleansed table: the same name, in the
+    cleansed schema, with the Silver columns and the load each row came from."""
+    from psycopg import sql
+
+    schema = _ident(config.CLEANSED_SCHEMA)
+    conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
+    _ensure_table(conn, config.CLEANSED_SCHEMA, table, _cleansed_columns(columns_catalog), "", CLEANSED_EXTRA)
+    conn.execute(sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {}.{} (_ingestion_id)").format(
+        _ident(naming.identifier(f"{table}_load")), schema, _ident(table)))
+    conn.execute(sql.SQL(
+        "INSERT INTO {}.{} (bronze_table, cleansed_table) VALUES (%s, %s) "
+        "ON CONFLICT (bronze_table) DO UPDATE SET updated_at = now()").format(
+            _ident(config.CONTROL_SCHEMA), _ident(CLEANSED_REGISTRY)),
+        [table, f"{config.CLEANSED_SCHEMA}.{table}"])
+
+
+def _delete_cleansed(conn, table: str, ingestion_ids: list[str]) -> int:
+    from psycopg import sql
+
+    if not ingestion_ids or not _table_exists(conn, config.CLEANSED_SCHEMA, table):
+        return 0
+    return conn.execute(sql.SQL("DELETE FROM {}.{} WHERE _ingestion_id = ANY(%s)").format(
+        _ident(config.CLEANSED_SCHEMA), _ident(table)), [ingestion_ids]).rowcount
 
 
 def _delete_load(conn, source_table: str, file_name: str, processing_date) -> int:
@@ -640,48 +916,57 @@ def _delete_load(conn, source_table: str, file_name: str, processing_date) -> in
             _ident(config.SILVER_SCHEMA), _ident(DETAIL)), [source_table, file_name, processing_date]).rowcount
 
 
-def _save_mapping(conn, run: Run, columns_catalog: list[SilverColumn]) -> int:
-    """Save every approved decision into the DRT column mapping, per profit center.
+def _current_rows(rows: list[tuple], header: str) -> list[tuple]:
+    """The mapping rows that are this source column: the same header as written (spaces
+    and case aside); failing that, rows whose header has the same words -- but only when
+    they are all one header, so 'Agent Commission' never stands for 'Agent Commission%'."""
+    exact = [row for row in rows if _header_key(row[1]) == _header_key(header)]
+    if exact:
+        return exact
+    alike = [row for row in rows if normalize.compact(row[1] or "") == normalize.compact(header)]
+    return alike if len({_header_key(row[1]) for row in alike}) == 1 else []
 
-    A bronze column's rows (matched on normalized words, so "Net Premium" and
-    "net_premium" are one column) become exactly its approved targets: rows for other
-    Silver columns go, missing ones are added under the header as the mapping already
-    writes it. An ignored column is one row with no DRT and no Silver column. Rows that
-    name a DRT column the catalog does not resolve are left alone.
+
+def _save_mapping(conn, run: Run, columns_catalog: list[SilverColumn]) -> int:
+    """Save every approved mapping into the DRT column mapping, for each profit center the
+    table's loads carry. Returns the rows added.
+
+    A source column's rows become exactly its approved targets: rows for other Silver
+    columns go, missing ones are added under the header the file wrote. drt_column is the
+    business's DRT label for the target, or NULL when the business has none for it. An
+    ignored (or undecided) column saves nothing and removes nothing: it is asked about
+    again next time. Rows naming a DRT label with no Silver column are left alone.
     """
     from psycopg import sql
 
     table = sql.SQL("{}.{}").format(_ident(config.SILVER_SCHEMA), _ident(DRT_TABLE))
-    drt = {c.name: c.drt_name or None for c in columns_catalog}
-    rows = _mapping_rows(conn)
+    labels = reference_service.drt_labels(conn, columns_catalog)
     saved = 0
     for review in run.tables:
-        if not review.pc_id:
-            continue
-        mine = [row for row in rows if _same_pc(row[0], review.pc_id)]
-        for s in review.suggestions:
-            key = normalize.compact(s.bronze_column)
-            current = [row for row in mine if normalize.compact(row[1] or "") == key and (row[3] or row[2] is None)]
-            wanted: list[str | None] = [None] if s.ignored else list(s.targets)
-            if not wanted:
-                continue
-            for profit_center_code, pc_column, drt_column, silver in current:
-                if silver not in wanted:
-                    conn.execute(sql.SQL(
-                        "DELETE FROM {} WHERE profit_center = %s AND pc_column = %s AND "
-                        "silver_column_name IS NOT DISTINCT FROM %s AND drt_column IS NOT DISTINCT FROM %s").format(table),
-                        [profit_center_code, pc_column, silver, drt_column])
-            have = {row[3] for row in current}
-            header = current[0][1] if current else s.bronze_column
-            code = current[0][0] if current else review.pc_id
-            for target in wanted:
-                if target in have:
+        for pc in review.pc_ids or ([review.pc_id] if review.pc_id else []):
+            mine = [row for row in _mapping_rows(conn) if _same_pc(row[0], pc) and row[3]]
+            for s in review.suggestions:
+                wanted = s.targets
+                if not wanted:
                     continue
-                conn.execute(sql.SQL(
-                    "INSERT INTO {} (profit_center, pc_column, drt_column, silver_column_name) "
-                    "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING").format(table),
-                    [code, header, drt.get(target) if target else None, target])
-                saved += 1
+                header = review.headers.get(s.bronze_column) or s.bronze_column
+                current = _current_rows(mine, header)
+                for profit_center_code, pc_column, drt_column, silver in current:
+                    if silver not in wanted:
+                        conn.execute(sql.SQL(
+                            "DELETE FROM {} WHERE profit_center = %s AND pc_column = %s AND "
+                            "silver_column_name IS NOT DISTINCT FROM %s AND drt_column IS NOT DISTINCT FROM %s").format(table),
+                            [profit_center_code, pc_column, silver, drt_column])
+                have = {row[3] for row in current}
+                code = current[0][0] if current else pc
+                written = current[0][1] if current else header
+                for target in wanted:
+                    if target in have:
+                        continue
+                    saved += conn.execute(sql.SQL(
+                        "INSERT INTO {} (profit_center, pc_column, drt_column, silver_column_name) "
+                        "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING").format(table),
+                        [code, written, labels.get(target), target]).rowcount
     return saved
 
 
@@ -691,85 +976,105 @@ def _execute(conn, run: Run) -> None:
 
     columns_catalog = catalog()
     aggregate_columns = aggregate_catalog()
-    schema = _ident(config.SILVER_SCHEMA)
     control = _ident(config.CONTROL_SCHEMA)
     conn.execute("SELECT pg_advisory_xact_lock(hashtext('ahi-silver'))")
     # The authoritative check: under the lock no other Silver run can interleave.
     _still_valid(conn, run, columns_catalog)
     _ensure_tables(conn, columns_catalog, aggregate_columns)
 
-    # 1. The approved mapping -- every row, including the pre-filled ones -- is saved.
-    _save_mapping(conn, run, columns_catalog)
+    # 1. The approved mapping -- every mapped column, including the pre-filled ones -- is saved.
+    saved = _save_mapping(conn, run, columns_catalog)
 
-    # 2. Rows of bronze loads that were replaced since they reached Silver.
+    # 2. Rows of bronze loads that were replaced since they reached Silver: from Final
+    #    Silver and from the cleansed table they went through.
     cleanup = _superseded(conn)
     removed = 0
     if cleanup:
         for item in cleanup:
             removed += _delete_load(conn, _source_table(item["table_name"]), item["file_name"],
                                     datetime.fromisoformat(item["processing_date"]))
+            _delete_cleansed(conn, item["table_name"], [item["ingestion_id"]])
         conn.execute(sql.SQL("UPDATE {}.ingestion SET silver_status = 'removed' WHERE id = ANY(%s)").format(control),
                      [[item["ingestion_id"] for item in cleanup]])
 
-    # 3. Load each table's selected loads.
+    # 3. Each table's selected loads: bronze -> Silver Cleansed -> Final Silver.
     lotl = _lotl(conn)
     processed_at = datetime.now(timezone.utc)
-    target = [c.name for c in columns_catalog if c.name != transform.IDENTITY]
-    copy_sql = sql.SQL("COPY {}.{} ({}) FROM STDIN").format(
-        schema, _ident(DETAIL), sql.SQL(", ").join(_ident(n) for n in target))
+    target = [c.name for c in _cleansed_columns(columns_catalog)]
+    names = sql.SQL(", ").join(_ident(n) for n in target)
+    detail = sql.SQL("{}.{}").format(_ident(config.SILVER_SCHEMA), _ident(DETAIL))
     loaded, quality = 0, {}
     total = sum(len(review.loads) for review in run.tables) or 1
     done = 0
     for review in run.tables:
         ids = [load.ingestion_id for load in review.loads]
         source_table = _source_table(review.table_name)
+        _progress(run, done / total, f"Cleansing {review.table_name}")
+        _ensure_cleansed(conn, review.table_name, columns_catalog)
+        cleansed = sql.SQL("{}.{}").format(_ident(config.CLEANSED_SCHEMA), _ident(review.table_name))
         # Idempotent: a load retried after a failure never doubles.
+        _delete_cleansed(conn, review.table_name, ids)
         for load in review.loads:
             _delete_load(conn, source_table, load.file_name, load.processing_date)
         frame = _bronze_frame(conn, review.table_name, review.columns, ids)
         silver, report = transform.transform(frame, _mapping(review), columns_catalog, review.pc_id, lotl,
-                                             _context(review, processed_at))
+                                             _context(review, processed_at), extras=True)
         quality[review.table_name] = report
-        run.message = f"Loading {review.table_name}"
+        copy_sql = sql.SQL("COPY {} ({}) FROM STDIN").format(cleansed, sql.SQL(", ").join(
+            _ident(n) for n in target + transform.EXTRAS + ["_silver_run_id", "_cleansed_at"]))
         with conn.cursor() as cursor, cursor.copy(copy_sql) as copy:
-            for row in silver.select(target).iter_rows():
-                copy.write_row(row)
+            for row in silver.select(target + transform.EXTRAS).iter_rows():
+                copy.write_row(row + (run.id, processed_at))
         expected = Counter(frame["_ingestion_id"].to_list())
+        counts = dict(conn.execute(sql.SQL("SELECT _ingestion_id, count(*) FROM {} WHERE _ingestion_id = ANY(%s) "
+                                           "GROUP BY _ingestion_id").format(cleansed), [ids]).fetchall())
+        if any(counts.get(i, 0) != expected.get(i, 0) for i in ids):
+            raise ApiError(500, "row_mismatch", f"{review.table_name}: cleansed row counts do not match bronze.",
+                           "Nothing was loaded. Retry, and report it if it happens again.")
+        _progress(run, done / total, f"Loading {review.table_name} into {DETAIL}")
+        inserted = conn.execute(sql.SQL("INSERT INTO {} ({}) SELECT {} FROM {} WHERE _ingestion_id = ANY(%s)").format(
+            detail, names, names, cleansed), [ids]).rowcount
+        if inserted != frame.height:
+            raise ApiError(500, "row_mismatch", f"{review.table_name}: Silver row counts do not match bronze.",
+                           "Nothing was loaded. Retry, and report it if it happens again.")
         for load in review.loads:
-            count = conn.execute(sql.SQL(
-                "SELECT count(*) FROM {}.{} WHERE source_table = %s AND source_file = %s AND ingestion_timestamp = %s")
-                .format(schema, _ident(DETAIL)), [source_table, load.file_name, load.processing_date]).fetchone()[0]
-            if count != expected.get(load.ingestion_id, 0):
-                raise ApiError(500, "row_mismatch", f"{review.table_name}: Silver row counts do not match bronze.",
-                               "Nothing was loaded. Retry, and report it if it happens again.")
-            run.loaded[load.ingestion_id] = count
-        job_history.note(run.id, f"{review.table_name}: {silver.height} rows into {config.SILVER_SCHEMA}.{DETAIL}")
-        loaded += silver.height
+            run.loaded[load.ingestion_id] = counts.get(load.ingestion_id, 0)
+        job_history.note(run.id, f"{review.table_name}: {inserted} rows into {config.CLEANSED_SCHEMA}.{review.table_name} "
+                                 f"and {config.SILVER_SCHEMA}.{DETAIL}")
+        loaded += inserted
         conn.execute(sql.SQL("UPDATE {}.ingestion SET silver_status = 'succeeded', silver_run_id = %s, "
                              "silver_loaded_at = now() WHERE id = ANY(%s)").format(control), [run.id, ids])
         done += len(ids)
-        run.progress = done / total
 
     # 4. The aggregate, rebuilt for every source system this run touched.
     sources = sorted({review.source_system for review in run.tables if review.source_system}
                      | {item["source_system"] for item in cleanup if item.get("source_system")})
     _rebuild_aggregate(conn, sources)
 
-    # The audit snapshot: what was approved, how it was chosen, and every method's vote.
-    mapping = [
-        {"pc_id": r.pc_id, "bronze_table_name": r.table_name, "bronze_column_name": s.bronze_column,
-         "silver_column_name": s.silver_column, "also": s.also, "ignored": s.ignored, "selection": s.selection,
-         "methods": [v.method for v in s.backers()], "split": s.split,
+    # 5. The audit: what was approved, how it was chosen, and every method's vote.
+    conn.execute(sql.SQL(
+        "INSERT INTO {}.silver_run (id, ingestion_ids, reviewed_by, approved_by, mapping, quality, rows_loaded, "
+        "rows_removed, status, finished_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'succeeded', clock_timestamp())"
+    ).format(control),
+        [run.id, [l.ingestion_id for r in run.tables for l in r.loads], run.reviewed_by, run.approved_by,
+         Jsonb(_mapping_snapshot(run)), Jsonb(_json_ready(quality)), loaded, removed])
+    run.result = {"rows_loaded": loaded, "rows_removed": removed, "mappings_saved": saved, "quality": quality}
+
+    # 6. The review is done -- committed together with the rows it loaded.
+    run.status, run.progress, run.message, run.finished_at = SUCCEEDED, 1.0, "Loaded", time.time()
+    _write_run(conn, run)
+
+
+def _mapping_snapshot(run: Run) -> list[dict]:
+    """The approved mapping with how each column was chosen and every method's vote."""
+    return [
+        {"pc_id": r.pc_id, "pc_ids": r.pc_ids, "bronze_table_name": r.table_name, "bronze_column_name": s.bronze_column,
+         "source_header": r.headers.get(s.bronze_column), "silver_column_name": s.silver_column, "also": s.also,
+         "ignored": s.ignored, "selection": s.selection, "methods": [v.method for v in s.backers()], "split": s.split,
          "votes": [{"method": v.method, "silver_column": v.silver_column, "score": v.score,
                     "second_choice": v.second_choice} for c in s.candidates for v in c.votes]}
         for r in run.tables for s in r.suggestions
     ]
-    conn.execute(sql.SQL(
-        "INSERT INTO {}.silver_run (id, ingestion_ids, reviewed_by, mapping, quality, rows_loaded, rows_removed, "
-        "status, finished_at) VALUES (%s, %s, %s, %s, %s, %s, %s, 'succeeded', now())").format(control),
-        [run.id, [l.ingestion_id for r in run.tables for l in r.loads], run.reviewed_by, Jsonb(mapping),
-         Jsonb(quality), loaded, removed])
-    run.result = {"rows_loaded": loaded, "rows_removed": removed, "quality": quality}
 
 
 # Aggregate grain: one row per source system, profit center and accounting month. Sums of
@@ -824,66 +1129,92 @@ def _rebuild_aggregate(conn, sources: list[str]) -> None:
 
 
 def _record_failure(run: Run) -> None:
+    """After the load's transaction rolled back: the review, the audit and each load say
+    it failed. A failed load stays eligible and can be run again."""
     from psycopg import sql
     from psycopg.types.json import Jsonb
 
+    ids = [l.ingestion_id for r in run.tables for l in r.loads]
+    control = _ident(config.CONTROL_SCHEMA)
     try:
         with db.connection() as conn:
+            _write_run(conn, run)
             conn.execute(sql.SQL(
-                "INSERT INTO {}.silver_run (id, ingestion_ids, reviewed_by, mapping, status, error, finished_at) "
-                "VALUES (%s, %s, %s, %s, 'failed', %s, now()) ON CONFLICT (id) DO UPDATE SET status = 'failed', "
-                "error = EXCLUDED.error").format(_ident(config.CONTROL_SCHEMA)),
-                [run.id, [l.ingestion_id for r in run.tables for l in r.loads], run.reviewed_by or "",
-                 Jsonb([]), json.dumps(run.error)])
-    except Exception:  # noqa: BLE001 - the original error is what matters
-        pass
+                "INSERT INTO {}.silver_run (id, ingestion_ids, reviewed_by, approved_by, mapping, status, error, "
+                "finished_at) VALUES (%s, %s, %s, %s, %s, 'failed', %s, now()) ON CONFLICT (id) DO UPDATE SET "
+                "status = 'failed', error = EXCLUDED.error, mapping = EXCLUDED.mapping, finished_at = now()").format(control),
+                [run.id, ids, run.reviewed_by or "", run.approved_by, Jsonb(_mapping_snapshot(run)),
+                 json.dumps(run.error)])
+            conn.execute(sql.SQL(
+                "UPDATE {}.ingestion SET silver_status = 'failed', silver_run_id = %s WHERE id = ANY(%s) "
+                "AND status = 'ingested' AND silver_status IS DISTINCT FROM 'succeeded'").format(control), [run.id, ids])
+    except Exception:  # noqa: BLE001 - the original error is what the reviewer needs
+        log.exception("Silver run %s: the failure could not be recorded", run.id)
 
 
 # --- browsing --------------------------------------------------------------------
 
 
 def saved_mapping() -> list[dict]:
-    """The DRT column mapping (created and filled from assets/ on first use)."""
+    """The DRT column mapping (filled from assets/ when the database is first used)."""
     from psycopg import sql
 
     with db.connection() as conn:
-        reference_service.ensure_drt_table(conn, catalog())
+        if not _table_exists(conn, config.SILVER_SCHEMA, DRT_TABLE):
+            return []
         rows = conn.execute(sql.SQL(
             "SELECT profit_center, pc_column, drt_column, silver_column_name FROM {}.{} "
-            "ORDER BY profit_center, pc_column, silver_column_name NULLS FIRST")
+            "ORDER BY profit_center, pc_column, silver_column_name NULLS LAST, drt_column NULLS LAST")
             .format(_ident(config.SILVER_SCHEMA), _ident(DRT_TABLE))).fetchall()
     return [{"profit_center": r[0], "pc_column": r[1], "drt_column": r[2], "silver_column_name": r[3]} for r in rows]
 
 
-def edit_saved_mapping(profit_center_code: str, pc_column: str, silver_column: str | None,
+_ONE_ROW = ("profit_center = %s AND pc_column = %s AND drt_column IS NOT DISTINCT FROM %s "
+            "AND silver_column_name IS NOT DISTINCT FROM %s")
+
+
+def edit_saved_mapping(profit_center_code: str, pc_column: str, drt_column: str | None, silver_column: str | None,
                        new_silver_column: str | None) -> dict:
-    """Point one DRT mapping row at another Silver column (or none = ignore); it applies
-    from the next Silver run. The row is the one for (profit center, source column,
-    current Silver column), since one source column can have two rows."""
+    """Point one DRT mapping row at another Silver column; it applies from the next Silver
+    run. The row is found by all four of its values (a source column can have two rows,
+    and the unique index makes the four of them name exactly one). Its DRT label becomes
+    the business's label for the new Silver column, or none."""
     from psycopg import errors, sql
 
-    columns_catalog = {c.name: c for c in catalog() if c.role == MAPPED}
-    if new_silver_column is not None and new_silver_column not in columns_catalog:
+    columns_catalog = catalog()
+    targets = {c.name for c in columns_catalog if c.role == MAPPED}
+    if not new_silver_column:
+        raise ApiError(422, "silver_column_required", "Choose the Silver column this source column loads into.",
+                       "To stop using this row, remove it instead.", field="new_silver_column_name")
+    if new_silver_column not in targets:
         raise ApiError(422, "unknown_silver_column", f"'{new_silver_column}' is not a Silver column a bronze column can map to.",
-                       field="silver_column_name")
-    drt = (columns_catalog[new_silver_column].drt_name or None) if new_silver_column else None
-    # Ignoring clears the DRT label too; a new target takes its DRT label (or keeps the row's).
-    assign = ("silver_column_name = %s, drt_column = NULL" if new_silver_column is None
-              else "silver_column_name = %s, drt_column = coalesce(%s::text, drt_column)")
-    values = [new_silver_column] if new_silver_column is None else [new_silver_column, drt]
+                       field="new_silver_column_name")
     try:
         with db.connection() as conn:
-            reference_service.ensure_drt_table(conn, catalog())
+            drt = reference_service.drt_labels(conn, columns_catalog).get(new_silver_column)
             updated = conn.execute(sql.SQL(
-                "UPDATE {}.{} SET " + assign + " WHERE profit_center = %s AND pc_column = %s "
-                "AND silver_column_name IS NOT DISTINCT FROM %s").format(_ident(config.SILVER_SCHEMA), _ident(DRT_TABLE)),
-                values + [profit_center_code, pc_column, silver_column]).rowcount
+                "UPDATE {}.{} SET silver_column_name = %s, drt_column = %s WHERE " + _ONE_ROW).format(
+                    _ident(config.SILVER_SCHEMA), _ident(DRT_TABLE)),
+                [new_silver_column, drt, profit_center_code, pc_column, drt_column, silver_column]).rowcount
     except errors.UniqueViolation as error:
         raise conflict(f"{pc_column} already maps to {new_silver_column} for {profit_center_code}.") from error
     if not updated:
         raise not_found("That mapping row")
     return {"profit_center": profit_center_code, "pc_column": pc_column, "drt_column": drt,
             "silver_column_name": new_silver_column}
+
+
+def delete_saved_mapping(profit_center_code: str, pc_column: str, drt_column: str | None,
+                         silver_column: str | None) -> None:
+    """Remove one DRT mapping row (found by all four of its values)."""
+    from psycopg import sql
+
+    with db.connection() as conn:
+        removed = conn.execute(sql.SQL("DELETE FROM {}.{} WHERE " + _ONE_ROW).format(
+            _ident(config.SILVER_SCHEMA), _ident(DRT_TABLE)),
+            [profit_center_code, pc_column, drt_column, silver_column]).rowcount
+    if not removed:
+        raise not_found("That mapping row")
 
 
 def _json(value):

@@ -244,8 +244,11 @@ export const api = {
       body: JSON.stringify({ table_name: table_name ?? null }),
     }),
   silverMapping: () => request<DrtMapping[]>("/api/silver/mapping"),
-  editSilverMapping: (row: { profit_center: string; pc_column: string; silver_column_name: string | null; new_silver_column_name: string | null }) =>
+  /** The row is named by all four of its values; its new Silver column is required. */
+  editSilverMapping: (row: DrtMapping & { new_silver_column_name: string }) =>
     request<DrtMapping>("/api/silver/mapping", { method: "PATCH", body: JSON.stringify(row) }),
+  deleteSilverMapping: (row: DrtMapping) =>
+    request<void>("/api/silver/mapping", { method: "DELETE", body: JSON.stringify(row) }),
   silverAggregate: () => request<SilverAggregateRow[]>("/api/silver/aggregate"),
 };
 

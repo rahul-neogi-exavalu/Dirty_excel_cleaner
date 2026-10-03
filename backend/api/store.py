@@ -60,6 +60,8 @@ class OutputRecord:
     # original column name -> the name the user gave it. Only changed names are kept.
     renames: dict[str, str] = field(default_factory=dict)
     headers_updated_at: float | None = None
+    # original column name -> its header as the source file wrote it.
+    source_headers: dict[str, str] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def current_name(self, original: str) -> str:

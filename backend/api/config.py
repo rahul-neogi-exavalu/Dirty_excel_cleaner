@@ -125,6 +125,11 @@ def _flag(name: str, default: str) -> bool:
 
 # --- Silver layer --------------------------------------------------------------
 SILVER_SCHEMA = os.environ.get("AHI_SILVER_SCHEMA", "silver").strip()
+# The AHI doc's "source-specific Silver Cleansed" tables: one per bronze table, under the
+# same name, holding its rows mapped and typed. Final Silver (silver_detail) loads from them.
+CLEANSED_SCHEMA = os.environ.get("AHI_CLEANSED_SCHEMA", "bronze_cleansed").strip()
+# A Silver review not approved within this many hours is discarded (sliding: every edit renews it).
+SILVER_DRAFT_TTL_HOURS = float(os.environ.get("AHI_SILVER_DRAFT_TTL_HOURS") or "72")
 # The AHI doc's LOTL (pc_id -> legacy_office_name -> profit center number). Until the
 # real one exists this is a placeholder in the control schema, seeded for testing.
 # Empty: <control schema>.lotl, resolved when used (the control schema can be overridden).

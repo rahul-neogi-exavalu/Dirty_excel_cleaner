@@ -67,6 +67,11 @@ class FileInput:
     # division_mapping's divisions for the profit center (two for a few), and the one used.
     division_matches: list[str] = field(default_factory=list)
     division_name: str | None = None
+    # What the reviewer should know but need not fix (a profit center with no division,
+    # data dates outside the period the file name states, two profit centers in a name).
+    warnings: list[str] = field(default_factory=list)
+    # The period the file name states, when it states one.
+    name_period: Period | None = None
 
 
 @dataclass
@@ -111,23 +116,31 @@ def _outputs(plan: Plan):
 # --- reading the bronze layer ----------------------------------------------------
 
 
-def _registry():
-    """Tables and live ingestions, as the planner sees them."""
+def _registry(conn=None):
+    """Tables and live ingestions, as the planner sees them (on ``conn`` when given, so a
+    load can re-plan inside its own locked transaction)."""
+    if conn is None:
+        with db.connection() as own:
+            return _registry(own)
     from psycopg import sql
 
     control = sql.Identifier(config.CONTROL_SCHEMA)
-    with db.connection() as conn:
-        tables = [
-            planner.TableState(name, [column["name"] for column in columns])
-            for name, columns in conn.execute(
-                sql.SQL("SELECT table_name, columns FROM {}.bronze_table").format(control))
-        ]
-        history = [
-            planner.Ingested(row[0], row[1], row[2], row[3], Period.parse(row[4], row[5]), tuple(row[6] or ()))
-            for row in conn.execute(sql.SQL(
-                "SELECT id, table_name, file_name, file_sha256, period_start, period_end, source_sheets "
-                "FROM {}.ingestion WHERE status = 'ingested'").format(control))
-        ]
+    tables = [
+        planner.TableState(
+            name, [column["name"] for column in columns],
+            headers={c["name"]: c["source_header"] for c in columns if c.get("source_header")},
+            provenance=tuple(c["name"] for c in columns if c.get("provenance")),
+        )
+        for name, columns in conn.execute(
+            sql.SQL("SELECT table_name, columns FROM {}.bronze_table").format(control))
+    ]
+    history = [
+        planner.Ingested(row[0], row[1], row[2], row[3], Period.parse(row[4], row[5]), tuple(row[6] or ()),
+                         tuple(row[7] or ()))
+        for row in conn.execute(sql.SQL(
+            "SELECT id, table_name, file_name, file_sha256, period_start, period_end, source_sheets, source_regions "
+            "FROM {}.ingestion WHERE status = 'ingested'").format(control))
+    ]
     return tables, history
 
 
@@ -189,9 +202,17 @@ def create_plan(job_ids: list[str], batch_id: str | None) -> Plan:
         if not job.outputs:
             continue
         guess = _detect_period(job)
-        source = naming.source_system_from_filename(job.source_name, config.SOURCE_SYSTEM_PATTERN)
-        # PC796_2026-06 ... -> PC0796; a name without a PC token falls back to its source system.
-        pc = file_meta.pc_id_from_filename(job.source_name) or file_meta.normalize_pc_id(source)
+        # PC796_2026-06 ... -> PC0796, and its source system pc0796: one token, both values.
+        tokens = file_meta.pc_tokens(job.source_name)
+        pc = tokens[0] if len(tokens) == 1 else None
+        if pc:
+            source = file_meta.source_system_for(pc)
+        elif tokens:
+            source = None
+        else:
+            # No PC token: the team's suffix by the configured pattern (never a period or a version).
+            source = naming.source_system_from_filename(job.source_name, config.SOURCE_SYSTEM_PATTERN)
+            pc = file_meta.normalize_pc_id(source)
         when = file_meta.file_date_from_filename(job.source_name)
         file = FileInput(
             job_id=job.id, file_name=job.source_name, file_sha256=job.source_sha256 or job.id,
@@ -200,6 +221,16 @@ def create_plan(job_ids: list[str], batch_id: str | None) -> Plan:
             source_system=source, period=guess.period,
             detected_pc_id=pc, pc_id=pc, detected_file_date=when, file_date=when,
         )
+        if len(tokens) > 1:
+            file.warnings.append(f"The file name names {' and '.join(tokens)}: enter the profit center "
+                                 "and source system this file is for.")
+        named = file_meta.period_from_filename(job.source_name)
+        if named:
+            file.name_period = Period(*named)
+            file.period, file.detected_period, file.period_source = file.name_period, file.name_period, "file name"
+            if guess.period and not file.name_period.covers(guess.period):
+                file.warnings.append(f"The file name says {file.name_period.label()}, but its dates run "
+                                     f"{guess.period.label()} ({guess.source}). Check the period.")
         _lookup_division(file, divisions)
         files.append(file)
     if not files:
@@ -217,6 +248,10 @@ def _lookup_division(file: FileInput, divisions: list[tuple]) -> None:
     file.division_matches = file_meta.divisions_for(file.pc_id, divisions)
     if file.division_name not in file.division_matches:
         file.division_name = file.division_matches[0] if len(file.division_matches) == 1 else None
+    note = "is not in the division table"
+    file.warnings = [w for w in file.warnings if note not in w]
+    if file.pc_id and divisions and not file.division_matches:
+        file.warnings.append(f"{file.pc_id} {note}: choose a division, or division_name stays empty.")
 
 
 def division_options(file: FileInput, divisions: list[tuple]) -> list[str]:
@@ -247,24 +282,34 @@ def get_plan(plan_id: str) -> Plan:
 
 
 def _replan(plan: Plan) -> None:
-    tables, history = _registry()
+    plan.items = _planned(plan)
+
+
+def _planned(plan: Plan, conn=None) -> list[planner.PlanItem]:
+    """The plan's items against the bronze layer as it is now."""
+    tables, history = _registry(conn)
     candidates = []
     for file, job, record in _outputs(plan):
         key = _key(job, record)
         override = plan.overrides.get(key, {})
+        columns = naming.column_names(record.columns)
+        original = list(record.frame.columns)
         candidates.append(planner.Candidate(
             key=key,
             file_name=file.file_name,
             file_sha256=file.file_sha256,
             source_system=file.source_system,
             sheet_names=list(record.sheet_names),
-            columns=naming.column_names(record.columns),
+            columns=columns,
             rows=record.frame.height,
             period=file.period,
             table_override=override.get("table_name"),
             action_override=override.get("action"),
+            regions=tuple(record.tables),
+            headers=record_headers(record),
+            provenance=columns[original.index(SOURCE_SHEET_COLUMN)] if SOURCE_SHEET_COLUMN in original else None,
         ))
-    plan.items = planner.plan(candidates, tables, history)
+    return planner.plan(candidates, tables, history)
 
 
 def _editable(plan: Plan) -> None:
@@ -410,7 +455,7 @@ def _signature(items: list[planner.PlanItem]) -> list[tuple]:
     """What a reviewer approves: per item, where it goes, how, and what it removes."""
     return [
         (item.key, item.action, item.table_name, item.rebuild, tuple(item.columns_after),
-         tuple(ref["id"] for ref in item.replaces))
+         tuple(ref["id"] for ref in item.replaces), tuple(sorted(item.column_map.items())))
         for item in items
     ]
 
@@ -470,6 +515,11 @@ def _execute(conn, plan: Plan) -> None:
     control = sql.Identifier(config.CONTROL_SCHEMA)
     bronze = sql.Identifier(config.BRONZE_SCHEMA)
     conn.execute("SELECT pg_advisory_xact_lock(hashtext('ahi-bronze'))")
+    # The authoritative check, under the lock: another plan may have loaded or replaced
+    # files since this one was approved. Run only what the reviewer saw.
+    if _signature(_planned(plan, conn)) != _signature(plan.items):
+        raise ApiError(409, "plan_changed", "The bronze layer changed since this plan was approved.",
+                       "Start a new plan so it is checked against the tables as they are now.")
     conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(bronze))
     conn.execute(
         sql.SQL("INSERT INTO {}.ingest_plan (id, batch_id, items, reviewed_by, status) "
@@ -497,11 +547,25 @@ def _execute(conn, plan: Plan) -> None:
         stamp = now if stamp is None or now > stamp else stamp + timedelta(microseconds=1)
         rows = _load(conn, control, bronze, item, file, record, ingestion_id, stamp)
         if item.replaces:
-            conn.execute(
+            # Replaced loads in another table (a revised file that went to a table of its
+            # own) lose their rows there; the target table's were handled by _load.
+            elsewhere: dict[str, list[str]] = {}
+            for ref in item.replaces:
+                if ref.get("table_name") and ref["table_name"] != item.table_name:
+                    elsewhere.setdefault(ref["table_name"], []).append(ref["id"])
+            for other, ids in elsewhere.items():
+                if _table_exists(conn, other):
+                    conn.execute(sql.SQL("DELETE FROM {}.{} WHERE _ingestion_id = ANY(%s)").format(
+                        bronze, sql.Identifier(other)), [ids])
+            replaced = [ref["id"] for ref in item.replaces]
+            superseded = conn.execute(
                 sql.SQL("UPDATE {}.ingestion SET status = 'superseded', superseded_by = %s "
-                        "WHERE id = ANY(%s)").format(control),
-                [ingestion_id, [ref["id"] for ref in item.replaces]],
-            )
+                        "WHERE id = ANY(%s) AND status = 'ingested'").format(control),
+                [ingestion_id, replaced],
+            ).rowcount
+            if superseded != len(replaced):
+                raise ApiError(409, "plan_changed", f"{item.table_name}: a file this plan replaces was already replaced.",
+                               "Start a new plan so it is checked against the tables as they are now.")
         _audit(conn, control, plan, item, file, job, record, ingestion_id, rows, "ingested", stamp)
         job_history.note(plan.id, f"Loaded {rows} rows from {record.file} into {item.table_name} ({item.action})")
         plan.results[item.key] = {"ingestion_id": ingestion_id, "rows_loaded": rows, "table_name": item.table_name}
@@ -516,6 +580,15 @@ def _current_columns(conn, control, name: str) -> list[str] | None:
     row = conn.execute(sql.SQL("SELECT columns FROM {}.bronze_table WHERE table_name = %s FOR UPDATE")
                        .format(control), [name]).fetchone()
     return [column["name"] for column in row[0]] if row else None
+
+
+def _provenance_columns(conn, control, name: str) -> list[str]:
+    """The table's sheet-provenance columns, as the registry flags them."""
+    from psycopg import sql
+
+    row = conn.execute(sql.SQL("SELECT columns FROM {}.bronze_table WHERE table_name = %s").format(control),
+                       [name]).fetchone()
+    return [column["name"] for column in row[0] if column.get("provenance")] if row else []
 
 
 def _table_exists(conn, name: str) -> bool:
@@ -564,14 +637,23 @@ def _load(conn, control, bronze, item: planner.PlanItem, file: FileInput, record
                          [[ref["id"] for ref in item.replaces]])
 
     frame = _as_text(record)
-    present = [name for name in item.columns_after if name in frame.columns]
-    target = present + list(naming.SYSTEM_COLUMNS) + ["_ingestion_id", "_source_file", "_source_sheet"]
-    extras = [file.pc_id, file.file_date, file.division_name, file.file_name, processing_date]
-    sheets = list(dict.fromkeys(record.sheet_names))
     # The appended table's provenance column, under whatever name the reviewer gave it
     # (``_as_text`` keeps the column order, so its position identifies it).
     original = list(record.frame.columns)
     sheet_column = frame.columns[original.index(SOURCE_SHEET_COLUMN)] if SOURCE_SHEET_COLUMN in original else None
+    if item.column_map:
+        # Duplicate headers numbered in another order: each loads into the table's column for it.
+        frame = frame.rename(item.column_map)
+        sheet_column = item.column_map.get(sheet_column, sheet_column)
+    present = [name for name in item.columns_after if name in frame.columns]
+    # A one-sheet file appended to a table stacked from several sheets: the table's
+    # sheet-provenance column gets this file's sheet name.
+    provenance = [name for name in _provenance_columns(conn, control, item.table_name)
+                  if name in item.columns_after and name not in frame.columns]
+    target = (present + provenance + list(naming.SYSTEM_COLUMNS)
+              + ["_ingestion_id", "_source_file", "_source_sheet"])
+    extras = [file.pc_id, file.file_date, file.division_name, file.file_name, processing_date]
+    sheets = list(dict.fromkeys(record.sheet_names))
     copy_sql = sql.SQL("COPY {}.{} ({}) FROM STDIN").format(
         bronze, table, sql.SQL(", ").join(sql.Identifier(name) for name in target))
     with conn.cursor() as cursor, cursor.copy(copy_sql) as copy:
@@ -579,7 +661,8 @@ def _load(conn, control, bronze, item: planner.PlanItem, file: FileInput, record
         order = [frame.columns.index(name) for name in present]
         for row in frame.iter_rows():
             sheet = row[sheet_index] if sheet_index is not None else (sheets[0] if len(sheets) == 1 else None)
-            copy.write_row([row[i] for i in order] + extras + [ingestion_id, file.file_name, sheet])
+            copy.write_row([row[i] for i in order] + [sheet] * len(provenance) + extras
+                           + [ingestion_id, file.file_name, sheet])
 
     loaded = conn.execute(sql.SQL("SELECT count(*) FROM {}.{} WHERE _ingestion_id = %s").format(bronze, table),
                           [ingestion_id]).fetchone()[0]
@@ -589,12 +672,21 @@ def _load(conn, control, bronze, item: planner.PlanItem, file: FileInput, record
                        "Nothing was ingested. Retry, and report it if it happens again.")
 
     dtypes = dict(zip(naming.column_names(record.columns), (str(d) for d in record.frame.dtypes)))
+    dtypes = {item.column_map.get(name, name): dtype for name, dtype in dtypes.items()}
+    headers = {item.column_map.get(name, name): header for name, header in record_headers(record).items()}
     previous = {}
     if current is not None and not item.rebuild:
         row = conn.execute(sql.SQL("SELECT columns FROM {}.bronze_table WHERE table_name = %s").format(control),
                            [item.table_name]).fetchone()
-        previous = {column["name"]: column.get("datatype") for column in row[0]}
-    described = [{"name": name, "datatype": dtypes.get(name) or previous.get(name)} for name in item.columns_after]
+        previous = {column["name"]: column for column in row[0]}
+    # Each column's type, its header as the source file wrote it (kept from earlier loads
+    # when this file lacks the column), and whether it is the cleaner's sheet provenance.
+    described = [
+        {"name": name, "datatype": dtypes.get(name) or previous.get(name, {}).get("datatype"),
+         "source_header": headers.get(name) or previous.get(name, {}).get("source_header"),
+         "provenance": name == sheet_column or bool(previous.get(name, {}).get("provenance"))}
+        for name in item.columns_after
+    ]
     conn.execute(
         sql.SQL(
             "INSERT INTO {}.bronze_table (table_name, schema_name, source_system, columns) VALUES (%s, %s, %s, %s) "
@@ -631,15 +723,24 @@ def _audit(conn, control, plan: Plan, item: planner.PlanItem, file: FileInput, j
         sql.SQL(
             "INSERT INTO {}.ingestion (id, plan_id, table_name, file_name, file_sha256, source_system, "
             "source_sheets, period_start, period_end, action, schema_diff, rows_loaded, status, reviewed_by, "
-            "job_id, output_id, pc_id, file_date, division_name, processing_date) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            "job_id, output_id, pc_id, file_date, division_name, processing_date, source_headers, source_regions) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         ).format(control),
         [ingestion_id, plan.id, item.table_name, file.file_name, file.file_sha256, item.source_system,
          list(record.sheet_names), item.period.start if item.period else None,
          item.period.end if item.period else None, item.action,
          Jsonb(item.comparison) if item.comparison else None, rows, status, plan.reviewed_by, job.id, record.id,
-         file.pc_id, file.file_date, file.division_name, processing_date],
+         file.pc_id, file.file_date, file.division_name, processing_date, Jsonb(record_headers(record)),
+         list(record.tables)],
     )
+
+
+def record_headers(record: OutputRecord) -> dict[str, str]:
+    """Bronze column -> the header the source file wrote for it (columns the cleaner added,
+    or that had no header, are absent)."""
+    names = naming.column_names(record.columns)
+    return {name: record.source_headers[original] for name, original in zip(names, record.frame.columns)
+            if record.source_headers.get(original)}
 
 
 def _record_failure(plan: Plan) -> None:

@@ -471,6 +471,8 @@ export interface CleanupLoad {
 
 export interface SilverMappingRow {
   bronze_column: string;
+  /** The header as the source file wrote it ("Net Premium"); null for older loads. */
+  source_header?: string | null;
   silver_column: string | null;
   /** More Silver columns the same bronze column also loads into. */
   also: string[];
@@ -497,6 +499,8 @@ export interface SilverTableReview {
   table_name: string;
   source_system: string | null;
   pc_id: string | null;
+  /** Every profit center the table's loads carry (each row keeps its own). */
+  pc_ids?: string[];
   loads: { ingestion_id: string; file_name: string; rows: number; period_start: string | null; period_end: string | null }[];
   quality: SilverQuality;
   mapping: SilverMappingRow[];
@@ -513,7 +517,7 @@ export interface SilverRun {
   cleanup: CleanupLoad[];
   lotl_rows: number;
   blockers: string[];
-  result: { rows_loaded?: number; rows_removed?: number };
+  result: { rows_loaded?: number; rows_removed?: number; mappings_saved?: number };
   tables: SilverTableReview[];
 }
 
@@ -523,8 +527,9 @@ export interface DrtMapping {
   profit_center: string;
   /** The source column as the file writes it. */
   pc_column: string;
+  /** The business's DRT label for the Silver column; null when the business has none for it. */
   drt_column: string | null;
-  /** null with no drt_column: the column is ignored. */
+  /** null: a DRT label that names no Silver column. Ignores are never saved. */
   silver_column_name: string | null;
 }
 

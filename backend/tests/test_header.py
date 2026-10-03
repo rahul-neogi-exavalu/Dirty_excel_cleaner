@@ -157,3 +157,8 @@ def test_a_single_row_header_is_not_merged_with_data():
     result = detect([HEADER] + records())
     assert result.multi_row is False
     assert result.names == ["name", "num", "amount", "date"]
+
+
+def test_labels_are_kept_as_written_beside_the_names():
+    result = detect([["Net  Premium", None, "Commission%", "Date"]] + records())
+    assert result.names[0] == "net_premium" and result.labels == ["Net  Premium", None, "Commission%", "Date"]

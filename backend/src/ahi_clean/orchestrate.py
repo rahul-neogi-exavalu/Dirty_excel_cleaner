@@ -49,6 +49,9 @@ class Output:
     metadata_file: str = ""
     # This table's own id, for callers that address outputs one by one (the API).
     output_id: str = ""
+    # Column -> its header as the source sheet wrote it (absent: no header, or added by
+    # the cleaner, like source_sheet).
+    source_headers: dict[str, str] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -234,6 +237,8 @@ def adopt_sibling_headers(results) -> list[dict]:
             for key in ("inferred_types", "flags"):
                 recorded = result.trace.get(key, {})
                 result.trace[key] = {renamed.get(name, name): value for name, value in recorded.items()}
+            # The borrowed names stand for the donor's headers.
+            result.trace["source_headers"] = dict(donor.trace.get("source_headers", {}))
             # "Named by position" is no longer true; say where the names came from.
             positional = {flag_text.check(flag_text.NO_HEADER), flag_text.check(flag_text.BLANK_HEADER)}
             for column in result.frame.columns:
@@ -301,7 +306,7 @@ def plan_workbook(results, stem: str) -> tuple[list[Output], dict]:
         name = stem if shipped == 1 else f"{stem}_{_slug(labels[0])}"
         outputs.append(
             Output(name, pl.concat(frames, how="vertical_relaxed"), "stacked", labels,
-                   [result.sheet_name for result in group], _flags(group))
+                   [result.sheet_name for result in group], _flags(group), source_headers=_headers(group))
         )
         report["relationships"].append(
             {"tables": labels, "decision": STACK, "decided_by": "identical_headers"}
@@ -314,10 +319,20 @@ def plan_workbook(results, stem: str) -> tuple[list[Output], dict]:
         name = stem if shipped == 1 else f"{stem}_{_slug(result.label)}"
         outputs.append(
             Output(name, result.frame, "standalone", [result.label], [result.sheet_name],
-                   _flags([result]))
+                   _flags([result]), source_headers=_headers([result]))
         )
 
     return outputs, report
+
+
+def _headers(results) -> dict[str, str]:
+    """Each column's source header across the tables of one output (the first one written)."""
+    merged: dict[str, str] = {}
+    for result in results:
+        for column, header in result.trace.get("source_headers", {}).items():
+            if header:
+                merged.setdefault(column, header)
+    return merged
 
 
 def _flags(results) -> dict[str, str]:

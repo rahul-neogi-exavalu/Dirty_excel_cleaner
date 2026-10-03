@@ -9,6 +9,9 @@
 The LOTL is the business's ``pc_name_pc_number_from_lotl`` table: profit_center_number
 (unpadded, e.g. ``796``; sub-offices ``069_01``; sometimes the text ``null``),
 legacy_office_name and status. When a name or number appears twice, the Active row wins.
+Names are matched without case, extra spaces or line breaks, and with every dash read as
+'-' ("BSG California – legacy Hull Stockton" is "BSG California - legacy Hull Stockton").
+A cell holding the text ``null``, ``none`` or ``n/a`` is missing, in the file as in the LOTL.
 
 Numbers are standardised to four digits (94 -> 0094, 069_01 -> 0069_01). The file's
 profit center is the bronze pc_id (PC0796 -> 0796). A row the LOTL cannot settle is kept
@@ -39,11 +42,20 @@ def _value(value) -> str | None:
     return None if not text or text.casefold() in ("null", "none", "n/a") else text
 
 
+# Hyphen, non-breaking hyphen, figure dash, en dash, em dash, horizontal bar, minus sign.
+_DASHES = re.compile("[‐-―−]")
+
+
+def name_key(name: str) -> str:
+    """A legacy office name as compared: case, runs of whitespace and dash styles aside."""
+    return " ".join(_DASHES.sub("-", name).split()).casefold()
+
+
 @dataclass
 class Lotl:
     # padded number -> (legacy office name, status)
     by_number: dict[str, tuple[str, str | None]] = field(default_factory=dict)
-    # case-folded legacy office name -> padded number
+    # name_key(legacy office name) -> padded number
     by_name: dict[str, str] = field(default_factory=dict)
     rows: int = 0
 
@@ -62,7 +74,7 @@ class Lotl:
                 lotl.by_number[number] = (name, status)
                 if active:
                     active_number.add(number)
-            key = name.casefold() if name else None
+            key = name_key(name) if name else None
             if key and number and (key not in lotl.by_name or (active and key not in active_name)):
                 lotl.by_name[key] = number
                 if active:
@@ -102,19 +114,27 @@ def pad(value) -> str | None:
     return f"{number}_{match.group(2)}" if match.group(2) else number
 
 
+def _number(value) -> str | None:
+    """A row's profit center number, padded; 'PC0094' is read as 0094."""
+    text = _value(value)
+    if text and re.match(r"^\s*pc[\s_\-]?\d", text, flags=re.IGNORECASE):
+        return pc_number(text)
+    return pad(text)
+
+
 def resolve(name, number, pc: str | None, lotl: Lotl) -> tuple[str | None, str | None, str]:
-    """(name, number, status) for one row. ``pc``: the file's pc_id (PC0796)."""
-    name = (str(name).strip() or None) if name is not None else None
-    number = pad(number)
+    """(name, number, status) for one row. ``pc``: the row's load's pc_id (PC0796)."""
+    name = _value(name)
+    number = _number(number)
     if lotl.empty:
         return name, number, UNAVAILABLE
     if name and number:
-        expected = lotl.by_name.get(name.casefold())
+        expected = lotl.by_name.get(name_key(name))
         if expected is None:
             return name, number, NO_MATCH
         return (name, number, KEPT) if expected == number else (name, expected, CORRECTED)
     if name:
-        expected = lotl.by_name.get(name.casefold())
+        expected = lotl.by_name.get(name_key(name))
         return (name, expected, FILLED_NUMBER) if expected else (name, None, NO_MATCH)
     if number:
         return None, number, NAME_MISSING  # not a case the document covers: flagged, kept

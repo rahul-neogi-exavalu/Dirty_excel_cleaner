@@ -55,11 +55,12 @@ def by_target(suggestion):
     return {candidate.silver_column: candidate for candidate in suggestion.candidates}
 
 
-def test_saved_mapping_is_reused_including_an_ignore():
+def test_saved_mapping_is_reused_but_an_ignore_is_never_preselected():
+    # Ignores are not saved; a column without a saved mapping is left for the reviewer.
     found, _ = run(["premium_amt", "notes"], saved={"premium_amt": "premium", "notes": None})
     assert found["premium_amt"].silver_column == "premium" and matching.SAVED in methods(found["premium_amt"])
-    assert found["notes"].ignored and found["notes"].decided
-    assert found["notes"].selection == matching.RECOMMENDED
+    assert not found["notes"].ignored and not found["notes"].decided
+    assert found["notes"].selection == matching.NONE
 
 
 def test_a_name_approved_for_another_table_is_suggested():
@@ -501,8 +502,9 @@ def test_every_drt_label_has_a_silver_column():
 
 def test_typed_cleansing_follows_each_column_type():
     columns = {column.name: column for column in CATALOG}
+    # A percent sign divides by 100, so every source lands on one scale.
     rate, bad = cleanse.by_type(pl.Series("x", ["12.5%", "0.123456", "abc"]), columns["commission_pct"])
-    assert rate.to_list() == [Decimal("12.500000"), Decimal("0.123456"), None] and bad == 1
+    assert rate.to_list() == [Decimal("0.125000"), Decimal("0.123456"), None] and bad == 1
     month, _ = cleanse.by_type(pl.Series("x", ["Jun", "7", "July"]), columns["policy_effective_month"])
     assert month.to_list() == [6, 7, 7]
     flag, bad = cleanse.by_type(pl.Series("x", ["Y", "no", "maybe"]), columns["is_mga"])
@@ -549,8 +551,78 @@ def test_transform_writes_exactly_the_silver_schema():
     row = silver.row(0, named=True)
     assert row["policy_effective_date"] == row["accounting_effective_date"] == date(2026, 3, 5)
     assert (row["policy_effective_year"], row["policy_effective_month"]) == (2026, 3)  # derived
-    assert row["premium"] == Decimal("1200.50") and row["commission_pct"] == Decimal("12.000000")
+    assert row["premium"] == Decimal("1200.50") and row["commission_pct"] == Decimal("0.120000")
     assert (row["source_table"], row["source_file"], row["ingestion_timestamp"]) == ("bronze.ext_pc0101_arr", "f.xlsx", stamp)
     assert (row["source_data_period_start_date"], row["source_data_period_end_date"],
             row["source_data_period_type"]) == (date(2026, 1, 1), date(2026, 6, 30), "DATE_RANGE")
     assert row["row_hash"] and row["business_key_hash"] and quality["rows"] == 1
+
+
+# --- cleansing edge cases ------------------------------------------------------------
+
+
+def test_a_two_digit_year_is_not_a_date_and_serials_are_bounded():
+    values = ["1/5/26", "99999", "12345678", "2026-01-05 13:45:00.123", "2026-01-05T08:00:00", "9999-12-31"]
+    parsed, invalid = cleanse.dates(pl.Series("d", values))
+    assert parsed.to_list() == [None, None, None, date(2026, 1, 5), date(2026, 1, 5), date(9999, 12, 31)]
+    assert invalid == 3
+
+
+def test_decimals_are_read_exactly_and_strictly():
+    values = ["$(250.00)", "(12%)", "1.005", "0.125", "1 200,50", "USD 100", "1,2345", "1.2E+03"]
+    parsed, invalid = cleanse.decimals(pl.Series("p", values), 18, 2)
+    assert parsed.to_list() == [Decimal("-250.00"), Decimal("-0.12"), Decimal("1.01"), Decimal("0.13"),
+                                None, None, None, Decimal("1200.00")]
+    assert invalid == 3
+
+
+def test_amounts_keep_their_cents_beyond_float_precision():
+    parsed, _ = cleanse.decimals(pl.Series("p", ["9999999999999999.99"]), 18, 2)
+    assert parsed.to_list() == [Decimal("9999999999999999.99")]
+
+
+def test_a_percent_is_not_a_whole_number():
+    parsed, invalid = cleanse.integers(pl.Series("y", ["2026", "2026.0", "12%", "2,026"]))
+    assert parsed.to_list() == [2026, 2026, None, 2026] and invalid == 1
+
+
+# --- profit center edge cases --------------------------------------------------------
+
+
+def test_text_null_is_missing_and_pc_numbers_are_read():
+    assert profit_center.resolve("null", "N/A", "PC0303", LOTL) == (
+        "Columbus Office", "0303", profit_center.FILLED_NAME)
+    assert profit_center.resolve("Dayton Office", "PC0094", "PC0303", LOTL) == (
+        "Dayton Office", "0094", profit_center.KEPT)
+
+
+def test_lotl_names_match_across_spacing_case_and_dashes():
+    lotl = profit_center.Lotl.from_rows([("423", "BSG California – legacy Hull Stockton", "Active"),
+                                         ("360", "N/A do not show\nCorp-Accession (Bridge)", "Active")])
+    assert profit_center.resolve("bsg california - legacy  hull stockton", None, None, lotl)[1:] == (
+        "0423", profit_center.FILLED_NUMBER)
+    assert profit_center.resolve("N/A do not show Corp-Accession (Bridge)", None, None, lotl)[1] == "0360"
+
+
+def test_each_row_takes_its_own_loads_profit_center():
+    from ahi_silver import transform
+
+    frame = pl.DataFrame({"premium_amt": ["1", "2"], "_ingestion_id": ["a", "b"],
+                          "_source_file": ["a.xlsx", "b.xlsx"], "_source_sheet": [None, None]})
+    context = transform.Context("pc0094", "bronze.ext_pc0094_arr", None, {
+        "a": transform.LoadInfo("a.xlsx", pc_id="PC0094"), "b": transform.LoadInfo("b.xlsx", pc_id="PC0515")})
+    silver, quality = transform.transform(frame, [("premium_amt", "premium")], CATALOG, "PC0094", LOTL, context,
+                                          extras=True)
+    rows = silver.select(["profit_center_name", "profit_center_number", "_ingestion_id", "_pc_status"]).rows()
+    assert rows == [("Dayton Office", "0094", "a", "filled_name"), ("Toledo Office", "0515", "b", "filled_name")]
+
+
+def test_the_cleansed_extras_name_the_unreadable_values():
+    from ahi_silver import transform
+
+    frame = pl.DataFrame({"premium_amt": ["1", "abc"], "eff": ["bad", "2026-01-02"], "_ingestion_id": ["a", "a"],
+                          "_source_file": ["a.xlsx"] * 2, "_source_sheet": [None, None]})
+    silver, _ = transform.transform(frame, [("premium_amt", "premium"), ("eff", "policy_effective_date")], CATALOG,
+                                    "PC0094", LOTL, transform.Context(), extras=True)
+    assert silver.columns[-3:] == transform.EXTRAS
+    assert silver["_invalid_columns"].to_list() == [["policy_effective_date"], ["premium"]]

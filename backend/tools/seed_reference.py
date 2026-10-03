@@ -2,7 +2,7 @@
 
     python backend/tools/seed_reference.py                  # fill empty tables only
     python backend/tools/seed_reference.py --replace        # reload division_mapping and the LOTL
-    python backend/tools/seed_reference.py --replace-drt    # also reload drt_column_mapping (!)
+    python backend/tools/seed_reference.py --replace-drt    # also reload drt_column_mapping and its labels (!)
     python backend/tools/seed_reference.py --add-lotl extra.csv   # add rows to the LOTL
 
 Uses the database in backend/.env (or .env). The tables are filled automatically the first
@@ -49,9 +49,7 @@ def add_lotl(path: Path) -> int:
 def seed(replace: bool = False, replace_drt: bool = False) -> dict[str, int]:
     with db.connection() as conn:
         loaded = reference_service.seed_control(conn, replace=replace)
-        count = reference_service.ensure_drt_table(conn, silver_service.catalog(), replace=replace_drt)
-        if count:
-            loaded[f"{config.SILVER_SCHEMA}.{reference_service.DRT_TABLE}"] = count
+        loaded.update(reference_service.seed_silver(conn, silver_service.catalog(), replace=replace_drt))
     return loaded
 
 

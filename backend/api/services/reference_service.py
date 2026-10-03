@@ -5,10 +5,12 @@
 | ``<control>.division_mapping``     | division_table_details.xlsx         | bronze ``division_name`` by profit center |
 | ``<control>.lotl``                 | pc_name_pc_number_from_lotl.xlsx    | Silver profit center name / number     |
 | ``<silver>.drt_column_mapping``    | drt_column_mapping.xlsx             | the approved column mapping            |
+| ``<control>.drt_label``            | drt_column_mapping.xlsx (DRT_Column)| the DRT labels the business uses       |
 
 A table is filled from its workbook only while it is empty, so rows added or changed
 in the database (approved mappings, a corrected LOTL) are never overwritten.
-``backend/tools/seed_reference.py --replace`` reloads them on purpose.
+``backend/tools/seed_reference.py --replace`` reloads them on purpose. The tables are
+created by the migrations; nothing here runs DDL.
 
 The LOTL is loaded exactly as the workbook holds it: every row, every cell as written
 (the text ``null`` stays ``null``, line breaks in names stay), under the workbook's own
@@ -34,6 +36,7 @@ DIVISION_COLUMNS = ("division", "international_office", "profit_center")
 LOTL_COLUMNS = ("profit_center_number", "legacy_office_name", "status")
 DRT_COLUMNS = ("profit_center", "pc_column", "drt_column", "silver_column_name")
 DRT_TABLE = "drt_column_mapping"
+LABEL_TABLE = "drt_label"
 
 
 def _ident(name: str):
@@ -156,33 +159,93 @@ def seed_control(conn, replace: bool = False) -> dict[str, int]:
     return loaded
 
 
-def ensure_drt_table(conn, columns_catalog, replace: bool = False) -> int:
-    """Create ``<silver>.drt_column_mapping`` if needed and fill it from its workbook when empty.
+def seed_silver(conn, columns_catalog, replace: bool = False) -> dict[str, int]:
+    """Fill the business's DRT labels and the DRT column mapping from their workbook.
 
-    Exactly the business's columns plus ``silver_column_name``. One source column may map
-    to two Silver columns, so there is no primary key; a unique index stops duplicates.
-    An ignored column is a row with no drt_column and no silver_column_name.
+    The tables themselves are created by migration 005. ``drt_column_mapping`` holds
+    exactly the business's columns plus ``silver_column_name``; one source column may map
+    to two Silver columns, so there is no primary key and a unique index stops duplicates.
+    Each table is filled only while it is empty, unless ``replace``. The first time the
+    labels are loaded, labels the app once invented for other Silver columns are cleared.
     """
-    from psycopg import sql
-
-    schema = _ident(config.SILVER_SCHEMA)
-    conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
-    conn.execute(sql.SQL(
-        "CREATE TABLE IF NOT EXISTS {}.{} (profit_center text NOT NULL, pc_column text NOT NULL, "
-        "drt_column text, silver_column_name text)").format(schema, _ident(DRT_TABLE)))
-    conn.execute(sql.SQL(
-        "CREATE UNIQUE INDEX IF NOT EXISTS drt_column_mapping_unique ON {}.{} "
-        "(profit_center, pc_column, coalesce(silver_column_name, ''), coalesce(drt_column, ''))").format(
-            schema, _ident(DRT_TABLE)))
+    loaded = {}
+    if replace or _empty(conn, config.CONTROL_SCHEMA, LABEL_TABLE):
+        labels = drt_labels_from_file()
+        if labels:
+            loaded[f"{config.CONTROL_SCHEMA}.{LABEL_TABLE}"] = _insert(
+                conn, config.CONTROL_SCHEMA, LABEL_TABLE, ("label",), [(label,) for label in labels], replace)
+            cleared = clear_unknown_labels(conn)
+            if cleared:
+                log.info("DRT column mapping: %s label(s) the business does not use were cleared", cleared)
     if replace or _empty(conn, config.SILVER_SCHEMA, DRT_TABLE):
         rows = [row for row in drt_rows_from_file(columns_catalog) if row[0] and row[1]]
         # The workbook repeats a few rows exactly; the unique index would refuse them.
         rows = list(dict.fromkeys(rows))
         if rows:
-            count = _insert(conn, config.SILVER_SCHEMA, DRT_TABLE, DRT_COLUMNS, rows, replace)
-            log.info("DRT column mapping loaded: %s rows", count)
-            return count
-    return 0
+            loaded[f"{config.SILVER_SCHEMA}.{DRT_TABLE}"] = _insert(
+                conn, config.SILVER_SCHEMA, DRT_TABLE, DRT_COLUMNS, rows, replace)
+    if loaded:
+        log.info("Reference data loaded: %s", loaded)
+    return loaded
+
+
+def drt_labels_from_file() -> list[str]:
+    """The workbook's distinct DRT_Column values, trimmed, in first-seen order."""
+    labels = (drt.strip() for _, _, drt in read_workbook(DRT_FILE, 3, keep_text=True) if drt and drt.strip())
+    return list(dict.fromkeys(labels))
+
+
+def business_labels(conn) -> list[str]:
+    """The DRT labels the business uses."""
+    from psycopg import sql
+
+    if conn.execute("SELECT to_regclass(%s)", [f'"{config.CONTROL_SCHEMA}"."{LABEL_TABLE}"']).fetchone()[0] is None:
+        return []
+    return [row[0] for row in conn.execute(sql.SQL("SELECT label FROM {}.{} ORDER BY label").format(
+        _ident(config.CONTROL_SCHEMA), _ident(LABEL_TABLE)))]
+
+
+def drt_labels(conn, columns_catalog) -> dict[str, str]:
+    """Silver column -> the business's DRT label for it, for the columns that have one."""
+    from ahi_silver.catalog import silver_name_for_drt
+
+    found = {}
+    for label in business_labels(conn):
+        silver = silver_name_for_drt(label, columns_catalog)
+        if silver:
+            found.setdefault(silver, label)
+    return found
+
+
+def clear_unknown_labels(conn) -> int:
+    """Set drt_column to NULL where it is not one of the business's labels.
+
+    The app used to write the Silver catalog's label for every mapped column ("Producer
+    Office Zipcode"), which the business never uses. A row whose twin (same profit center,
+    source column and Silver column) would then be identical is deleted instead.
+    """
+    from psycopg import sql
+
+    from ahi_silver.catalog import loose
+
+    known = {loose(label) for label in business_labels(conn)}
+    if not known:
+        return 0
+    table = sql.SQL("{}.{}").format(_ident(config.SILVER_SCHEMA), _ident(DRT_TABLE))
+    present = [row[0] for row in conn.execute(sql.SQL("SELECT DISTINCT drt_column FROM {} WHERE drt_column IS NOT NULL")
+                                              .format(table))]
+    unknown = [label for label in present if loose(label) not in known]
+    if not unknown:
+        return 0
+    # A twin with no label or the business's label is kept; of two unknown-label twins, the first.
+    conn.execute(sql.SQL(
+        "DELETE FROM {t} a USING {t} b WHERE a.drt_column = ANY(%s) AND a.ctid <> b.ctid "
+        "AND a.profit_center = b.profit_center AND a.pc_column = b.pc_column "
+        "AND a.silver_column_name IS NOT DISTINCT FROM b.silver_column_name "
+        "AND (b.drt_column IS NULL OR NOT (b.drt_column = ANY(%s)) OR b.ctid < a.ctid)").format(t=table),
+        [unknown, unknown])
+    return conn.execute(sql.SQL("UPDATE {} SET drt_column = NULL WHERE drt_column = ANY(%s)").format(table),
+                        [unknown]).rowcount
 
 
 def divisions(conn) -> list[tuple]:

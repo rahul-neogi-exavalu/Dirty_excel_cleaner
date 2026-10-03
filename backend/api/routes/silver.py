@@ -27,13 +27,19 @@ class MappingEdit(BaseModel):
     also: list[str] | None = None
 
 
-class SavedMappingEdit(BaseModel):
-    """One DRT column mapping row, found by profit center, source column and its
-    current Silver column (a source column can have two rows), and its new target."""
+class SavedMappingRow(BaseModel):
+    """One DRT column mapping row, found by all four of its values (a source column can
+    have two rows; the four together name exactly one)."""
 
     profit_center: str
     pc_column: str
+    drt_column: str | None = None
     silver_column_name: str | None = None
+
+
+class SavedMappingEdit(SavedMappingRow):
+    """The row, and the Silver column it should load into instead."""
+
     new_silver_column_name: str | None = None
 
 
@@ -52,7 +58,7 @@ def run_out(run: Run) -> dict:
         "reviewed_by": run.reviewed_by,
         "notes": run.notes,
         "cleanup": run.cleanup,
-        "lotl_rows": run.lotl.rows,
+        "lotl_rows": run.lotl_rows,
         "blockers": silver_service.problems(run),
         "result": run.result,
         "created_at": run.created_at,
@@ -63,11 +69,15 @@ def run_out(run: Run) -> dict:
                 "table_name": review.table_name,
                 "source_system": review.source_system,
                 "pc_id": review.pc_id,
+                "pc_ids": review.pc_ids,
                 "loads": [vars(load) for load in review.loads],
                 "quality": review.quality,
                 "mapping": [
                     {
                         "bronze_column": s.bronze_column,
+                        # The header as the source file wrote it (None for loads made
+                        # before headers were kept).
+                        "source_header": review.headers.get(s.bronze_column),
                         "silver_column": s.silver_column,
                         "also": s.also,
                         "ignored": s.ignored,
@@ -124,8 +134,8 @@ async def create_run(request: RunCreate) -> dict:
 
 
 @router.get("/runs/{run_id}")
-def get_run(run_id: str) -> dict:
-    return run_out(silver_service.get_run(run_id))
+async def get_run(run_id: str) -> dict:
+    return run_out(await run_in_threadpool(silver_service.get_run, run_id))
 
 
 @router.patch("/runs/{run_id}/mapping")
@@ -160,8 +170,16 @@ async def saved_mapping() -> list[dict]:
 @router.patch("/mapping")
 async def edit_saved_mapping(request: SavedMappingEdit) -> dict:
     return await run_in_threadpool(
-        silver_service.edit_saved_mapping, request.profit_center, request.pc_column,
+        silver_service.edit_saved_mapping, request.profit_center, request.pc_column, request.drt_column,
         request.silver_column_name, request.new_silver_column_name,
+    )
+
+
+@router.delete("/mapping", status_code=204)
+async def delete_saved_mapping(request: SavedMappingRow) -> None:
+    await run_in_threadpool(
+        silver_service.delete_saved_mapping, request.profit_center, request.pc_column, request.drt_column,
+        request.silver_column_name,
     )
 
 

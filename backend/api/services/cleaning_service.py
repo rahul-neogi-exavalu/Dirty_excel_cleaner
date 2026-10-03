@@ -482,6 +482,7 @@ def _write(job: Job, source, stem: str, outputs) -> list[OutputRecord]:
                 inferred=inferred,
                 file=output.file,
                 metadata_file=output.metadata_file,
+                source_headers=dict(output.source_headers),
             )
         )
     return records
