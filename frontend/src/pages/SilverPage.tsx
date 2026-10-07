@@ -39,7 +39,7 @@ import type {
   SilverVote,
 } from "../api/types";
 import { PageHeader, SectionCard } from "../components/layout/Layout";
-import { PagedBands } from "../components/MappingBands";
+import { PagedBands, type Measure } from "../components/MappingBands";
 import { Badge } from "../components/ui/Badge";
 import { Button, IconButton } from "../components/ui/Button";
 import { Checkbox, SearchInput } from "../components/ui/Controls";
@@ -479,9 +479,9 @@ function TableMapping({
 }) {
   const drt = useMemo(() => new Map(targetsOf(catalog).map((column) => [column.name, column])), [catalog]);
   const bronze = useMemo(() => new Map(table.mapping.map((row) => [row.bronze_column, row])), [table.mapping]);
-  const mapped = table.targets.filter((pick) => pick.bronze_column);
-  const open = table.targets.filter((pick) => !pick.bronze_column);
-  const unloaded = table.mapping.filter((row) => !row.silver_column);
+  const mapped = useMemo(() => table.targets.filter((pick) => pick.bronze_column), [table.targets]);
+  const open = useMemo(() => table.targets.filter((pick) => !pick.bronze_column), [table.targets]);
+  const unloaded = useMemo(() => table.mapping.filter((row) => !row.silver_column), [table.mapping]);
   // A table with nothing mapped yet opens on what needs choosing.
   const [tab, setTab] = useState<MappingTab>(mapped.length ? "mapped" : "open");
   const quality = table.quality;
@@ -493,6 +493,8 @@ function TableMapping({
   const bronzeBottom = (pick: SilverPick) => (
     <BronzePick pick={pick} bronze={bronze} busy={busy} onChange={(value) => onAssign(pick.silver_column, value)} />
   );
+  const pickWidth = (pick: SilverPick, measure: Measure) =>
+    Math.max(silverHeadWidth(pick, drt.get(pick.silver_column), measure), bronzePickWidth(pick, bronze, measure));
 
   return (
     <SectionCard
@@ -525,7 +527,7 @@ function TableMapping({
       <TabPanel idPrefix={`map-${table.table_name}`} id="mapped" active={tab === "mapped"}>
         {mapped.length ? (
           <PagedBands items={mapped} keyOf={(pick) => pick.silver_column} caption={`DRT columns mapped in ${table.table_name}`}
-            noun="DRT column" reset={tab} top={silverTop} bottom={bronzeBottom} />
+            noun="DRT column" reset={tab} top={silverTop} bottom={bronzeBottom} width={pickWidth} />
         ) : (
           <EmptyState compact icon={<Columns3 />} title="No DRT column mapped yet" description="Choose bronze columns on the Not mapped tab." />
         )}
@@ -537,7 +539,8 @@ function TableMapping({
               No bronze column was recommended for these. Choose one where the file has it; a DRT column left here loads empty.
             </p>
             <PagedBands items={open} keyOf={(pick) => pick.silver_column} caption={`DRT columns not mapped in ${table.table_name}`}
-              noun="DRT column" reset={tab} top={silverTop} bottom={bronzeBottom} attention={(pick) => pick.candidates.length > 0} />
+              noun="DRT column" reset={tab} top={silverTop} bottom={bronzeBottom} width={pickWidth}
+              attention={(pick) => pick.candidates.length > 0} />
           </>
         ) : (
           <EmptyState compact icon={<Check />} title="Every DRT column is mapped" description="Nothing left to choose for this table." />
@@ -551,6 +554,7 @@ function TableMapping({
             </p>
             <PagedBands items={unloaded} keyOf={(row) => row.bronze_column} caption={`Bronze columns of ${table.table_name} not loaded`}
               noun="bronze column" reset={tab} topLabel="Bronze column" bottomLabel="Load into"
+              width={(row, measure) => Math.max(bronzeCellWidth(row, measure), loadIntoWidth(row, measure))}
               top={(row) => <BronzeCell row={row} />}
               bottom={(row) => <LoadInto row={row} picks={table.targets} drt={drt} busy={busy} onAssign={onAssign} />} />
           </>
@@ -575,14 +579,75 @@ function TableMapping({
   );
 }
 
+/* ---- what a cell needs, measured before it is drawn ------------------------ */
+
+/** A closed select around its value: padding, gap, chevron, border. */
+const SELECT_CHROME = 2 * 12 + 8 + 16 + 2;
+/** Sample values are data, not names: shown in full up to this width. */
+const SAMPLES_MAX = 220;
+/** A small badge around its text: padding, icon, gap, border. */
+const BADGE_CHROME = 2 * 8 + 12 + 4 + 2;
+
+const votesWidth = (votes: SilverVote[], measure: Measure) =>
+  votes.reduce((sum, vote, index) => {
+    const score = vote.second_choice ? "2nd choice" : SCORED.has(vote.method) && vote.score < 0.995 ? pct(vote.score) : "";
+    return sum + (index ? 10 : 0) + 6 + 4 + measure(METHOD[vote.method], "caption") + (score ? 4 + measure(score, "caption") : 0);
+  }, 0);
+const samplesWidth = (samples: string[], measure: Measure) => Math.min(measure(samples.join(", "), "caption"), SAMPLES_MAX);
+const quoted = (header: string) => `“${header}”`;
+/** The header in full beside the samples, on one line. */
+const sourceLineWidth = (row: SilverMappingRow, measure: Measure) => {
+  const header = row.source_header && row.source_header !== row.bronze_column ? measure(quoted(row.source_header), "caption") : 0;
+  const samples = row.samples.length ? samplesWidth(row.samples, measure) : 0;
+  return header && samples ? header + 6 + samples : header + samples;
+};
+const openLine = (pick: SilverPick) =>
+  pick.candidates.length
+    ? `Votes for ${pick.candidates[0].bronze_column}${pick.candidates.length > 1 ? ` +${pick.candidates.length - 1} more` : ""}`
+    : "No method found a match";
+const pickPlaceholder = (pick: SilverPick) =>
+  pick.candidates.length ? `${plural(pick.candidates.length, "suggestion")}: choose…` : "Choose a bronze column…";
+
+function silverHeadWidth(pick: SilverPick, column: SilverColumnDef | undefined, measure: Measure) {
+  const label = column ? measure(column.drt_name, "caption") + 6 + measure(column.data_type, "chip") + 14 : 0;
+  return Math.max(measure(pick.silver_column, "name"), label);
+}
+
+function bronzePickWidth(pick: SilverPick, bronze: Map<string, SilverMappingRow>, measure: Measure) {
+  const select = measure(pick.bronze_column ?? pickPlaceholder(pick), "value") + SELECT_CHROME;
+  if (!pick.bronze_column) return Math.max(select, measure(openLine(pick), "caption"));
+  const chosen = bronze.get(pick.bronze_column);
+  const votes = (pick.votes.length ? votesWidth(pick.votes, measure) : measure("No votes", "caption"))
+    + (pick.selection === "manual" ? 10 + measure("Manual", "caption") + BADGE_CHROME : 0);
+  return Math.max(select, votes, chosen ? sourceLineWidth(chosen, measure) : 0);
+}
+
+function bronzeCellWidth(row: SilverMappingRow, measure: Measure) {
+  return Math.max(measure(row.bronze_column, "name"), sourceLineWidth(row, measure));
+}
+
+const closestLine = (row: SilverMappingRow) => {
+  const best = row.candidates.find((candidate) => candidate.silver_column && candidate.support);
+  return best?.silver_column ? `Closest: ${best.silver_column}` : "No method found a match";
+};
+
+function loadIntoWidth(row: SilverMappingRow, measure: Measure) {
+  return Math.max(measure("Load into…", "value") + SELECT_CHROME, measure(closestLine(row), "caption"));
+}
+
+/* ---- the cells: one line per fact, sized to fit --------------------------- */
+
 /** The Silver side of a pairing, fixed: the DRT column, its business label and its type. */
 function SilverHead({ pick, column }: { pick: SilverPick; column?: SilverColumnDef }) {
   return (
     <div className="min-w-0">
-      <p className="truncate font-mono text-[12.5px] font-semibold text-ink-900" title={pick.silver_column}>{pick.silver_column}</p>
-      <p className="truncate text-caption text-ink-500" title={column ? `DRT column: ${column.drt_name} (${column.data_type})` : undefined}>
-        {column ? `${column.drt_name} · ${column.data_type}` : ""}
-      </p>
+      <p className="truncate font-mono text-[12.5px] font-semibold leading-5 text-ink-900">{pick.silver_column}</p>
+      {column && (
+        <p className="mt-1 flex items-center gap-1.5 text-caption leading-4 text-ink-500">
+          <span className="truncate" title="DRT column">{column.drt_name}</span>
+          <span className="shrink-0 rounded bg-white px-1.5 py-px font-mono text-[10.5px] text-ink-500 ring-1 ring-inset ring-ink-200">{column.data_type}</span>
+        </p>
+      )}
     </div>
   );
 }
@@ -614,7 +679,7 @@ function BronzePick({
         description: (
           <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
             <Votes votes={candidate.votes} />
-            {row?.source_header && row.source_header !== row.bronze_column && <span>“{row.source_header}”</span>}
+            {row?.source_header && row.source_header !== row.bronze_column && <span>{quoted(row.source_header)}</span>}
             {row && others(row) && <span className="text-ink-500">{others(row)}</span>}
           </span>
         ),
@@ -627,7 +692,7 @@ function BronzePick({
         value: row.bronze_column,
         label: row.bronze_column,
         group: "All bronze columns",
-        description: [row.source_header && row.source_header !== row.bronze_column ? `“${row.source_header}”` : null,
+        description: [row.source_header && row.source_header !== row.bronze_column ? quoted(row.source_header) : null,
           row.samples.slice(0, 2).join(", ") || null, others(row)].filter(Boolean).join(" · ") || undefined,
       }));
     return [...suggested, ...rest, { value: NONE, label: "None", group: "Not loaded", description: "This DRT column loads empty" }];
@@ -652,7 +717,7 @@ function BronzePick({
         onChange={(value) => onChange(value === NONE ? null : value)}
         label={`Bronze column for ${pick.silver_column}`}
         hideLabel
-        placeholder={pick.candidates.length ? `${plural(pick.candidates.length, "suggestion")}: choose…` : "Choose a bronze column…"}
+        placeholder={pickPlaceholder(pick)}
         disabled={busy}
         width={400}
         className="w-full"
@@ -661,22 +726,17 @@ function BronzePick({
       {pick.bronze_column ? (
         <>
           <Tooltip content={detail}>
-            <span tabIndex={0} className="mt-1.5 inline-flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded focus-visible:outline-none focus-visible:shadow-focus">
-              {pick.votes.length ? <Votes votes={pick.votes} /> : <span className="text-caption text-ink-500">No votes</span>}
+            <span tabIndex={0} className="mt-1.5 flex items-center gap-x-2.5 rounded focus-visible:outline-none focus-visible:shadow-focus">
+              {pick.votes.length ? <Votes votes={pick.votes} className="flex-nowrap" /> : <span className="text-caption text-ink-500">No votes</span>}
               {pick.selection === "manual" && <Badge tone="neutral" icon={<UserCheck />}>Manual</Badge>}
             </span>
           </Tooltip>
-          {chosen && (
-            <p className="mt-0.5 truncate text-caption text-ink-500"
-              title={[chosen.source_header && `Header in the file: ${chosen.source_header}`, chosen.samples.join(", ")].filter(Boolean).join("\n")}>
-              {[chosen.source_header && chosen.source_header !== chosen.bronze_column ? `“${chosen.source_header}”` : null,
-                chosen.samples.join(", ") || null].filter(Boolean).join(" · ")}
-            </p>
-          )}
+          {chosen && <SourceLine row={chosen} />}
         </>
       ) : (
-        <p className="mt-1.5 text-caption text-ink-500">
-          {pick.candidates.length ? `Votes for ${pick.candidates.map((c) => c.bronze_column).slice(0, 2).join(", ")}${pick.candidates.length > 2 ? "…" : ""}` : "No method found a match"}
+        <p className="mt-1.5 truncate text-caption leading-4 text-ink-500"
+          title={pick.candidates.length ? `Voted for: ${pick.candidates.map((c) => c.bronze_column).join(", ")}` : undefined}>
+          {openLine(pick)}
         </p>
       )}
     </div>
@@ -714,14 +774,11 @@ function LoadInto({
         ),
       }));
   }, [row, picks, drt]);
-  const best = row.candidates.find((candidate) => candidate.silver_column && candidate.support);
   return (
     <div className="min-w-0">
       <Select<string> value={null} options={options} onChange={(silver) => onAssign(silver, row.bronze_column)}
         label={`Load ${row.bronze_column} into`} hideLabel placeholder="Load into…" disabled={busy} width={400} className="w-full" />
-      <p className="mt-1.5 truncate text-caption text-ink-500" title={row.reason}>
-        {best ? `Closest: ${best.silver_column}` : "No method found a match"}
-      </p>
+      <p className="mt-1.5 truncate text-caption leading-4 text-ink-500" title={row.reason}>{closestLine(row)}</p>
     </div>
   );
 }
@@ -745,17 +802,26 @@ function Votes({ votes, className }: { votes: SilverVote[]; className?: string }
   );
 }
 
+/** A bronze column's header as the file wrote it, in full, then its sample values. */
+function SourceLine({ row }: { row: SilverMappingRow }) {
+  const header = row.source_header && row.source_header !== row.bronze_column ? row.source_header : null;
+  if (!header && !row.samples.length) return null;
+  return (
+    <p className="mt-1 flex min-w-0 items-baseline gap-1.5 text-caption leading-4">
+      {header && <span className="shrink-0 text-ink-600" title="Header in the file">{quoted(header)}</span>}
+      {row.samples.length > 0 && (
+        <span className="min-w-0 truncate text-ink-400" title={row.samples.join(", ")}>{row.samples.join(", ")}</span>
+      )}
+    </p>
+  );
+}
+
 /** The bronze side of a mapping: the column, its header as the file wrote it, and sample values. */
 function BronzeCell({ row }: { row: SilverMappingRow }) {
   return (
     <div className="min-w-0">
-      <p className="truncate font-mono text-[12.5px] font-medium text-ink-900" title={row.bronze_column}>{row.bronze_column}</p>
-      {row.source_header && row.source_header !== row.bronze_column && (
-        <p className="truncate text-caption text-ink-600" title={`Header in the file: ${row.source_header}`}>“{row.source_header}”</p>
-      )}
-      {row.samples.length > 0 && (
-        <p className="truncate text-caption text-ink-500" title={row.samples.join(", ")}>{row.samples.join(", ")}</p>
-      )}
+      <p className="truncate font-mono text-[12.5px] font-semibold leading-5 text-ink-900">{row.bronze_column}</p>
+      <SourceLine row={row} />
     </div>
   );
 }
@@ -882,6 +948,11 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
           reset={`${profitCenter}|${needle}`}
           bottomLabel="Source column"
           attention={(row) => !row.silver_column_name}
+          width={(row, measure) => Math.max(
+            measure(row.silver_column_name ?? "Not resolved", "value") + SELECT_CHROME,
+            measure(row.pc_column, "name") + 4 + 28,
+            measure(`${row.profit_center} · ${row.drt_column ? `DRT: ${row.drt_column}` : "No DRT column"}`, "caption"),
+          )}
           top={(row) => (
             <Select<string> value={row.silver_column_name} options={options} onChange={(value) => save(row, value)}
               label={`Silver column for ${row.pc_column} (${row.profit_center})`} hideLabel placeholder="Not resolved" width={300} className="w-full" />
@@ -889,8 +960,8 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
           bottom={(row) => (
             <div className="flex min-w-0 items-start gap-1">
               <div className="min-w-0 flex-1">
-                <p className="truncate font-mono text-[12.5px] font-medium text-ink-900" title={row.pc_column}>{row.pc_column}</p>
-                <p className="truncate text-caption text-ink-500" title={row.drt_column ? `DRT column: ${row.drt_column}` : undefined}>
+                <p className="truncate font-mono text-[12.5px] font-semibold leading-5 text-ink-900">{row.pc_column}</p>
+                <p className="mt-1 truncate text-caption leading-4 text-ink-500">
                   <span className="font-mono">{row.profit_center}</span> · {row.drt_column ? `DRT: ${row.drt_column}` : "No DRT column"}
                 </p>
               </div>

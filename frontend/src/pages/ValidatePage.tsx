@@ -44,6 +44,7 @@ import { Alert, EmptyState, ProgressBar, StatTile, useStableCallback, useToast }
 import { Tooltip } from "../components/ui/Overlay";
 import { Select } from "../components/ui/Select";
 import { formatDuration, formatNumber, plural } from "../lib/format";
+import { softBreaks } from "../lib/softBreaks";
 import { useWidth } from "../lib/useWidth";
 import { useNavigate, useWorkflow } from "../state/workflow";
 
@@ -84,9 +85,6 @@ const monthSpan = (first: string, last: string | null) => {
   }
   return `${monthLabel(first)} - ${monthLabel(last)}`;
 };
-/** Lets a long identifier wrap where its words meet (CommissionPct, gross_commission_amount), not mid-word. */
-const softBreaks = (text: string) =>
-  text.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=_)/).flatMap((part, index) => (index ? [<wbr key={index} />, part] : [part]));
 const dayLabel = (iso: string | null) =>
   iso ? new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }) : "—";
 
