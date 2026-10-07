@@ -203,7 +203,7 @@ sequenceDiagram
 
 | Table | Columns | Meaning |
 |---|---|---|
-| `drt_column_mapping` | `profit_center, pc_column, drt_column, silver_column_name`: the business's DRT column mapping plus `silver_column_name`, the silver_detail column a DRT label means (`InsuranceCompany Name` → `insurance_company_name`). | The saved mapping. It is seeded from `assets/drt_column_mapping.xlsx` (660 rows, 46 profit centers) and grows with every approved mapping, saved under the header the file wrote. `drt_column` is only one of the workbook's 21 labels (`<control>.drt_label`), else NULL. One source column may have two rows (two Silver columns). Ignores are never saved. A unique index stops duplicate rows. |
+| `drt_column_mapping` | `profit_center, pc_column, drt_column, silver_column_name`: the business's DRT column mapping plus `silver_column_name`, the silver_detail column a DRT label means (`InsuranceCompany Name` → `insurance_company_name`). | The saved mapping. It is seeded from `assets/drt_column_mapping.xlsx` (660 rows, 46 profit centers) and grows with every approved mapping, saved under the header the file wrote. `drt_column` is the business's DRT column for the row's Silver column: `<control>.drt_label` holds all 48 DRT columns of `silver_columns.csv` with their Silver columns (migration 008), kept in step at startup, which also fills `drt_column` on rows saved before the label was known. One source column may have two rows (two Silver columns). Ignores are never saved. A unique index stops duplicate rows. |
 | `silver_detail` | **Exactly** the 69 columns of the business's `silver_schema`, in order, typed as stated: `string` → text, `int` → integer, `bigint`, `boolean`, `date`, `timestamp` → timestamptz, `decimal(p,s)` → numeric(p,s). `ahi_policy_transaction_id` is an identity. | **Final Silver:** every source unified under one set of names. There are no internal columns: a bronze load's rows are found by `(source_table, source_file, ingestion_timestamp)`. |
 | `silver_aggregate` | **Exactly** the 75 columns of `silver_aggregate_schema` (`ahi_aggregate_id` identity). | Rebuilt per source system at profit center × accounting month (`PROFIT_CENTER_MONTH`); see §8. |
 
@@ -251,7 +251,9 @@ The methods **do not run one after another.** Each looks at every column on its 
 For example, take a bronze column `total_premium` against Silver columns `total_premium` and `premium`. Exact fails, fuzzy votes `premium`, and word2vec and the AI vote `total_premium`. The dropdown then lists:
 - **total_premium**: *Recommended*, Semantic + AI;
 - **premium**: Fuzzy;
-- then every other Silver column, then Ignore.
+- then every other Silver column.
+
+The reviewer sees it from the Silver side (below): `premium`'s dropdown lists `total_premium` (Fuzzy) among the bronze columns voted for it.
 
 The row is flagged *Split*. `test_every_method_votes_and_the_best_supported_candidate_is_recommended` pins this case.
 
@@ -267,10 +269,11 @@ The row is flagged *Split*. `test_every_method_votes_and_the_best_supported_cand
 | **The AI's second choice is listed, not counted.** | It helps the reviewer with an ambiguous name without inflating support. |
 
 **What the reviewer sees,** per row:
-- **The dropdown:**
-  - *Suggested by vote*: each candidate, the recommended one marked, with its votes and scores;
-  - *All Silver columns*;
-  - *Ignore*.
+- **Made from the Silver side.** The 48 DRT columns (the Silver columns with a `drt_column_name`) are fixed, each with a dropdown of bronze columns:
+  - *Suggested by vote*: the bronze columns any method voted for it, best first, the recommended one marked, with votes and scores;
+  - *All bronze columns*;
+  - *None*: the DRT column loads empty.
+  A bronze column no DRT column takes is not loaded. Tabs keep *Not mapped* DRT columns and *Bronze not loaded* columns apart, and every tab pages at least three bands at a time.
 - **Under the dropdown:** the votes behind the current choice. Hovering shows each method's reason.
 - **Flags:** *Manual* once the reviewer changes it, and *Split* when methods disagree. The Approval panel counts the split rows.
 
@@ -365,7 +368,7 @@ Per row, in `transform.transform`:
 | Gate | Rule |
 |---|---|
 | Which loads | All eligible loads are pre-selected; the reviewer can untick, for example a side lookup table. |
-| **The whole mapping** | Every row, including **Saved** ones, is shown with its candidates and votes, and approved together. Approval is blocked while any column is undecided or two columns target the same Silver column. |
+| **The whole mapping** | Every row, including **Saved** ones, is shown with its candidates and votes, and approved together. Approval is blocked only while two bronze columns feed one DRT column; a bronze column nothing takes is simply not loaded. |
 | **Disagreement** | Rows where methods voted for different columns are flagged *Split*, and the Approval panel counts them. |
 | **More than one target** | "+ Also load into" adds a further Silver column for a bronze column; a saved one-to-many row comes pre-filled. Extra targets count as taken: two columns may not load into the same Silver column. |
 | Saving | **Only on approval** is `drt_column_mapping` written: each column's rows become exactly its approved targets, under the profit center. Suggestions never are. |
@@ -409,8 +412,9 @@ Any failure rolls the whole run back and is recorded as a failed run.
    - the eligible loads are listed, plus a note if replaced loads will be removed;
    - click **Review mapping**.
 3. **For each bronze table:**
-   - check each row: the bronze column with sample values, the recommended Silver column and the votes behind it. Look at the rows flagged *Split* first;
-   - open a row's dropdown to pick another candidate (each shows which methods voted for it), any other Silver column, or **Ignore**;
+   - on *Mapped*, check each DRT column's bronze column, its sample values and the votes behind it;
+   - on *Not mapped*, choose a bronze column for the DRT columns the file has (or leave them: they load empty);
+   - glance at *Bronze not loaded* in case one belongs to a DRT column (*Load into*);
    - read the quality report.
 4. Click **Approve & load**; you approve as the signed-in user. The result shows rows loaded, replaced rows removed and mappings saved.
 5. **Mapping tab:** the DRT column mapping; filter by profit center, search, and change any row's Silver column.
@@ -445,6 +449,7 @@ Dependencies (in `requirements.txt`): `rapidfuzz`, `wordninja`, `google-genai`. 
 | `GET /api/silver/eligible` | Eligible loads, plus replaced loads whose rows will be removed |
 | `POST /api/silver/runs` | `{ingestion_ids}`: per column, the current choice (`selection`: recommended / manual / none), the `methods` behind it, `split`, and every `candidate` with its votes; plus a dry-run quality report. An empty list is allowed for a removal-only run. |
 | `GET /api/silver/runs/{id}` | The run: review, progress, result |
+| `PATCH /api/silver/runs/{id}/targets` | From the Silver side: `{table_name, silver_column, bronze_column}` (`null`: none). Each table also carries `targets`: every DRT column, its bronze column and the candidates voted for it. |
 | `PATCH /api/silver/runs/{id}/mapping` | `{table_name, bronze_column, silver_column, ignored}`, and/or `{also: [...]}` (the extra targets; sent alone it keeps the main choice) |
 | `POST /api/silver/runs/{id}/approve` | `{reviewed_by}`. Returns 409 `mapping_incomplete` or `plan_changed`. |
 | `GET` / `PATCH /api/silver/mapping` | The DRT column mapping. A row is edited by `{profit_center, pc_column, silver_column_name, new_silver_column_name}`, since one source column can have two rows. |
@@ -478,7 +483,7 @@ Dependencies (in `requirements.txt`): `rapidfuzz`, `wordninja`, `google-genai`. 
   - every row arrives with a recommended candidate and the methods behind it;
   - pre-filled mappings still need approval;
   - a reviewer's change is recorded as manual, and `silver_run` stores the votes;
-  - undecided columns get a 409;
+  - two bronze columns on one DRT column get a 409;
   - unification across sources;
   - the profit-center statuses;
   - dates and money;

@@ -4,12 +4,23 @@ from fastapi import APIRouter, Depends, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
+from ahi_silver import matching
+from ahi_silver.catalog import targets as drt_targets
+
 from .. import config
 from ..auth import User, require_user
 from ..services import silver_service
 from ..services.silver_service import Run
 
 router = APIRouter(prefix="/api/silver", tags=["silver"])
+
+
+class TargetEdit(BaseModel):
+    """From the Silver side: which bronze column loads this DRT column (None: none does)."""
+
+    table_name: str
+    silver_column: str
+    bronze_column: str | None = None
 
 
 class RunCreate(BaseModel):
@@ -49,6 +60,7 @@ class RunApprove(BaseModel):
 
 
 def run_out(run: Run) -> dict:
+    targets = drt_targets(silver_service.catalog())
     return {
         "id": run.id,
         "status": run.status,
@@ -103,18 +115,39 @@ def run_out(run: Run) -> dict:
                     }
                     for s in review.suggestions
                 ],
+                # The same review from the Silver side: every DRT column, the bronze column
+                # that loads it (or none), and the bronze columns voted for it, best first.
+                "targets": [
+                    {
+                        "silver_column": pick.silver_column,
+                        "bronze_column": pick.bronze_column,
+                        "selection": pick.selection,
+                        "votes": [_vote(v) for v in pick.votes],
+                        "candidates": [
+                            {"bronze_column": bronze, "recommended": c.recommended, "support": c.support,
+                             "votes": [_vote(v) for v in c.counted]}
+                            for bronze, c in pick.candidates
+                        ],
+                    }
+                    for pick in matching.by_silver(review.suggestions, targets)
+                ],
             }
             for review in run.tables
         ],
     }
 
 
+def _vote(vote) -> dict:
+    return {"method": vote.method, "score": vote.score, "reason": vote.reason, "second_choice": vote.second_choice}
+
+
 @router.get("/catalog")
 def silver_catalog() -> dict:
     return {
         "file": config.SILVER_COLUMNS_FILE.name,
-        # Every silver_detail column; role "mapped" ones are what a bronze column can map to.
-        "columns": [vars(column) for column in silver_service.catalog()],
+        # Every silver_detail column. ``target``: a DRT column, which a bronze column can map
+        # to; the dropdowns offer only these.
+        "columns": [{**vars(column), "target": column.is_target} for column in silver_service.catalog()],
         "aggregate_columns": [column.name for column in silver_service.aggregate_catalog()],
         "semantic": bool(config.WORD2VEC_PATH),
         "ai": config.AI_ENABLED,
@@ -144,6 +177,14 @@ async def edit_run_mapping(run_id: str, request: MappingEdit) -> dict:
         silver_service.update_mapping, run_id, request.table_name, request.bronze_column,
         request.silver_column, request.ignored, request.model_fields_set, request.also,
     )
+    return run_out(run)
+
+
+@router.patch("/runs/{run_id}/targets")
+async def assign_target(run_id: str, request: TargetEdit) -> dict:
+    """From the Silver side: which bronze column loads a DRT column, or none."""
+    run = await run_in_threadpool(
+        silver_service.assign_target, run_id, request.table_name, request.silver_column, request.bronze_column)
     return run_out(run)
 
 

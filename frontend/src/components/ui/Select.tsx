@@ -1,7 +1,10 @@
 import clsx from "clsx";
 import { Check, ChevronDown } from "lucide-react";
-import { Fragment, useEffect, useId, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { PopoverPanel, usePopover } from "./Overlay";
+
+/** How long after a key the next one still adds to the type-ahead word. */
+const TYPEAHEAD_MS = 700;
 
 export interface SelectOption<T extends string> {
   value: T;
@@ -73,6 +76,21 @@ export function Select<T extends string>({
     anchor.current?.focus();
   };
 
+  // Type-ahead: keys typed in quick succession build a word ("lob", "policy n"), so a long
+  // list is reached by name, not by its first letter alone.
+  const typed = useRef({ text: "", at: 0 });
+  const typing = () => Date.now() - typed.current.at < TYPEAHEAD_MS && typed.current.text !== "";
+  const typeAhead = (key: string) => {
+    const now = Date.now();
+    const text = (typing() ? typed.current.text : "") + key.toLowerCase();
+    typed.current = { text, at: now };
+    const usable = (index: number) => !options[index].disabled;
+    const indexes = options.map((_, index) => index).filter(usable);
+    const found = indexes.find((index) => options[index].label.toLowerCase().startsWith(text))
+      ?? indexes.find((index) => options[index].label.toLowerCase().includes(text));
+    if (found !== undefined) setActive(found);
+  };
+
   const onKeyDown = (event: React.KeyboardEvent) => {
     if (!open && ["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
       event.preventDefault();
@@ -84,12 +102,11 @@ export function Select<T extends string>({
     else if (event.key === "ArrowUp") (event.preventDefault(), move(-1));
     else if (event.key === "Home") (event.preventDefault(), setActive(0));
     else if (event.key === "End") (event.preventDefault(), setActive(options.length - 1));
+    // A space mid-word is part of the word; otherwise it picks, like Enter.
+    else if (event.key === " " && typing()) (event.preventDefault(), typeAhead(" "));
     else if (event.key === "Enter" || event.key === " ") (event.preventDefault(), choose(active));
     else if (event.key === "Tab") setOpen(false);
-    else if (event.key.length === 1) {
-      const index = options.findIndex((option) => option.label.toLowerCase().startsWith(event.key.toLowerCase()));
-      if (index >= 0) setActive(index);
-    }
+    else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) typeAhead(event.key);
   };
 
   return (

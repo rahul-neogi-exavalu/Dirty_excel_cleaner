@@ -46,7 +46,7 @@ import polars as pl
 from ahi_bronze import file_meta, naming
 from ahi_silver import catalog as catalog_module
 from ahi_silver import matching, normalize, profit_center, transform
-from ahi_silver.catalog import MAPPED, SilverColumn
+from ahi_silver.catalog import SilverColumn, targets as drt_targets
 from ahi_silver.matching import Suggestion
 
 from .. import config, db
@@ -601,11 +601,11 @@ def update_mapping(run_id: str, table: str, column: str, silver_column: str | No
     also were sent (all of the first two when not given). ``also``: the extra Silver
     columns the bronze column loads into, as a whole list."""
     columns_catalog = catalog()
-    targets = {c.name for c in columns_catalog if c.role == MAPPED}
+    targets = {c.name for c in drt_targets(columns_catalog)}
     fields = {"silver_column", "ignored"} if fields is None else fields
     for name in [silver_column, *(also or [])]:
         if name is not None and name not in targets:
-            raise ApiError(422, "unknown_silver_column", f"'{name}' is not a Silver column a bronze column can map to.",
+            raise ApiError(422, "unknown_silver_column", f"'{name}' is not a DRT column a bronze column can map to.",
                            field="silver_column")
     with db.connection() as conn:
         run = _read_run(conn, run_id, lock=True)
@@ -619,6 +619,28 @@ def update_mapping(run_id: str, table: str, column: str, silver_column: str | No
             matching.choose(suggestion, silver_column, ignored)
         if "also" in fields and also is not None:
             matching.set_also(suggestion, also)
+        _quality(review, columns_catalog, _lotl(conn), _frame(conn, review))
+        _write_run(conn, run)
+    return run
+
+
+def assign_target(run_id: str, table: str, silver_column: str, bronze_column: str | None) -> Run:
+    """The reviewer's choice from the Silver side: ``bronze_column`` loads ``silver_column``
+    (None: no bronze column does). See ``matching.assign``."""
+    columns_catalog = catalog()
+    if silver_column not in {c.name for c in drt_targets(columns_catalog)}:
+        raise ApiError(422, "unknown_silver_column", f"'{silver_column}' is not a DRT column a bronze column can map to.",
+                       field="silver_column")
+    with db.connection() as conn:
+        run = _read_run(conn, run_id, lock=True)
+        if run.status != DRAFT:
+            raise conflict("This run has already been approved.")
+        review = next((t for t in run.tables if t.table_name == table), None)
+        if review is None:
+            raise not_found("That table in the run")
+        if bronze_column is not None and bronze_column not in {s.bronze_column for s in review.suggestions}:
+            raise ApiError(422, "unknown_bronze_column", f"{table} has no column '{bronze_column}'.", field="bronze_column")
+        matching.assign(review.suggestions, silver_column, bronze_column)
         _quality(review, columns_catalog, _lotl(conn), _frame(conn, review))
         _write_run(conn, run)
     return run
@@ -666,12 +688,12 @@ def _still_valid(conn, run: Run, columns_catalog: list[SilverColumn]) -> None:
     """
     from psycopg import sql
 
-    names = {c.name for c in columns_catalog if c.role == MAPPED}
+    names = {c.name for c in drt_targets(columns_catalog)}
     for review in run.tables:
         for s in review.suggestions:
             for target in s.targets:
                 if target not in names:
-                    raise ApiError(409, "plan_changed", f"Silver column {target} no longer exists.",
+                    raise ApiError(409, "plan_changed", f"{target} is no longer a DRT column the mapping offers.",
                                    "The Silver column list changed. Start a new Silver run.")
         if _bronze_columns(conn, review.table_name) != review.columns:
             raise ApiError(409, "plan_changed", f"{review.table_name} changed since the review.",
@@ -1108,12 +1130,12 @@ def edit_saved_mapping(profit_center_code: str, pc_column: str, drt_column: str 
     from psycopg import errors, sql
 
     columns_catalog = catalog()
-    targets = {c.name for c in columns_catalog if c.role == MAPPED}
+    targets = {c.name for c in drt_targets(columns_catalog)}
     if not new_silver_column:
         raise ApiError(422, "silver_column_required", "Choose the Silver column this source column loads into.",
                        "To stop using this row, remove it instead.", field="new_silver_column_name")
     if new_silver_column not in targets:
-        raise ApiError(422, "unknown_silver_column", f"'{new_silver_column}' is not a Silver column a bronze column can map to.",
+        raise ApiError(422, "unknown_silver_column", f"'{new_silver_column}' is not a DRT column a bronze column can map to.",
                        field="new_silver_column_name")
     try:
         with db.connection() as conn:

@@ -4,11 +4,16 @@ Every column of the ``silver_detail`` table is listed, in table order, with its 
 exactly as the schema states it (``string``, ``int``, ``bigint``, ``boolean``, ``date``,
 ``timestamp``, ``decimal(18,2)``...). ``role`` says who fills it:
 
-* ``mapped`` -- a bronze column is mapped onto it (the targets the review offers);
+* ``mapped`` -- a business column: filled from the bronze column mapped onto it (or left
+  empty), and part of the row's hashes;
 * ``system`` -- the pipeline fills it (keys, hashes, lineage, timestamps, periods).
 
-``drt_column_name`` is the business's DRT label where one exists ("InsuranceCompany
-Name"); it is what the DRT column mapping table uses, and a second name to match against.
+``drt_column_name`` is the business's DRT column ("InsuranceCompany Name"). The DRT
+columns are the mapping's vocabulary: a mapped column with one is a *target*, offered to
+reviewers and matched against; a mapped column without one (a column the Silver schema
+carries that is not a DRT column) is never offered and stays empty. Every target's Silver
+name follows the lowercase_with_underscores convention ("Producer/Agency Name" ->
+producer_agency_name), and no two targets share a DRT column.
 The description lists synonyms, in parentheses, for the semantic and AI votes.
 """
 
@@ -20,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MAPPED, SYSTEM = "mapped", "system"
+# lowercase words joined by single underscores: producer_agency_name, policy_tran_id.
+SNAKE_CASE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
 _SIMPLE = {"string", "date", "int", "bigint", "boolean", "timestamp"}
 _DECIMAL = re.compile(r"decimal\((\d+),\s*(\d+)\)")
 # Older catalogs used these names.
@@ -34,6 +41,11 @@ class SilverColumn:
     business_key: bool
     description: str
     role: str = MAPPED
+
+    @property
+    def is_target(self) -> bool:
+        """A DRT column a bronze column can be mapped onto (see the module docstring)."""
+        return self.role == MAPPED and bool(self.drt_name)
 
     @property
     def kind(self) -> str:
@@ -95,8 +107,18 @@ def load(path: Path) -> list[SilverColumn]:
         raise ValueError(f"{path.name} lists no Silver columns")
     if len(set(names)) != len(names):
         raise ValueError(f"{path.name}: silver_column_name values must be unique")
-    if not any(column.role == MAPPED for column in columns):
-        raise ValueError(f"{path.name} lists no mapped Silver columns")
+    found = targets(columns)
+    if not found:
+        raise ValueError(f"{path.name} lists no DRT columns (mapped Silver columns with a drt_column_name)")
+    misnamed = [column.name for column in found if not SNAKE_CASE.fullmatch(column.name)]
+    if misnamed:
+        raise ValueError(f"{path.name}: a DRT column's silver_column_name must be lowercase_with_underscores; "
+                         f"rename {', '.join(misnamed)}")
+    labels: dict[str, str] = {}
+    for column in found:
+        other = labels.setdefault(loose(column.drt_name), column.name)
+        if other != column.name:
+            raise ValueError(f"{path.name}: {other} and {column.name} have the same DRT column '{column.drt_name}'")
     return columns
 
 
@@ -118,13 +140,13 @@ def load_plain(path: Path) -> list[SilverColumn]:
 
 
 def targets(columns: list[SilverColumn]) -> list[SilverColumn]:
-    """The columns a bronze column can be mapped onto."""
-    return [column for column in columns if column.role == MAPPED]
+    """The columns a bronze column can be mapped onto: the DRT columns, in table order."""
+    return [column for column in columns if column.is_target]
 
 
 def by_drt_name(columns: list[SilverColumn]) -> dict[str, str]:
     """DRT label -> silver column name, matched loosely (case, spaces, punctuation)."""
-    return {loose(column.drt_name): column.name for column in columns if column.drt_name}
+    return {loose(column.drt_name): column.name for column in targets(columns)}
 
 
 def loose(text: str) -> str:

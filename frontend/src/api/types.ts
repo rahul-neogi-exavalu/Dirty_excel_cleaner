@@ -668,8 +668,10 @@ export interface SilverColumnDef {
   data_type: string;
   business_key: boolean;
   description: string;
-  /** "mapped": a bronze column can map to it; "system": the pipeline fills it. */
+  /** "mapped": a business column, filled from the bronze column mapped to it; "system": the pipeline fills it. */
   role: "mapped" | "system";
+  /** One of the business's DRT columns: what a bronze column can be mapped to. The dropdowns offer only these. */
+  target: boolean;
 }
 
 export interface SilverCatalog {
@@ -737,6 +739,17 @@ export interface SilverQuality {
   unmapped_silver_columns: string[];
 }
 
+/** One DRT column of a review, from the Silver side: the bronze column that loads it, or none. */
+export interface SilverPick {
+  silver_column: string;
+  bronze_column: string | null;
+  selection: MappingSelection;
+  /** The votes for the current pairing. */
+  votes: SilverVote[];
+  /** Every bronze column any method voted for this Silver column, best first. */
+  candidates: { bronze_column: string; recommended: boolean; support: number; votes: SilverVote[] }[];
+}
+
 export interface SilverTableReview {
   table_name: string;
   source_system: string | null;
@@ -746,6 +759,8 @@ export interface SilverTableReview {
   loads: { ingestion_id: string; file_name: string; rows: number; period_start: string | null; period_end: string | null }[];
   quality: SilverQuality;
   mapping: SilverMappingRow[];
+  /** The same review from the Silver side: every DRT column, in table order. */
+  targets: SilverPick[];
 }
 
 export interface SilverRun {

@@ -57,6 +57,7 @@ def seed(replace: bool = False, replace_drt: bool = False, replace_control: bool
     with db.connection() as conn:
         loaded = reference_service.seed_control(conn, replace=replace)
         loaded.update(reference_service.seed_silver(conn, silver_service.catalog(), replace=replace_drt))
+        loaded.update(reference_service.sync_drt_columns(conn, silver_service.catalog()))
         loaded.update(reference_service.seed_bronze_mapping(conn, replace=replace_mapping))
         loaded.update(reference_service.seed_control_table(conn, replace=replace_control))
     return loaded

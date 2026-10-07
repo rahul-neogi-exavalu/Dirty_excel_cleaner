@@ -288,6 +288,9 @@ export const api = {
   /** The signed-in user is recorded as the reviewer. */
   approveSilverRun: (id: string) =>
     request<SilverRun>(`/api/silver/runs/${id}/approve`, { method: "POST", body: JSON.stringify({}) }),
+  /** From the Silver side: which bronze column loads a DRT column (null: none does). */
+  assignSilverTarget: (id: string, change: { table_name: string; silver_column: string; bronze_column: string | null }) =>
+    request<SilverRun>(`/api/silver/runs/${id}/targets`, { method: "PATCH", body: JSON.stringify(change) }),
   ignoreUnmapped: (id: string, table_name?: string) =>
     request<SilverRun>(`/api/silver/runs/${id}/ignore-unmapped`, {
       method: "POST",

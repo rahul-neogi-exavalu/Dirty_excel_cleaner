@@ -60,11 +60,11 @@ silver_update_timestamp,,timestamp,n,system,When the row was last updated in Sil
 source_data_period_start_date,,date,n,system,Start date of the business data period represented by the source-provided dataset
 source_data_period_end_date,,date,n,system,End date of the business data period represented by the source-provided dataset
 source_data_period_type,,string,n,system,"Type of source data period, e.g. MONTH, DATE, DATE_RANGE, YTD, YEAR, SNAPSHOT"
-UltimateParentProducerNames,Ultimate Parent Producer Names,string,n,mapped,"Ultimate parent of the producer (ultimate parent producer, ultimate parent agency)"
+UltimateParentProducerNames,,string,n,mapped,"Ultimate parent of the producer (ultimate parent producer, ultimate parent agency). Not a DRT column: never offered as a mapping target"
 drt_reporting_start_date,,date,n,system,Reporting start date from the control table (1st of the first month)
 drt_reporting_end_date,,date,n,system,Reporting end date from the control table (last day of the last month)
 drt_reporting_year,,int,n,system,Year of the reporting end date
 drt_reporting_month,,int,n,system,Month of the reporting end date
 drt_reporting_period,,string,n,system,Reporting period: the end month (YYYY-MM)
 drt_reporting_period_type,,string,n,system,Reporting period type from the control table: YTD or MONTHLY
-ajg_apd,AJG APD,string,n,mapped,"AJG APD value (APD)"
+ajg_apd,,string,n,mapped,"AJG APD value (APD). Not a DRT column: never offered as a mapping target"

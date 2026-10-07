@@ -214,7 +214,7 @@ Step 5 of the UI follows `enhancements/AHI-Bronze-Silver-Scenario-Doc.docx`. It 
 
 | Table | Holds |
 |---|---|
-| `drt_column_mapping` | The business's DRT column mapping (`profit_center, pc_column, drt_column`) plus `silver_column_name`, the silver_detail column it means. It is seeded from `assets/drt_column_mapping.xlsx` and grows with every approved mapping. `pc_column` is the header as the file wrote it. `drt_column` is only ever one of the business's own DRT labels (kept in `<control>.drt_label`), NULL for a Silver column the business has no label for. One source column may have two rows (two Silver columns). Ignores are never saved: an ignored column is asked about again next time. |
+| `drt_column_mapping` | The business's DRT column mapping (`profit_center, pc_column, drt_column`) plus `silver_column_name`, the silver_detail column it means. It is seeded from `assets/drt_column_mapping.xlsx` and grows with every approved mapping. `pc_column` is the header as the file wrote it. `drt_column` is the business's DRT column for the row's Silver column (one of the 48 in `<control>.drt_label`). One source column may have two rows (two Silver columns). Ignores are never saved: an ignored column is asked about again next time. |
 | `silver_detail` | **Exactly** the 69 columns of the business's `silver_schema` (`backend/config/silver_columns.csv`), typed as it states. A bronze load's rows are identified by `source_table`, `source_file` and `ingestion_timestamp` (the load's `processing_date`). |
 | `silver_aggregate` | **Exactly** the 75 columns of `silver_aggregate_schema` (`backend/config/silver_aggregate_columns.csv`). It is rebuilt from `silver_detail` per source system at profit center × accounting month grain: sums of premium, fees, commissions and revenue, plus the policy count. Columns the detail cannot supply stay NULL. |
 
@@ -225,7 +225,7 @@ Step 5 of the UI follows `enhancements/AHI-Bronze-Silver-Scenario-Doc.docx`. It 
 | `<control>.division_mapping` | `division_table_details.xlsx` | bronze `division_name` |
 | `<control>.lotl` | `pc_name_pc_number_from_lotl.xlsx` (`profit_center_number, legacy_office_name, status`) | Silver profit center name and number |
 | `<silver>.drt_column_mapping` | `drt_column_mapping.xlsx` | the saved vote and the approved mapping |
-| `<control>.drt_label` | `drt_column_mapping.xlsx` (distinct `DRT_Column`) | the only labels written to `drt_column` |
+| `<control>.drt_label` | `drt_column_mapping.xlsx` (distinct `DRT_Column`), then every DRT column of `silver_columns.csv` | the DRT columns, each with its `silver_column_name`; the only labels written to `drt_column`. Kept in step at startup, which also fills `drt_column` on rows saved without one |
 
 **The Silver columns** are listed in `backend/config/silver_columns.csv` (`silver_column_name, drt_column_name, data_type, business_key, role, description`), mirroring `assets/silver_schema.xlsx`:
 - **Roles:** 50 are `mapped` (a bronze column can map to them); 19 are `system` (keys, hashes, lineage, timestamps and periods, filled by the pipeline).
@@ -253,10 +253,11 @@ Step 5 of the UI follows `enhancements/AHI-Bronze-Silver-Scenario-Doc.docx`. It 
 **Ranking and the reviewer:**
 
 - Votes for the same Silver column form a candidate. Candidates rank by this profit center's saved mapping first, then the number of methods that agree, then the strongest vote.
-- **One column, two targets:** a bronze column can also load into further Silver columns ("+ Also load into"). The DRT mapping does this for some profit centers, e.g. one `EffectiveDate` for both the policy and the accounting date.
-- The top candidate is pre-selected. Each row's dropdown lists every candidate with the methods behind it (`total_premium`, recommended, Semantic + AI; `premium`, Fuzzy), then every Silver column, then Ignore.
+- **One column, two targets:** one bronze column can fill several DRT columns: choose it for each. The DRT mapping does this for some profit centers, e.g. one `EffectiveDate` for both the policy and the accounting date.
+- **The review is made from the Silver side.** The business's 48 DRT columns are fixed; each takes one bronze column from a dropdown, or none. A table of 100 bronze columns is still 48 choices, and a bronze column no DRT column takes is not loaded (listed on its own tab, with a *Load into* shortcut). The tabs: *Mapped*, *Not mapped* (no recommendation, kept apart), *Bronze not loaded* and *Data quality*; each pages at least three bands at a time.
+- Each DRT column's dropdown lists the bronze columns voted for it, best first, with the methods behind each (`total_premium`, recommended, Semantic + AI), then every other bronze column, then *None* (it loads empty). Type a few letters to jump to a column.
 - Rows where methods disagree are flagged **Split**.
-- Approval is blocked until every column is mapped or set to Ignore, and no two columns share a target.
+- Approval is blocked only when two bronze columns feed one DRT column.
 - **Approving saves the whole mapping, pre-filled rows included,** for every profit center in the table. Suggestions and ignores are never saved. A saved row is replaced only by an approval for the same header, so two headers that normalize alike ("Agent Commission", "Agent Commission%") never overwrite each other.
 - Saved rows stay editable in the Mapping tab, and can be removed there.
 - **Reviews live in the database** (`<control>.silver_draft`): any API process can serve them and they survive a restart. An unapproved review expires after `AHI_SILVER_DRAFT_TTL_HOURS` (72) of inactivity.
@@ -296,8 +297,9 @@ python backend/tools/seed_reference.py --add-lotl enhancements/test-files/lotl_s
 |---|---|
 | `GET /api/silver/eligible` | Loads to process, plus replaced loads whose rows will be removed |
 | `POST /api/silver/runs` | Suggest a mapping and a dry-run quality report `{ingestion_ids}` |
-| `PATCH /api/silver/runs/{id}/mapping` | Change one row `{table_name, bronze_column, silver_column, ignored}`, or its extra targets `{also: [...]}` |
-| `POST /api/silver/runs/{id}/approve` | `{reviewed_by}`; returns 409 until every column is decided |
+| `PATCH /api/silver/runs/{id}/targets` | From the Silver side: `{table_name, silver_column, bronze_column}` (`null`: none) |
+| `PATCH /api/silver/runs/{id}/mapping` | Change one bronze column `{table_name, bronze_column, silver_column, ignored}`, or its extra targets `{also: [...]}` |
+| `POST /api/silver/runs/{id}/approve` | `{reviewed_by}`; returns 409 while two bronze columns feed one DRT column |
 | `GET` / `PATCH` / `DELETE /api/silver/mapping` | The DRT column mapping; a row is named by `{profit_center, pc_column, drt_column, silver_column_name}`, and an edit adds `new_silver_column_name` |
 | `GET /api/silver/aggregate`, `GET /api/silver/catalog` | The aggregate table; the Silver columns (with their role) and which matchers are active |
 

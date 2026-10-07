@@ -136,12 +136,53 @@ def test_missing_methods_are_reported():
     assert any("word2vec" in note for note in notes) and any("AI matching skipped" in note for note in notes)
 
 
-def test_undecided_and_duplicate_targets_block_approval():
+def test_only_two_bronze_columns_on_one_silver_column_block_approval():
     suggestions, _ = matching.suggest(["premium", "premium_amt", "mystery"], CATALOG, {}, {})
+    # A bronze column no Silver column takes is simply not loaded: no decision is owed.
+    assert not matching.problems("t", suggestions)
     matching.choose(suggestions[1], "premium", False)
     issues = matching.problems("t", suggestions)
-    assert any("mystery" in issue for issue in issues)
-    assert any("all map to premium" in issue for issue in issues)
+    assert issues == ["t: premium, premium_amt all map to premium; keep one."]
+
+
+def _picks(suggestions):
+    return {pick.silver_column: pick for pick in matching.by_silver(suggestions, catalog.targets(CATALOG))}
+
+
+def test_the_review_from_the_silver_side_has_every_drt_column():
+    suggestions, _ = matching.suggest(["written_premium", "premium_total", "carrier", "mystery"], CATALOG, {},
+                                      {"carrier": "insurance_company_name"})
+    picks = _picks(suggestions)
+    assert list(picks) == [column.name for column in catalog.targets(CATALOG)]  # all 48, in table order
+    premium = picks["premium"]
+    assert premium.bronze_column in ("written_premium", "premium_total") and premium.selection == matching.RECOMMENDED
+    assert premium.votes and [bronze for bronze, _ in premium.candidates][0] == premium.bronze_column
+    assert {bronze for bronze, _ in premium.candidates} == {"written_premium", "premium_total"}  # both voted, best first
+    assert picks["insurance_company_name"].bronze_column == "carrier"
+    assert picks["naic_code"].bronze_column is None and picks["naic_code"].selection == matching.NONE
+
+
+def test_assigning_from_the_silver_side():
+    suggestions, _ = matching.suggest(["prem", "net_prem", "eff_dt"], CATALOG, {"prem": "premium"}, {})
+    by_name = {s.bronze_column: s for s in suggestions}
+    # Another bronze column takes premium: the first one lets go of it.
+    matching.assign(suggestions, "premium", "net_prem")
+    assert by_name["net_prem"].targets == ["premium"] and "premium" not in by_name["prem"].targets
+    assert _picks(suggestions)["premium"].selection == matching.MANUAL
+    # One bronze column can load two Silver columns.
+    matching.assign(suggestions, "policy_effective_date", "eff_dt")
+    matching.assign(suggestions, "accounting_effective_date", "eff_dt")
+    assert by_name["eff_dt"].targets == ["policy_effective_date", "accounting_effective_date"]
+    # Taking its main one away promotes the other; none leaves the Silver column empty.
+    matching.assign(suggestions, "policy_effective_date", None)
+    assert by_name["eff_dt"].silver_column == "accounting_effective_date" and by_name["eff_dt"].also == []
+    assert _picks(suggestions)["policy_effective_date"].bronze_column is None
+    matching.assign(suggestions, "accounting_effective_date", None)
+    assert by_name["eff_dt"].targets == [] and by_name["eff_dt"].selection == matching.NONE
+    assert not matching.problems("t", suggestions)
+    # Choosing the recommended bronze column again restores the recommendation.
+    matching.assign(suggestions, "premium", "prem")
+    assert _picks(suggestions)["premium"].selection == matching.RECOMMENDED
 
 
 # The user's example: fuzzy reads one column, word2vec and Gemini read another. Both are
@@ -492,6 +533,79 @@ def test_the_catalog_is_the_business_silver_schema():
     # Only mapped columns are ever offered as targets.
     found, _ = run(["row_hash", "source_file"])
     assert all(s.silver_column is None for s in found.values())
+
+
+# The business's DRT columns, as the business writes them, and the Silver column each loads.
+DRT_COLUMNS = {
+    "Policy Transaction ID": "policy_tran_id", "Profit Center Name": "profit_center_name",
+    "Program Name": "program_name", "Producer Code": "producer_code",
+    "Producer E&O Insurance Company Name": "producer_eo_insurance_company_name",
+    "Insurance Company AM Best Number": "insurance_company_am_best_number",
+    "Producer Office City": "producer_office_city", "Policy Expiration Date": "policy_expiration_date",
+    "TransactionEffectiveDate <for different transactions>": "transaction_effective_date",
+    "Producer License Number": "producer_license_number", "PolicyNumber": "policy_number",
+    "Producer Billing Zipcode": "producer_billing_zipcode", "Producer Billing Address": "producer_billing_address",
+    "Profit Center Number": "profit_center_number", "Parent Producer Name": "parent_producer_name",
+    "GrossCommissionAmount": "gross_commission_amount", "AccountingEffective Date": "accounting_effective_date",
+    "Is MGA": "is_mga", "Producer Billing City": "producer_billing_city", "InsuranceCompanyID": "insurance_company_id",
+    "Parent Producer ID": "parent_producer_id", "Policy Status": "policy_status",
+    "ProducerCommissionAmount": "producer_commission_amount", "Producer Expiration Date": "producer_expiration_date",
+    "Producer/Agency Name": "producer_agency_name", "Producer E&O Policy Number": "producer_eo_policy_number",
+    "NAIC Code": "naic_code", "Producer Effective Date": "producer_effective_date",
+    "Producer Billing State": "producer_billing_state", "Producer Office Location": "producer_office_location",
+    "Product Line Name": "product_line_name", "PolicyEffectiveYear": "policy_effective_year",
+    "MarketProviderID": "market_provider_id", "PolicyFees": "policy_fees",
+    "Producer Office Zipcode": "producer_office_zipcode", "Producer Office State": "producer_office_state",
+    "MarketProvider": "market_provider", "Is MGU": "is_mgu", "PolicyEffectiveMonth": "policy_effective_month",
+    "ProducerCommissionPct": "producer_commission_pct", "PolicyEffectiveDate": "policy_effective_date",
+    "InsuranceCompany Name": "insurance_company_name", "CommissionPct": "commission_pct", "Premium": "premium",
+    "Revenue": "revenue", "Renewal Flag": "renewal_flag", "Transaction Detail": "transaction_detail",
+    "Producer Tax ID": "producer_tax_id",
+}
+
+
+def test_the_mapping_targets_are_exactly_the_business_drt_columns():
+    targets = catalog.targets(CATALOG)
+    assert len(DRT_COLUMNS) == 48 and {column.drt_name: column.name for column in targets} == DRT_COLUMNS
+    assert all(catalog.SNAKE_CASE.fullmatch(column.name) for column in targets)
+    # Columns of the Silver table that are not DRT columns stay in the table (and its row
+    # hash) but are never offered.
+    by_name = {column.name: column for column in CATALOG}
+    for name in ("UltimateParentProducerNames", "ajg_apd"):
+        assert by_name[name].role == catalog.MAPPED and not by_name[name].is_target
+    assert not any(column.is_target for column in CATALOG if column.role == catalog.SYSTEM)
+
+
+def test_a_source_column_named_like_a_non_drt_column_is_never_proposed_for_it():
+    found, _ = run(["ajg_apd", "UltimateParentProducerNames", "Ultimate Parent Producer Names"])
+    proposed = {candidate.silver_column for s in found.values() for candidate in s.candidates}
+    assert not proposed & {"ajg_apd", "UltimateParentProducerNames"}
+    # A saved mapping to a column the mapping no longer offers is not reused, and says why.
+    stale, _ = run(["apd"], saved={"apd": "ajg_apd"})
+    assert stale["apd"].silver_column is None and "no longer a DRT column" in stale["apd"].reason
+
+
+def _catalog_file(tmp_path, rows):
+    path = tmp_path / "silver.csv"
+    path.write_text("silver_column_name,drt_column_name,data_type,business_key,role,description\n" + "\n".join(rows),
+                    encoding="utf-8")
+    return path
+
+
+def test_a_drt_column_must_be_named_lowercase_with_underscores(tmp_path):
+    with pytest.raises(ValueError, match="lowercase_with_underscores; rename PolicyNumber"):
+        catalog.load(_catalog_file(tmp_path, ["PolicyNumber,PolicyNumber,string,y,mapped,", "premium,Premium,string,n,mapped,"]))
+    # A Silver column that is not a DRT column may keep the schema's own spelling.
+    loaded = catalog.load(_catalog_file(tmp_path, ["premium,Premium,string,n,mapped,",
+                                                   "UltimateParentProducerNames,,string,n,mapped,"]))
+    assert [column.name for column in catalog.targets(loaded)] == ["premium"]
+
+
+def test_two_silver_columns_cannot_share_a_drt_column(tmp_path):
+    with pytest.raises(ValueError, match="same DRT column"):
+        catalog.load(_catalog_file(tmp_path, ["premium,Premium,string,n,mapped,", "net_premium,PREMIUM,string,n,mapped,"]))
+    with pytest.raises(ValueError, match="no DRT columns"):
+        catalog.load(_catalog_file(tmp_path, ["premium,,string,n,mapped,", "row_hash,,string,n,system,"]))
 
 
 def test_every_drt_label_has_a_silver_column():

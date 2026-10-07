@@ -305,6 +305,76 @@ def seed_control_table(conn, replace: bool = False) -> dict[str, int]:
     return loaded
 
 
+def sync_drt_columns(conn, columns_catalog) -> dict[str, int]:
+    """Keep the DRT columns in step with the Silver schema (silver_columns.csv). Run at every
+    startup; a second run changes nothing.
+
+    1. ``drt_label`` lists every DRT column with its Silver column: missing ones are added
+       and each label's Silver column is set as the schema says (matched loosely, so a
+       label the workbook spells "AccountingEffective  Date" is not added twice). A label
+       the business uses that names no DRT column of the schema is kept, with no Silver
+       column.
+    2. ``drt_column_mapping`` rows saved without a DRT column get their Silver column's,
+       and rows with a DRT column but no Silver column get the DRT column's. A row that
+       would then repeat a row already there is removed instead.
+    """
+    from psycopg import sql
+
+    from ahi_silver.catalog import loose, targets
+
+    labels = sql.SQL("{}.{}").format(_ident(config.CONTROL_SCHEMA), _ident(LABEL_TABLE))
+    mapping = sql.SQL("{}.{}").format(_ident(config.SILVER_SCHEMA), _ident(DRT_TABLE))
+    for schema, table in ((config.CONTROL_SCHEMA, LABEL_TABLE), (config.SILVER_SCHEMA, DRT_TABLE)):
+        if conn.execute("SELECT to_regclass(%s)", [f'"{schema}"."{table}"']).fetchone()[0] is None:
+            return {}
+    existing = {loose(label): label for (label,) in conn.execute(sql.SQL("SELECT label FROM {}").format(labels))}
+    # label -> Silver column: the label as the business writes it where it already has one.
+    wanted = {existing.get(loose(column.drt_name), column.drt_name): column.name for column in targets(columns_catalog)}
+    # Clear first, so a Silver column moving to another label never meets itself in the unique index.
+    conn.execute(sql.SQL(
+        "UPDATE {} SET silver_column_name = NULL WHERE silver_column_name IS NOT NULL "
+        "AND NOT (label, silver_column_name) IN (SELECT * FROM unnest(%s::text[], %s::text[]))").format(labels),
+        [list(wanted), list(wanted.values())])
+    added = 0
+    for label, silver in wanted.items():
+        # Only what differs is written; a new row says so (xmax 0), an updated one does not.
+        row = conn.execute(sql.SQL(
+            "INSERT INTO {t} (label, silver_column_name) VALUES (%s, %s) ON CONFLICT (label) DO UPDATE "
+            "SET silver_column_name = EXCLUDED.silver_column_name "
+            "WHERE {t}.silver_column_name IS DISTINCT FROM EXCLUDED.silver_column_name RETURNING (xmax = 0)").format(
+                t=labels), [label, silver]).fetchone()
+        added += bool(row and row[0])
+
+    # Rows without a DRT column: their Silver column's (a twin that already has it wins).
+    conn.execute(sql.SQL(
+        "DELETE FROM {m} a USING {l} l, {m} b WHERE a.drt_column IS NULL AND l.silver_column_name = a.silver_column_name "
+        "AND b.profit_center = a.profit_center AND b.pc_column = a.pc_column "
+        "AND b.silver_column_name = a.silver_column_name AND b.drt_column = l.label").format(m=mapping, l=labels))
+    labelled = conn.execute(sql.SQL(
+        "UPDATE {m} m SET drt_column = l.label FROM {l} l "
+        "WHERE m.drt_column IS NULL AND m.silver_column_name = l.silver_column_name").format(m=mapping, l=labels)).rowcount
+    # Rows without a Silver column: their DRT column's, matched loosely.
+    same = sql.SQL("regexp_replace(lower({}), '[^a-z0-9]', '', 'g') = regexp_replace(lower({}), '[^a-z0-9]', '', 'g')")
+    conn.execute(sql.SQL(
+        "DELETE FROM {m} a USING {l} l, {m} b WHERE a.silver_column_name IS NULL AND l.silver_column_name IS NOT NULL "
+        "AND {match} AND b.profit_center = a.profit_center AND b.pc_column = a.pc_column "
+        "AND b.drt_column IS NOT DISTINCT FROM a.drt_column AND b.silver_column_name = l.silver_column_name").format(
+            m=mapping, l=labels, match=same.format(sql.SQL("a.drt_column"), sql.SQL("l.label"))))
+    resolved = conn.execute(sql.SQL(
+        "UPDATE {m} m SET silver_column_name = l.silver_column_name FROM {l} l "
+        "WHERE m.silver_column_name IS NULL AND l.silver_column_name IS NOT NULL AND {match}").format(
+            m=mapping, l=labels, match=same.format(sql.SQL("m.drt_column"), sql.SQL("l.label")))).rowcount
+
+    changed = {}
+    if added:
+        changed[f"{config.CONTROL_SCHEMA}.{LABEL_TABLE}"] = added
+    if labelled or resolved:
+        changed[f"{config.SILVER_SCHEMA}.{DRT_TABLE}"] = labelled + resolved
+    if changed:
+        log.info("DRT columns brought in step with the Silver schema: %s", changed)
+    return changed
+
+
 def drt_labels_from_file() -> list[str]:
     """The workbook's distinct DRT_Column values, trimmed, in first-seen order."""
     labels = (drt.strip() for _, _, drt in read_workbook(DRT_FILE, 3, keep_text=True) if drt and drt.strip())

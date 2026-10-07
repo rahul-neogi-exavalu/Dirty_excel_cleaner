@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Callable
 
 from . import normalize
-from .catalog import MAPPED, SilverColumn
+from .catalog import SilverColumn, targets as drt_targets
 
 try:
     from rapidfuzz import fuzz, process
@@ -223,7 +223,7 @@ def _saved_votes(columns, saved, known, by_name, votes, stale) -> None:
             live = [t for t in _targets(saved[column]) if t in by_name]
             if gone:
                 # Approved earlier, but that Silver column is no longer in the list.
-                stale[column] = f"Was mapped to {', '.join(gone)}, which is no longer a Silver column."
+                stale[column] = f"Was mapped to {', '.join(gone)}, which is no longer a DRT column the mapping offers."
             for target in live:
                 votes[column].append(Vote(SAVED, target, 1.0, "Approved earlier for this profit center", own=True))
         elif known.get(normalize.compact(column)) in by_name:
@@ -371,9 +371,10 @@ def suggest(
     ``one_to_many``: columns whose saved targets all load (one header mapped twice);
     for the others several saved targets are competing votes. None: every list loads.
     ``progress``: told how far each method has got (see ``Progress``).
-    Only the catalog's mapped columns are targets; system columns are never offered.
+    Only the catalog's DRT columns are targets: system columns, and Silver columns that are
+    not DRT columns, are never offered.
     """
-    catalog = [column for column in catalog if column.role == MAPPED]
+    catalog = drt_targets(catalog)
     samples = samples or {}
     notes: list[str] = []
     by_name = {column.name: column for column in catalog}
@@ -495,12 +496,77 @@ def set_also(suggestion: Suggestion, targets: list[str]) -> None:
     suggestion.selection = MANUAL
 
 
-def problems(table: str, suggestions: list[Suggestion]) -> list[str]:
-    """Why this table's mapping cannot be approved yet."""
-    issues = []
+# --- the review from the Silver side --------------------------------------------------
+
+
+@dataclass
+class Pick:
+    """One DRT column of the review: the bronze column that loads it (or none), the votes
+    for that pairing, and every bronze column any method voted for it, best first."""
+
+    silver_column: str
+    bronze_column: str | None
+    selection: str
+    votes: list[Vote]
+    # (bronze column, the candidate for this Silver column among its votes)
+    candidates: list[tuple[str, Candidate]]
+
+
+def _candidate(suggestion: Suggestion, silver: str) -> Candidate | None:
+    return next((c for c in suggestion.candidates if c.silver_column == silver), None)
+
+
+def by_silver(suggestions: list[Suggestion], targets: list[SilverColumn]) -> list[Pick]:
+    """The review turned around: one Pick per DRT column, in the catalog's order."""
+    picks = []
+    for column in targets:
+        name = column.name
+        holder = next((s for s in suggestions if name in s.targets), None)
+        votes: list[Vote] = []
+        selection = NONE
+        if holder is not None:
+            candidate = _candidate(holder, name)
+            votes = list(candidate.counted) if candidate else []
+            # The main pairing is the matcher's when it recommended it; an extra one when it
+            # is this profit center's approved one-to-many mapping.
+            recommended = bool(candidate and (candidate.recommended if holder.silver_column == name else candidate.own))
+            selection = RECOMMENDED if recommended else MANUAL
+        ranked = [(s.bronze_column, c) for s in suggestions if (c := _candidate(s, name)) is not None and c.support]
+        ranked.sort(key=lambda pair: pair[1].rank(), reverse=True)
+        picks.append(Pick(name, holder.bronze_column if holder else None, selection, votes, ranked))
+    return picks
+
+
+def assign(suggestions: list[Suggestion], silver: str, bronze: str | None) -> None:
+    """The reviewer's choice from the Silver side: ``bronze`` loads ``silver`` (None: no
+    bronze column does). Whichever bronze column loaded it before stops, keeping its other
+    Silver columns; a bronze column may load several Silver columns."""
     for suggestion in suggestions:
-        if not suggestion.decided:
-            issues.append(f"{table}.{suggestion.bronze_column}: choose a Silver column or Ignore.")
+        if silver not in suggestion.targets:
+            continue
+        if suggestion.silver_column == silver:
+            # Its next Silver column, if any, becomes the main one.
+            rest = [target for target in suggestion.also if target != silver]
+            suggestion.silver_column, suggestion.also = (rest[0], rest[1:]) if rest else (None, [])
+        else:
+            suggestion.also = [target for target in suggestion.also if target != silver]
+        suggestion.selection = MANUAL if suggestion.silver_column else NONE
+    if bronze is None:
+        return
+    chosen = next(s for s in suggestions if s.bronze_column == bronze)
+    if chosen.silver_column is None or chosen.ignored:
+        choose(chosen, silver, False)
+    else:
+        chosen.also = [*chosen.also, silver]
+        chosen.selection = MANUAL
+
+
+def problems(table: str, suggestions: list[Suggestion]) -> list[str]:
+    """Why this table's mapping cannot be approved yet. The review is made from the Silver
+    side: each DRT column takes a bronze column or none, and a bronze column no Silver
+    column takes is simply not loaded. Only two bronze columns feeding one Silver column
+    stop an approval."""
+    issues = []
     targets: dict[str, list[str]] = {}
     for suggestion in suggestions:
         for target in suggestion.targets:
