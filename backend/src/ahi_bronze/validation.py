@@ -2,7 +2,9 @@
 
 1. **Required columns.** Every file must carry the columns listed in
    ``backend/config/bronze_required_columns.csv`` (Silver catalog names; which file
-   column is which is the column mapping's job). One missing: the file is rejected.
+   column is which is the column mapping's job). Columns sharing a ``one_of`` name are
+   alternatives: one of them is enough, and more are fine (CommissionPct or
+   GrossCommissionAmount). One requirement missing: the file is rejected.
 2. **Reporting dates.** The accounting effective date (AED) decides them if it is
    populated -- a readable date -- on every row; else the policy effective date (PED) on
    every row; else the transaction effective date (TED). 99 rows of 100 is not every
@@ -15,6 +17,8 @@
    that year: a year-to-date file is inserted and replaces them; a monthly file is
    appended; a monthly file for a month already loaded is the reviewer's call (replace
    that month, or reject the file).
+5. **A file is fit whole.** One sheet (cleaned table) of a file not fit for Bronze --
+   rejected for itself -- rejects every sheet of that file.
 """
 
 from __future__ import annotations
@@ -42,15 +46,45 @@ class Required:
     name: str  # Silver catalog name
     label: str  # as the business writes it
     date_role: str | None = None  # AED / PED / TED
+    # Required columns sharing it are alternatives: the file needs one of them.
+    one_of: str | None = None
 
 
 def load_required(path) -> list[Required]:
     with open(Path(path), encoding="utf-8", newline="") as handle:
         return [
             Required(row["silver_column_name"].strip(), (row.get("label") or row["silver_column_name"]).strip(),
-                     (row.get("date_role") or "").strip().upper() or None)
+                     (row.get("date_role") or "").strip().upper() or None,
+                     (row.get("one_of") or "").strip().casefold() or None)
             for row in csv.DictReader(handle) if (row.get("silver_column_name") or "").strip()
         ]
+
+
+def requirements(items) -> list[tuple[Required, ...]]:
+    """What a file must carry, in order: each column on its own, or the alternatives of a
+    ``one_of`` group together."""
+    groups: dict[str, list[Required]] = {}
+    found: list[list[Required]] = []
+    for item in items:
+        if item.one_of is None:
+            found.append([item])
+        elif item.one_of in groups:
+            groups[item.one_of].append(item)
+        else:
+            groups[item.one_of] = [item]
+            found.append(groups[item.one_of])
+    return [tuple(group) for group in found]
+
+
+def requirement_label(group: tuple[Required, ...]) -> str:
+    return " or ".join(item.label for item in group)
+
+
+def missing_required(items, present: set[str]) -> list[str]:
+    """The requirements with none of their columns in ``present`` (Silver names), as labels:
+    ``Revenue``, ``CommissionPct or GrossCommissionAmount``."""
+    return [requirement_label(group) for group in requirements(items)
+            if not any(item.name in present for item in group)]
 
 
 # --- reporting dates ---------------------------------------------------------------
@@ -262,6 +296,14 @@ def business_action(*, missing: list[str], flag: str | None, period_type: str | 
     if gap:
         reasons.append(f"Not received yet: {', '.join(_month_label(key) for key in gap)}.")
     return Decision(APPEND, reasons)
+
+
+def rejected_with_file(unfit: dict[str, str]) -> Decision:
+    """A sheet whose file has other sheets not fit for Bronze. ``unfit``: each of those
+    sheets -> why it is rejected."""
+    named = "; ".join(f"{sheet} ({why.rstrip('.')})" for sheet, why in unfit.items())
+    return Decision(REJECTED, [f"Rejected with its file: every sheet of a file must be fit for Bronze, and {named} "
+                               f"{'is' if len(unfit) == 1 else 'are'} not."])
 
 
 def _months_between(start: date, end: date) -> list[str]:

@@ -846,7 +846,7 @@ function ControlView() {
   }, [filter]);
   useEffect(load, [load]);
   const needle = query.trim().toLowerCase();
-  const shown = (rows ?? []).filter((row) => !needle || `${row.file_name} ${row.source_system}`.toLowerCase().includes(needle));
+  const shown = (rows ?? []).filter((row) => !needle || `${row.file_name} ${row.sheet_name ?? ""} ${row.source_system}`.toLowerCase().includes(needle));
   const paged = usePaged(shown, useFitPageSize(list, { min: 5, max: 50, fallbackRow: 45, reserve: 150 }), `${filter}|${needle}`);
 
   return (
@@ -857,7 +857,7 @@ function ControlView() {
           <p className="text-caption text-ink-500">Every file Bronze has been told about: listed by the business, staged by Validate, loaded or rejected.</p>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-          <SearchInput value={query} onChange={setQuery} placeholder="File or source system" label="Search the control table" className="w-full sm:w-64" />
+          <SearchInput value={query} onChange={setQuery} placeholder="File, sheet or source system" label="Search the control table" className="w-full sm:w-64" />
           <Select<ControlFilter>
             label="Show"
             hideLabel
@@ -884,11 +884,11 @@ function ControlView() {
       ) : (
         <div ref={list}>
           <div className="relative overflow-x-auto scroll-thin">
-            <table className="w-full min-w-[1400px] border-collapse text-table">
+            <table className="w-full min-w-[1560px] border-collapse text-table">
               <caption className="sr-only">The control table</caption>
               <thead className="bg-ink-50">
                 <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
-                  {["control_id", "source_system", "file_name", "reporting_period_type", "processing_action", "bronze_load_flag",
+                  {["control_id", "source_system", "file_name", "sheet_name", "reporting_period_type", "processing_action", "bronze_load_flag",
                     "file_received_date", "drt_reporting_start_date", "drt_reporting_end_date", "date_detail", "file_replaced", "is_active"].map((name) => (
                     <th key={name} scope="col" className="whitespace-nowrap px-3 py-2.5 font-mono text-[11px]">{name}</th>
                   ))}
@@ -909,6 +909,9 @@ function ControlView() {
                         {!row.staging_table && row.bronze_load_flag === "N" && !rejected && (
                           <span className="block text-caption text-ink-400">Listed by the business; not received here yet</span>
                         )}
+                      </td>
+                      <td className="max-w-[200px] px-3 py-2">
+                        <span className="block truncate" title={row.sheet_name ?? undefined}>{row.sheet_name ?? "—"}</span>
                       </td>
                       <td className="px-3 py-2">{row.reporting_period_type ?? "—"}</td>
                       <td className="px-3 py-2">{row.processing_action ? <Badge tone={rejected ? "danger" : row.processing_action === "APPEND" ? "success" : "brand"}>{row.processing_action}</Badge> : "—"}</td>

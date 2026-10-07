@@ -232,11 +232,14 @@ function ValidationView({
   const file = data.files.find((item) => item.job_id === output.job_id)!;
   const open = data.outputs.filter((item) => !item.staged);
   const stageable = open.filter((item) => item.verdict !== "needs_input");
+  // A file is staged whole: staging one of its sheets stages them all.
+  const sheets = data.outputs.filter((item) => item.job_id === output.job_id).length;
   const options = data.outputs.map((item) => {
     const owner = data.files.find((candidate) => candidate.job_id === item.job_id);
+    const sheet = item.sheet_name ?? item.name;
     return {
       value: item.key,
-      label: data.files.length > 1 ? `${owner?.file_name ?? ""} · ${item.name}` : item.name,
+      label: data.files.length > 1 ? `${owner?.file_name ?? ""} · ${sheet}` : sheet,
       icon: <Table2 />,
       group: data.files.length > 1 ? owner?.file_name : undefined,
       description: `${formatNumber(item.rows)} rows · fitness ${item.fitness}%${item.staged ? ` · staged as control ${item.staged.control_id}` : ""}`,
@@ -261,7 +264,9 @@ function ValidationView({
                 <FileSpreadsheet className="h-5 w-5" />
               </div>
               <div className="min-w-0">
-                <p className="label-caps">{output.name} · {plural(output.sheet_names.length, "sheet")} · {formatNumber(output.rows)} rows</p>
+                <p className="label-caps">
+                  {output.sheet_name ? `${output.sheet_names.length > 1 ? "Sheets" : "Sheet"} ${output.sheet_name}` : output.name} · {formatNumber(output.rows)} rows
+                </p>
                 <h2 id="validate-title" className="truncate text-section text-ink-900" title={file.file_name}>{file.file_name}</h2>
               </div>
             </div>
@@ -293,6 +298,7 @@ function ValidationView({
                 {output.verdict === "needs_input" ? output.needs[0] : output.verdict === "ready"
                   ? `Staging records control action ${output.action} and copies ${formatNumber(output.rows)} rows to staging.`
                   : "Staging records the file as REJECTED in the control table; nothing reaches Bronze."}
+                {sheets > 1 && output.verdict !== "needs_input" && ` The file's other ${plural(sheets - 1, "sheet")} ${sheets > 2 ? "are" : "is"} staged with it.`}
               </p>
               <Button
                 variant={output.verdict === "ready" ? "primary" : "secondary"}
@@ -300,7 +306,8 @@ function ValidationView({
                 disabled={busy || output.verdict === "needs_input"}
                 onClick={() => onStage([output.key])}
               >
-                {output.verdict === "ready" ? "Stage" : "Record as rejected"}
+                {output.verdict === "ready" ? (sheets > 1 ? `Stage the file (${sheets} sheets)` : "Stage")
+                  : sheets > 1 ? "Record the file as rejected" : "Record as rejected"}
               </Button>
             </div>
           )}
@@ -331,9 +338,10 @@ function ValidationView({
                       {item.staged ? <BadgeCheck /> : verdict.icon}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-body text-ink-900">{owner?.file_name}</span>
+                      <span className="block truncate text-body text-ink-900" title={owner?.file_name}>{owner?.file_name}</span>
                       <span className="block truncate text-caption text-ink-500">
-                        {item.staged ? `Staged · control ${item.staged.control_id} · ${item.staged.processing_action}` : `${verdict.label} · ${item.fitness}%`}
+                        {[item.sheet_name ?? item.name, item.staged ? `Staged · control ${item.staged.control_id} · ${item.staged.processing_action}`
+                          : `${verdict.label} · ${item.fitness}%`].join(" · ")}
                       </span>
                     </span>
                   </button>
@@ -346,7 +354,7 @@ function ValidationView({
             {stageable.length ? `Stage ${plural(stageable.length, "table")}` : open.length ? "Fix the tables first" : "All staged"}
           </Button>
           <p className="mt-2 text-center text-caption text-ink-500">
-            Ready tables go to staging; flagged and rejected ones are recorded as REJECTED.
+            Ready tables go to staging; flagged and rejected ones are recorded as REJECTED. One sheet rejected rejects its whole file.
           </p>
           {data.staged > 0 && (
             <Button className="mt-4 w-full" iconRight={<ArrowRight />} onClick={onIngest}>Continue to Ingest</Button>
@@ -461,13 +469,26 @@ function FileDetails({ file, busy, onChange }: { file: ValidationFile; busy: boo
 
 function RequiredColumns({ output, busy, onChange }: { output: ValidationOutput; busy: boolean; onChange: (mapping: Record<string, string | null>) => void }) {
   const columns = useMemo(() => new Map(output.columns.map((column) => [column.original, column])), [output.columns]);
-  const found = output.required.filter((item) => item.column && !columns.get(item.column)?.excluded).length;
+  const byName = useMemo(() => new Map(output.required.map((item) => [item.name, item])), [output.required]);
+  const present = (item: RequiredColumn) => Boolean(item.column && !columns.get(item.column)?.excluded);
+  // Each requirement once: a column on its own, or a group of alternatives any one of which will do.
+  const groups: RequiredColumn[][] = [];
+  const grouped = new Set<string>();
+  for (const item of output.required) {
+    if (grouped.has(item.name)) continue;
+    const group = [item, ...item.one_of.map((name) => byName.get(name)).filter((other): other is RequiredColumn => Boolean(other))];
+    group.forEach((member) => grouped.add(member.name));
+    groups.push(group);
+  }
+  const met = groups.filter((group) => group.some(present)).length;
   const MISSING = "__missing__";
   return (
     <section aria-labelledby={`required-${output.key}`}>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <h3 id={`required-${output.key}`} className="flex items-center gap-2 text-card text-ink-900"><Columns3 className="h-4 w-4 text-ink-500" aria-hidden />Required columns</h3>
-        <span className="num text-caption text-ink-500">{found} of {output.required.length} found · every one is needed for Bronze</span>
+        <span className="num text-caption text-ink-500">
+          {met} of {groups.length} found · each is needed for Bronze{groups.length < output.required.length ? "; of an “or” pair, one is enough" : ""}
+        </span>
       </div>
       <div className="overflow-hidden rounded-lg border border-ink-200">
         <div className="relative overflow-x-auto scroll-thin">
@@ -482,10 +503,14 @@ function RequiredColumns({ output, busy, onChange }: { output: ValidationOutput;
               </tr>
             </thead>
             <tbody>
-              {output.required.map((item) => (
-                <RequiredRow key={item.name} item={item} output={output} columns={columns} busy={busy} missingValue={MISSING}
-                  onChange={(column) => onChange({ [item.name]: column === MISSING ? null : column })} />
-              ))}
+              {output.required.map((item) => {
+                const alternatives = item.one_of.map((name) => byName.get(name)).filter((other): other is RequiredColumn => Boolean(other));
+                return (
+                  <RequiredRow key={item.name} item={item} output={output} columns={columns} busy={busy} missingValue={MISSING}
+                    alternatives={alternatives} standIn={alternatives.find(present) ?? null}
+                    onChange={(column) => onChange({ [item.name]: column === MISSING ? null : column })} />
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -504,6 +529,8 @@ function RequiredRow({
   columns,
   busy,
   missingValue,
+  alternatives,
+  standIn,
   onChange,
 }: {
   item: RequiredColumn;
@@ -511,6 +538,10 @@ function RequiredRow({
   columns: Map<string, ValidationOutput["columns"][number]>;
   busy: boolean;
   missingValue: string;
+  /** The required columns that can stand in for this one. */
+  alternatives: RequiredColumn[];
+  /** The alternative found in the file, if any: this column is then not needed. */
+  standIn: RequiredColumn | null;
   onChange: (column: string) => void;
 }) {
   const column = item.column ? columns.get(item.column) : null;
@@ -541,6 +572,9 @@ function RequiredRow({
           {item.date_role && <Badge tone="info" className="!px-1.5 !py-0 !text-[10px]">{item.date_role}</Badge>}
         </span>
         <span className="block font-mono text-[11px] text-ink-400">{item.name}</span>
+        {alternatives.length > 0 && (
+          <span className="block text-caption text-ink-500">or {alternatives.map((other) => other.label).join(" or ")}</span>
+        )}
       </td>
       <td className="px-3 py-2">
         <Select value={item.column ?? missingValue} options={choices} onChange={onChange} label={`File column for ${item.label}`} hideLabel
@@ -559,7 +593,11 @@ function RequiredRow({
         )}
       </td>
       <td className="px-4 py-2">
-        {!item.column ? <Badge tone="danger" icon={<Ban />}>Missing</Badge>
+        {(!item.column || leftOut) && standIn ? (
+          <Tooltip content={`${standIn.label} is found: one of the pair is enough.`}>
+            <span tabIndex={0} className="inline-flex"><Badge tone="neutral">Not needed</Badge></span>
+          </Tooltip>
+        ) : !item.column ? <Badge tone="danger" icon={<Ban />}>Missing</Badge>
           : leftOut ? <Badge tone="warning" icon={<TriangleAlert />}>Left out on Results</Badge>
             : <Badge tone="success" icon={<CheckCircle2 />}>Found</Badge>}
       </td>

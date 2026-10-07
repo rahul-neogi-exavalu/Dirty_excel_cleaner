@@ -6,18 +6,22 @@ After cleaning, every output of every file is checked against the business's rul
 1. **Required columns.** Its columns are matched to the required ones the way the Silver
    review matches them (``ahi_silver.matching``): the bronze column mapping votes first
    (seeded from the Silver DRT mapping, grown by every file staged here), then exact,
-   fuzzy, word2vec and AI votes. Every required column must be found.
+   fuzzy, word2vec and AI votes. Every required column must be found, or one of each
+   group of alternatives (``one_of``).
 2. **Reporting dates.** AED, PED, TED: the first populated on every row decides them, in
    whole months; otherwise the reviewer enters them. Year-to-date or monthly; anything
    else is flagged, and a flagged file is rejected unless the reviewer corrects the dates.
 3. **Against Bronze.** What the control table says this profit center already has in
    Bronze decides INSERT, APPEND or a choice for the reviewer (a month already loaded).
+4. **The whole file.** A file is fit only when every one of its sheets is: one rejected
+   rejects them all, and one waiting for the reviewer holds the others back.
 
-The reviewer fixes what needs a person, then stages. Staging writes, in one transaction:
-the new mappings into the bronze column mapping, the file's rows into a staging table,
-and its control-table row -- INSERT, APPEND or REJECTED -- which drives the Ingest step.
-A file the control table already lists (seeded from the business's workbook, or staged
-before and not loaded) fills in that row instead of adding one.
+The reviewer fixes what needs a person, then stages -- a file whole, every sheet at once.
+Staging writes, in one transaction: the new mappings into the bronze column mapping, each
+output's rows into a staging table, and its control-table row (file and sheet) -- INSERT,
+APPEND or REJECTED -- which drives the Ingest step. A file the control table already lists
+(seeded from the business's workbook, or staged before and not loaded) fills in that row
+instead of adding one.
 
 Sessions live in memory, like cleaning jobs and Bronze plans; what is staged is in the
 database.
@@ -28,6 +32,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from functools import lru_cache
@@ -48,6 +53,8 @@ from . import bronze_service, column_matching, reference_service
 READY, NEEDS_INPUT, FLAGGED, REJECTED = "ready", "needs_input", "flagged", "rejected"
 SAMPLE_ROWS = 200
 CHOICES = (rules.REJECT, rules.REPLACE, rules.REPLACE_MONTH)
+# Even a rejected file needs it: the control table records its source system.
+PC_NEEDED = "Enter the profit center."
 
 
 @lru_cache(maxsize=1)
@@ -150,8 +157,8 @@ class Context:
     loaded: dict[str, list[Loaded]] = field(default_factory=dict)
 
 
-_CONTROL_FIELDS = ("control_id", "source_system", "file_name", "reporting_period_type", "processing_action",
-                   "bronze_load_flag", "file_received_date", "drt_reporting_start_date", "drt_reporting_end_date",
+_CONTROL_FIELDS = ("control_id", "source_system", "file_name", "sheet_name", "reporting_period_type",
+                   "processing_action", "bronze_load_flag", "file_received_date", "drt_reporting_start_date", "drt_reporting_end_date",
                    "date_detail", "file_replaced", "is_active", "pc_id", "division_name", "job_id", "output_id",
                    "staging_table", "ingestion_id", "rejection_reason", "validation", "replace_month",
                    "created_by", "created_at", "staged_at", "loaded_at", "bronze_table")
@@ -365,6 +372,8 @@ def _evaluate(session: Session) -> None:
         if control:
             taken.add(control["control_id"])
         _evaluate_one(session, file, output, control)
+    for file in session.files:
+        _evaluate_file(file, [output for output in session.outputs if output.job_id == file.job_id])
 
 
 def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, control: dict | None) -> None:
@@ -372,14 +381,12 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     frame = record.frame
     excluded = {column["original"] for column in output.columns if column["excluded"]}
     labels = {item.name: item.label for item in required()}
-    missing, left_out = [], []
-    for item in required():
-        column = output.mapping.get(item.name)
-        if column is None:
-            missing.append(item.label)
-        elif column in excluded:
-            missing.append(item.label)
-            left_out.append(item.label)
+    present = {item.name for item in required()
+               if output.mapping.get(item.name) is not None and output.mapping[item.name] not in excluded}
+    missing = rules.missing_required(required(), present)
+    # A column left out on Results matters only when nothing else meets its requirement.
+    left_out = [item.label for group in rules.requirements(required()) if not any(item.name in present for item in group)
+                for item in group if output.mapping.get(item.name) in excluded]
     roles = {item.date_role: output.mapping.get(item.name) for item in required() if item.date_role}
     stats = rules.date_stats(frame, roles)
     source = rules.reporting_source(stats)
@@ -421,7 +428,7 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
         warnings.append(f"The control table lists {_span(*listed)}; the data says {_span(start, end)}.")
     needs = []
     if not file.pc_id:
-        needs.append("Enter the profit center.")
+        needs.append(PC_NEEDED)
     if decision is None:
         needs.append("Enter the reporting start and end dates: no date column is populated on every row.")
     elif decision.action == rules.DECIDE:
@@ -435,10 +442,10 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     else:
         verdict = READY
 
-    mapped = len(required()) - len(missing)
+    needed = len(rules.requirements(required()))
     checks = [
         {"id": "columns", "label": "Required columns", "ok": not missing,
-         "detail": f"{mapped} of {len(required())} found" + (f"; missing {', '.join(missing)}" if missing else "")},
+         "detail": f"{needed - len(missing)} of {needed} found" + (f"; missing {', '.join(missing)}" if missing else "")},
         {"id": "dates", "label": "Reporting dates", "ok": start is not None,
          "detail": (_span(start, end) + f" · {_origin_label(origin)}") if start else
          "No date column is populated on every row"},
@@ -461,9 +468,9 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
                          **_month_view(item.months.get(month))} for item in decision.overlaps],
         }
     output.decision = decision
+    # The whole-file check and the fitness follow in _evaluate_file.
     output.result = {
         "verdict": verdict, "needs": needs, "warnings": warnings, "missing": missing, "checks": checks,
-        "fitness": round(100 * sum(check["ok"] for check in checks) / len(checks)),
         "dates": {role: stat.as_dict() for role, stat in stats.items()},
         "date_detail": detail, "origin": origin, "flag": flag, "period_type": kind,
         "reporting_start_date": start, "reporting_end_date": end,
@@ -478,6 +485,69 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
         "control": {"control_id": control["control_id"], "seeded": not control.get("staging_table")} if control else None,
         "labels": labels,
     }
+
+
+def _evaluate_file(file: FileCheck, outputs: list[OutputCheck]) -> None:
+    """A file is fit for Bronze only whole. A sheet rejected for itself rejects the file's
+    other sheets; a sheet still waiting for the reviewer holds the others back, since a
+    file is staged whole."""
+    names = _sheet_labels(outputs)
+    unfit = [output for output in outputs if output.decision and output.decision.action == rules.REJECTED]
+    waiting = [output for output in outputs if output.result["verdict"] == NEEDS_INPUT]
+    for output in outputs:
+        result = output.result
+        others_unfit = [other for other in unfit if other.key != output.key]
+        others_waiting = [other for other in waiting if other.key != output.key]
+        rejected_itself = len(others_unfit) < len(unfit)
+        if rejected_itself:
+            fit_siblings = len(outputs) - len(unfit)
+            if fit_siblings:
+                result["warnings"].append(f"While it is rejected, so are the file's other "
+                                          f"{_plural(fit_siblings, 'sheet')}: a file reaches Bronze whole or not at all.")
+        elif others_unfit:
+            output.decision = rules.rejected_with_file(
+                {names[other.key]: " ".join(other.decision.reasons) for other in others_unfit})
+            needs = [PC_NEEDED] if not file.pc_id else []
+            result.update(verdict=NEEDS_INPUT if needs else REJECTED, needs=needs, action=rules.REJECTED,
+                          reasons=output.decision.reasons, options=[], confirm=False, file_replaced=None,
+                          replace_month=None, compare=None)
+            for check in result["checks"]:
+                if check["id"] == "bronze":
+                    check.update(ok=False, detail=rules.REJECTED)
+        elif others_waiting and result["verdict"] == READY:
+            result.update(verdict=NEEDS_INPUT, needs=[
+                f"Finish {', '.join(names[other.key] for other in others_waiting)} first: "
+                "a file's sheets are staged together."])
+        if len(outputs) == 1:
+            ok, detail = True, "The file's only sheet"
+        elif others_unfit:
+            ok, detail = False, f"Rejected with {', '.join(names[other.key] for other in others_unfit)}"
+        elif others_waiting:
+            ok, detail = False, f"Waiting on {', '.join(names[other.key] for other in others_waiting)}"
+        else:
+            ok, detail = True, f"The other {_plural(len(outputs) - 1, 'sheet')} fit"
+        result["checks"].append({"id": "file", "label": "Every sheet of the file", "ok": ok, "detail": detail})
+        result["fitness"] = round(100 * sum(check["ok"] for check in result["checks"]) / len(result["checks"]))
+
+
+def _sheet_name(sheet_names) -> str | None:
+    """The control table's sheet_name: the sheet, or the sheets stacked into one table."""
+    return ", ".join(dict.fromkeys(sheet_names)) or None
+
+
+def _sheet_labels(outputs: list[OutputCheck]) -> dict[str, str]:
+    """Each output of one file by its sheets; by its name too when two come from the same sheets."""
+    plain = {output.key: _sheet_name(output.sheet_names) or output.name for output in outputs}
+    twins = Counter(plain.values())
+    labels = {}
+    for output in outputs:
+        label = plain[output.key]
+        labels[output.key] = label if twins[label] == 1 else f"{label} ({output.name})"
+    return labels
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def _month_view(stats: dict | None) -> dict:
@@ -596,10 +666,12 @@ def _parse_month(value: str | None, name: str) -> date:
 
 
 def stage(session_id: str, keys: list[str] | None, user_name: str) -> Session:
-    """Write the chosen outputs to staging and the control table, in one transaction."""
+    """Write the chosen outputs to staging and the control table, in one transaction. A file
+    is staged whole: choosing one of its outputs stages every one."""
     session = get(session_id)
     with session.lock:
-        targets = [output for output in session.outputs if (not keys or output.key in keys) and not output.staged]
+        files = {output.job_id for output in session.outputs if not keys or output.key in keys}
+        targets = [output for output in session.outputs if output.job_id in files and not output.staged]
         if not targets:
             raise conflict("Nothing to stage: these tables are already staged.")
         with db.connection() as conn:
@@ -653,6 +725,7 @@ def _stage_one(conn, session: Session, output: OutputCheck, user_name: str) -> d
     }
     values = {
         "source_system": file.source_system, "file_name": file.file_name,
+        "sheet_name": _sheet_name(record.sheet_names),
         "reporting_period_type": result["period_type"] if action != rules.REJECTED else None,
         "processing_action": action, "bronze_load_flag": "N",
         "file_received_date": file.received,
@@ -745,8 +818,12 @@ def session_out(session: Session) -> dict:
         outputs.append({
             "key": output.key, "job_id": output.job_id, "output_id": output.output_id, "name": output.name,
             "sheet_names": output.sheet_names, "rows": output.rows, "columns": output.columns,
+            "sheet_name": _sheet_name(output.sheet_names),
             "required": [
                 {"name": item.name, "label": item.label, "date_role": item.date_role,
+                 # The required columns that can stand in for this one (Silver names).
+                 "one_of": [other.name for other in required() if item.one_of and other.one_of == item.one_of
+                            and other.name != item.name],
                  "column": output.mapping.get(item.name), "vote": output.votes.get(item.name),
                  "options": output.options.get(item.name, []), "reviewer": item.name in output.reviewer}
                 for item in required()

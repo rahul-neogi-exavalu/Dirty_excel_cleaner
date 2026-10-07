@@ -29,6 +29,28 @@ def test_the_required_columns_are_the_business_list():
     assert roles == {"AED": "accounting_effective_date", "PED": "policy_effective_date",
                      "TED": "transaction_effective_date"}
     assert {item.label for item in required} >= {"Producer/Agency Name", "InsuranceCompany Name", "Revenue"}
+    pairs = [tuple(item.label for item in group) for group in v.requirements(required) if len(group) > 1]
+    assert pairs == [("CommissionPct", "GrossCommissionAmount"), ("ProducerCommissionAmount", "ProducerCommissionPct")]
+    assert len(v.requirements(required)) == 12
+
+
+def test_one_of_a_group_of_alternatives_is_enough():
+    required = [v.Required("revenue", "Revenue"), v.Required("commission_pct", "CommissionPct", one_of="gross"),
+                v.Required("gross_commission_amount", "GrossCommissionAmount", one_of="gross")]
+    assert v.missing_required(required, {"revenue", "commission_pct"}) == []
+    assert v.missing_required(required, {"revenue", "gross_commission_amount"}) == []
+    assert v.missing_required(required, {"revenue", "commission_pct", "gross_commission_amount"}) == []
+    assert v.missing_required(required, {"commission_pct"}) == ["Revenue"]
+    assert v.missing_required(required, set()) == ["Revenue", "CommissionPct or GrossCommissionAmount"]
+
+
+def test_a_sheet_is_rejected_with_its_file():
+    decision = v.rejected_with_file({"Feb": "Missing required column: Revenue."})
+    assert decision.action == v.REJECTED
+    assert decision.reasons == ["Rejected with its file: every sheet of a file must be fit for Bronze, and "
+                                "Feb (Missing required column: Revenue) is not."]
+    two = v.rejected_with_file({"Feb": "Rejected by the reviewer.", "Mar": "Flagged."})
+    assert two.reasons[0].endswith("Feb (Rejected by the reviewer); Mar (Flagged) are not.")
 
 
 def test_aed_decides_when_every_row_has_one():

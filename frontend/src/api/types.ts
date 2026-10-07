@@ -464,6 +464,8 @@ export interface RequiredColumn {
   name: string;
   label: string;
   date_role: DateRole | null;
+  /** The required columns that can stand in for this one (names): one of them is enough. */
+  one_of: string[];
   /** The output's column (original name), or null: missing. */
   column: string | null;
   vote: { methods: MatchMethod[]; method: MatchMethod | "reviewer" | null; score: number | null; reason: string } | null;
@@ -503,6 +505,8 @@ export interface ValidationOutput {
   output_id: string;
   name: string;
   sheet_names: string[];
+  /** The control table's sheet_name: the sheet, or the stacked sheets comma-separated. */
+  sheet_name: string | null;
   rows: number;
   columns: OutputColumn[];
   required: RequiredColumn[];
@@ -557,6 +561,8 @@ export interface ControlRow {
   control_id: number;
   source_system: string;
   file_name: string;
+  /** The sheet the row's table came from (several, comma-separated, when stacked); null when listed by the business. */
+  sheet_name: string | null;
   reporting_period_type: ReportingPeriodType | null;
   processing_action: ProcessingAction | null;
   bronze_load_flag: "Y" | "N";

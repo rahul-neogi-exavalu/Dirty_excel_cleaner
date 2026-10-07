@@ -54,27 +54,50 @@ def context(monkeypatch):
     return found
 
 
-def _book(months, headers=HEADERS, blank_aed=False, ped=None):
-    book = openpyxl.Workbook()
-    sheet = book.active
-    sheet.title = "Data"
+DATES = ("AccountingEffectiveDate", "Pol_Ef_Dt", "TransactionEffectiveDate")
+
+
+def _fill(sheet, months, headers=HEADERS, blank=(), ped=None):
+    """``blank``: the columns left empty on the first row."""
     sheet.append(headers)
     n = 0
     for month in months:
         for day in (3, 17):
             n += 1
             row = {
-                "AccountingEffectiveDate": None if blank_aed and n == 1 else date(2026, month, day),
+                "AccountingEffectiveDate": date(2026, month, day),
                 "CommissionPct": 0.1, "GrossCommissionAmount": 100.5 + n, "InsuranceCompany Name": "Harrier",
                 "MarketProvider": "Market A", "Pol_Ef_Dt": ped or date(2026, month, 1), "PolicyNumber": f"POL-{n:04d}",
                 "Premium": 1000 + n, "Producer/Agency Name": "Brown & Brown", "ProducerCommissionAmount": 50 + n,
                 "ProducerCommissionPct": 0.05, "Revenue": 40 + n, "Transaction Detail": "New",
-                "TransactionEffectiveDate": date(2026, month, day),
+                "TransactionEffectiveDate": date(2026, month, day), "Notes": f"note {n}",
             }
+            if n == 1:
+                row.update(dict.fromkeys(blank))
             sheet.append([row.get(name) for name in headers])
+
+
+def _save(book):
     buffer = io.BytesIO()
     book.save(buffer)
     return buffer.getvalue()
+
+
+def _book(months, headers=HEADERS, blank_aed=False, ped=None):
+    book = openpyxl.Workbook()
+    book.active.title = "Data"
+    _fill(book.active, months, headers, ("AccountingEffectiveDate",) if blank_aed else (), ped)
+    return _save(book)
+
+
+def _sheets(*sheets):
+    """A workbook of several sheets: (title, months, headers, blank) each. Different headers
+    keep them apart (the cleaner stacks sheets whose headers are the same)."""
+    book = openpyxl.Workbook()
+    book.remove(book.active)
+    for title, months, headers, blank in sheets:
+        _fill(book.create_sheet(title), months, headers, blank)
+    return _save(book)
 
 
 def _clean(client, name, content):
@@ -98,6 +121,20 @@ def _validate(client, name, content):
 
 def _required(output, name):
     return next(item for item in output["required"] if item["name"] == name)
+
+
+def _by_sheet(data):
+    return {output["sheet_name"]: output for output in data["outputs"]}
+
+
+def _check(output, check_id):
+    return next(check for check in output["checks"] if check["id"] == check_id)
+
+
+def _patch(client, data, output, change):
+    response = client.patch(f"/api/validations/{data['id']}/outputs/{output['key']}", json=change)
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def test_a_year_to_date_file_with_every_column_is_ready(client, context):
@@ -175,3 +212,104 @@ def test_no_profit_center_or_received_date_needs_input(client, context):
     assert done["outputs"][0]["verdict"] == "ready"
     bad = client.patch(f"/api/validations/{data['id']}/files/{job}", json={"pc_id": "abc"})
     assert bad.status_code == 422
+
+
+def test_either_column_of_a_one_of_pair_is_enough(client, context):
+    # CommissionPct without GrossCommissionAmount; ProducerCommissionAmount without ProducerCommissionPct.
+    headers = [name for name in HEADERS if name not in ("GrossCommissionAmount", "ProducerCommissionPct")]
+    _, output = _validate(client, "PC0101_OneOfEach_07132026.xlsx", _book(range(1, 7), headers=headers))
+    assert output["missing"] == [] and output["verdict"] == "ready" and output["fitness"] == 100
+    assert _required(output, "gross_commission_amount")["column"] is None
+    assert _required(output, "commission_pct")["one_of"] == ["gross_commission_amount"]
+    assert _required(output, "producer_commission_pct")["one_of"] == ["producer_commission_amount"]
+    assert _required(output, "revenue")["one_of"] == []
+    assert _check(output, "columns")["detail"] == "12 of 12 found"
+
+
+def test_neither_column_of_a_one_of_pair_rejects_the_file(client, context):
+    headers = [name for name in HEADERS if name not in ("CommissionPct", "GrossCommissionAmount")]
+    _, output = _validate(client, "PC0101_NoCommission_07132026.xlsx", _book(range(1, 7), headers=headers))
+    assert output["missing"] == ["CommissionPct or GrossCommissionAmount"]
+    assert output["verdict"] == "rejected" and output["action"] == "REJECTED"
+    assert "Missing required column: CommissionPct or GrossCommissionAmount." in output["reasons"]
+
+
+def test_clearing_one_column_of_a_found_pair_leaves_the_file_fit(client, context):
+    data, output = _validate(client, "PC0101_Both_07132026.xlsx", _book(range(1, 7)))
+    assert output["verdict"] == "ready"
+    cleared = _patch(client, data, output, {"mapping": {"commission_pct": None}})["outputs"][0]
+    assert cleared["missing"] == [] and cleared["verdict"] == "ready"
+    both = _patch(client, data, output, {"mapping": {"gross_commission_amount": None}})["outputs"][0]
+    assert both["missing"] == ["CommissionPct or GrossCommissionAmount"] and both["verdict"] == "rejected"
+
+
+def test_one_unfit_sheet_rejects_every_sheet_of_the_file(client, context):
+    no_revenue = [name for name in HEADERS if name != "Revenue"]
+    data, _ = _validate(client, "PC0101_TwoSheets_07132026.xlsx", _sheets(
+        ("Fit", range(1, 7), HEADERS, ()), ("NoRevenue", range(1, 7), no_revenue, ())))
+    sheets = _by_sheet(data)
+    assert set(sheets) == {"Fit", "NoRevenue"}
+    assert sheets["NoRevenue"]["missing"] == ["Revenue"] and sheets["NoRevenue"]["verdict"] == "rejected"
+    fit = sheets["Fit"]
+    assert fit["missing"] == [] and fit["verdict"] == "rejected" and fit["action"] == "REJECTED"
+    assert "NoRevenue (Missing required column: Revenue)" in fit["reasons"][0]
+    assert _check(fit, "file") == {"id": "file", "label": "Every sheet of the file", "ok": False,
+                                   "detail": "Rejected with NoRevenue"}
+    assert fit["fitness"] < 100 and data["counts"]["rejected"] == 2
+    # Mapping a column to Revenue makes that sheet fit, and the file with it.
+    premium = next(column["original"] for column in sheets["NoRevenue"]["columns"] if column["header"] == "Premium")
+    after = _by_sheet(_patch(client, data, sheets["NoRevenue"], {"mapping": {"revenue": premium}}))
+    assert {name: output["verdict"] for name, output in after.items()} == {"Fit": "ready", "NoRevenue": "ready"}
+    assert _check(after["Fit"], "file") == {"id": "file", "label": "Every sheet of the file", "ok": True,
+                                            "detail": "The other 1 sheet fit"}
+    assert after["Fit"]["fitness"] == 100
+
+
+def test_a_sheet_waiting_for_the_reviewer_holds_the_file_back(client, context):
+    data, _ = _validate(client, "PC0101_Undated_07132026.xlsx", _sheets(
+        ("Fit", range(1, 7), HEADERS, ()), ("Undated", range(1, 7), HEADERS + ["Notes"], DATES)))
+    sheets = _by_sheet(data)
+    assert sheets["Undated"]["verdict"] == "needs_input" and sheets["Undated"]["reporting_start_date"] is None
+    fit = sheets["Fit"]
+    assert fit["verdict"] == "needs_input" and fit["action"] == "INSERT"
+    assert fit["needs"] == ["Finish Undated first: a file's sheets are staged together."]
+    assert _check(fit, "file")["detail"] == "Waiting on Undated"
+    after = _by_sheet(_patch(client, data, sheets["Undated"],
+                             {"reporting_start_date": "2026-01", "reporting_end_date": "2026-06"}))
+    assert after["Fit"]["verdict"] == "ready" and after["Undated"]["verdict"] == "ready"
+    # The reviewer rejecting one sheet rejects the other.
+    rejected = _by_sheet(_patch(client, data, after["Fit"], {"choice": "reject"}))
+    assert rejected["Fit"]["reasons"] == ["Rejected by the reviewer."]
+    assert rejected["Undated"]["verdict"] == "rejected" and "Fit (Rejected by the reviewer)" in rejected["Undated"]["reasons"][0]
+    assert any("so are the file's other 1 sheet" in warning for warning in rejected["Fit"]["warnings"])
+
+
+def test_staging_one_sheet_stages_the_whole_file(client, context, monkeypatch):
+    from contextlib import contextmanager
+
+    from api.services import validation_service
+
+    class Conn:
+        def execute(self, *args, **kwargs):
+            return self
+
+    @contextmanager
+    def connection():
+        yield Conn()
+
+    staged = []
+
+    def stage_one(conn, session, output, user_name):
+        staged.append(output.key)
+        return {"control_id": len(staged), "staging_table": f"stg_{len(staged)}",
+                "processing_action": output.decision.action, "seeded": False}
+
+    monkeypatch.setattr(validation_service.db, "connection", connection)
+    monkeypatch.setattr(validation_service, "_stage_one", stage_one)
+    data, _ = _validate(client, "PC0101_Both_07132026.xlsx", _sheets(
+        ("Jan", range(1, 7), HEADERS, ()), ("Feb", range(1, 7), HEADERS + ["Notes"], ())))
+    keys = [output["key"] for output in data["outputs"]]
+    assert len(keys) == 2
+    response = client.post(f"/api/validations/{data['id']}/stage", json={"keys": keys[:1]})
+    assert response.status_code == 200, response.text
+    assert sorted(staged) == sorted(keys) and response.json()["staged"] == 2

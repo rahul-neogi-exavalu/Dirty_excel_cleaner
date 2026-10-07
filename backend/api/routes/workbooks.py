@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Query, UploadFile
+from fastapi import APIRouter, File, Query, Response, UploadFile
 
 from .. import config
 from ..schemas import SourcePreview, WorkbookOut
@@ -45,7 +45,7 @@ def preview_sheet(
     return SourcePreview(**source_preview.preview(upload, sheet, offset, limit, col_offset, col_limit))
 
 
-@router.delete("/{workbook_id}", status_code=204)
+@router.delete("/{workbook_id}", status_code=204, response_class=Response)
 def delete_workbook(workbook_id: str) -> None:
     workbook_service.delete_upload(workbook_id)
 

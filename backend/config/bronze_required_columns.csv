@@ -1,15 +1,15 @@
-silver_column_name,label,date_role
-accounting_effective_date,AccountingEffective Date,AED
-commission_pct,CommissionPct,
-gross_commission_amount,GrossCommissionAmount,
-insurance_company_name,InsuranceCompany Name,
-market_provider,MarketProvider,
-policy_effective_date,PolicyEffectiveDate,PED
-policy_number,PolicyNumber,
-premium,Premium,
-producer_agency_name,Producer/Agency Name,
-producer_commission_amount,ProducerCommissionAmount,
-producer_commission_pct,ProducerCommissionPct,
-revenue,Revenue,
-transaction_detail,Transaction Detail,
-transaction_effective_date,TransactionEffectiveDate,TED
+silver_column_name,label,date_role,one_of
+accounting_effective_date,AccountingEffective Date,AED,
+commission_pct,CommissionPct,,gross_commission
+gross_commission_amount,GrossCommissionAmount,,gross_commission
+insurance_company_name,InsuranceCompany Name,,
+market_provider,MarketProvider,,
+policy_effective_date,PolicyEffectiveDate,PED,
+policy_number,PolicyNumber,,
+premium,Premium,,
+producer_agency_name,Producer/Agency Name,,
+producer_commission_amount,ProducerCommissionAmount,,producer_commission
+producer_commission_pct,ProducerCommissionPct,,producer_commission
+revenue,Revenue,,
+transaction_detail,Transaction Detail,,
+transaction_effective_date,TransactionEffectiveDate,TED,

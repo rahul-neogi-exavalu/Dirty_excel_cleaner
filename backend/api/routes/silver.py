@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
@@ -175,7 +175,7 @@ async def edit_saved_mapping(request: SavedMappingEdit) -> dict:
     )
 
 
-@router.delete("/mapping", status_code=204)
+@router.delete("/mapping", status_code=204, response_class=Response)
 async def delete_saved_mapping(request: SavedMappingRow) -> None:
     await run_in_threadpool(
         silver_service.delete_saved_mapping, request.profit_center, request.pc_column, request.drt_column,

@@ -512,14 +512,15 @@ threads, and measured the opposite by a wide margin. The default follows the mea
 The last steps, **Validate** and **Ingest**, put the cleaned tables into the bronze database. They follow the same rules the team applied by hand (the AHI File → Bronze scenario document), but a person still approves every change that matters.
 
 **What happens in Validate:**
-- **Required columns:** each file's columns are matched to your 14 required columns. The match uses what was approved before, exact spelling, fuzzy, semantic meaning, and AI. Any required column still missing means the file is rejected. Each screen shows a "% fit for Bronze" score.
+- **Required columns:** each file's columns are matched to your 14 required columns. The match uses what was approved before, exact spelling, fuzzy, semantic meaning, and AI. Any required column still missing means the file is rejected. Two pairs need only one of the pair (either, or both, is fine): **CommissionPct or GrossCommissionAmount**, and **ProducerCommissionAmount or ProducerCommissionPct** (the `one_of` column of `backend/config/bronze_required_columns.csv`). Each screen shows a "% fit for Bronze" score.
+- **The whole file:** a file is fit only if every one of its sheets is. One sheet rejected rejects all the file's sheets, and a file is staged with all its sheets at once.
 - **Reporting dates:** AED (Accounting Effective Date) decides if every row has a readable date, otherwise PED, then TED. Otherwise the reviewer enters them. Dates are stored as whole months.
   - **YTD or monthly:** YTD is January through month N of one year, monthly is a single month.
   - **Neither** (e.g. Mar–Jun, or dates spanning several years): flagged, and rejected unless the reviewer corrects the dates.
   - **A monthly file for a month already in Bronze:** you choose to replace that month or reject the file, with a side-by-side comparison of rows, columns and AED/PED/TED population.
 - **File received date:** read from the file name in any common order (`_07132026` → 2026-07-13), using the last full date in the name. It is never used for the reporting dates.
 
-After Validate, the file is copied into a temporary `staging` schema and its plan is recorded in the **control table** (`ingest.control_table`).
+After Validate, the file is copied into a temporary `staging` schema and its plan is recorded in the **control table** (`ingest.control_table`): one row per sheet's table, with the sheet in `sheet_name` beside `file_name` (several sheets, comma-separated, when sheets with the same columns were stacked into one table).
 
 **What the tool works out on its own for Ingest:**
 

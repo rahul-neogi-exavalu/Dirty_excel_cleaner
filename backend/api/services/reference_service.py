@@ -42,7 +42,8 @@ LABEL_TABLE = "drt_label"
 MAPPING_TABLE = "bronze_column_mapping"
 CONTROL_FILE = "control_table 1.xlsx"
 CONTROL_TABLE = "control_table"
-# The workbook's columns, in its order: the control table starts with exactly these.
+# The workbook's columns, in its order: the control table starts with these, sheet_name
+# beside file_name (migration 007). The workbook lists files, so a seeded row has no sheet.
 CONTROL_COLUMNS = ("control_id", "source_system", "file_name", "reporting_period_type", "processing_action",
                    "bronze_load_flag", "file_received_date", "drt_reporting_start_date", "drt_reporting_end_date")
 

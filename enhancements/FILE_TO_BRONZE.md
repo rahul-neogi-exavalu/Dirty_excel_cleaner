@@ -225,7 +225,7 @@ flowchart TD
 1. **Configure:** upload the workbooks and pick the sheets.
 2. **Run:** clean them.
 3. **Results:** optionally rename headers.
-4. **Validate:** check the mapping of the file's columns to the required Bronze columns (using saved DRT rules, exact matching, semantic/AI). A missing required column means the file is rejected. Correct the reporting dates if needed, and confirm replacements for monthly files overlapping existing data.
+4. **Validate:** check the mapping of the file's columns to the required Bronze columns (using saved DRT rules, exact matching, semantic/AI). A missing required column means the file is rejected; of an either/or pair (`one_of` in `bronze_required_columns.csv`: CommissionPct or GrossCommissionAmount, ProducerCommissionAmount or ProducerCommissionPct) one is enough. One sheet rejected rejects every sheet of its file, and a file is staged whole: one control row per sheet's table, with `sheet_name` beside `file_name`. Correct the reporting dates if needed, and confirm replacements for monthly files overlapping existing data.
 5. **Ingest:**
    - check each file's **source system**, **division**, and **file received date**;
    - review the **plan**: each target table, its action badge, its schema diff, and the reasons;
