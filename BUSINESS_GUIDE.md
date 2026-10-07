@@ -509,17 +509,23 @@ threads, and measured the opposite by a wide margin. The default follows the mea
 
 ## Loading into the bronze layer
 
-The last step, **Ingest**, puts the cleaned tables into the bronze database. It follows
-the same rules the team applied by hand (the AHI File → Bronze scenario document), but a
-person still approves every change that matters.
+The last steps, **Validate** and **Ingest**, put the cleaned tables into the bronze database. They follow the same rules the team applied by hand (the AHI File → Bronze scenario document), but a person still approves every change that matters.
 
-**What the tool works out on its own:**
+**What happens in Validate:**
+- **Required columns:** each file's columns are matched to your 14 required columns. The match uses what was approved before, exact spelling, fuzzy, semantic meaning, and AI. Any required column still missing means the file is rejected. Each screen shows a "% fit for Bronze" score.
+- **Reporting dates:** AED (Accounting Effective Date) decides if every row has a readable date, otherwise PED, then TED. Otherwise the reviewer enters them. Dates are stored as whole months.
+  - **YTD or monthly:** YTD is January through month N of one year, monthly is a single month.
+  - **Neither** (e.g. Mar–Jun, or dates spanning several years): flagged, and rejected unless the reviewer corrects the dates.
+  - **A monthly file for a month already in Bronze:** you choose to replace that month or reject the file, with a side-by-side comparison of rows, columns and AED/PED/TED population.
+- **File received date:** read from the file name in any common order (`_07132026` → 2026-07-13), using the last full date in the name. It is never used for the reporting dates.
+
+After Validate, the file is copied into a temporary `staging` schema and its plan is recorded in the **control table** (`ingest.control_table`).
+
+**What the tool works out on its own for Ingest:**
 
 - **Source system:** read from the file name's `PC` code, the same one as the profit center (`ARR_PC515.xlsx` → `pc0515`). A name with two different PC codes is left for you to fill in.
 - **Profit center (pc_id):** read from the file name. `PC796_2026-06 796 TPI - AJG Data Submission_796 TPI` becomes `PC0796`.
-- **File date:** read from the file name, so `2026-06` becomes 1 June 2026. A year on its own is not enough, and you enter it.
 - **Division:** looked up in the business's division table by profit center. For the few profit centers listed under two divisions, you choose.
-- **Period:** which months the file covers, read from its accounting or transaction dates, or from month-named sheets.
 - **Table name:** `ext_pc0515_arr`, or `ext_pc0515_data` when sheets are named after months.
 - **What to do** with the file against what is already loaded:
   - A first file creates the table.
@@ -529,13 +535,13 @@ person still approves every change that matters.
   - A revised Jan–Jun file, or a Jan–Jul file, replaces the earlier load. This needs your confirmation and a final check.
   - The very same file again is skipped.
 
-**What you decide:** you check the profit center, file date, division, source system and
-period, can rename a table or choose another action, and tick a confirmation for every
+**What you decide:** you check the profit center, file received date, division, source system
+and reporting dates, can rename a table or choose another action, and tick a confirmation for every
 risky item. You approve as the signed-in user. Nothing is written until then, and a file
-with no profit center or file date can't be approved.
+with no profit center or file received date can't be approved.
 
 **What every bronze row carries:** the profit center first, then the file's own columns,
-then the file date, the division, the exact file name, and the time it was loaded.
+then the file received date, the division, the exact file name, and the time it was loaded.
 
 **What protects the data:**
 

@@ -1,18 +1,23 @@
-"""What a file name says about its data: the profit center and the file date.
+"""What a file name says about its data: the profit center and the file received date.
 
-Source files are named like ``PC796_2026-06 796 TPI - AJG Data Submission_796 TPI``:
+Source files are named like ``PC0796_2026-06 796 TPI - AJG Data Submission_796 TPI_06302026``:
 
 * **pc_id** -- ``PC`` plus the profit-center number, normalised to four digits so it
   matches the DRT column mapping's keys: ``PC796`` -> ``PC0796``. A sub-office suffix
   is kept: ``PC069_01`` -> ``PC0069_01``.
-* **file_date** -- the date the file is for: ``2026-06`` -> 2026-06-01. Several shapes are
-  understood (``2026-06-15``, ``202606``, ``06-2026``, ``Jun 2026``); a year alone is not
-  a date. The profit-center token is removed first, so ``PC2024`` is never read as 2024.
-* **period** -- the months the data covers, when the name says so in words:
-  ``ARR_JanJun_2026`` -> 2026-01..2026-06, ``Q2 2026``, ``H1_2026``, ``Jul 2026``. A numeric
-  ``2026-06`` is the file's date, not its period (a June file may hold the year to date).
+* **file received date** -- the team writes it as the name's last full date, usually
+  ``_MMDDYYYY`` (``_06302026`` -> 2026-06-30), after any date the report itself carries
+  (``Request 20260731_08042026`` -> 2026-08-04). Full dates in any order are read
+  (``20260630``, ``06302026``, ``30062026``, ``2026-06-30``, ``6.30.2026``); one that reads
+  both month-first and day-first (``07062026``) is taken month-first and noted. A name
+  with no full date falls back to a month (``2026-06``, ``202606``, ``06-2026``,
+  ``Jun 2026`` -> the 1st); a year alone is not a date. The profit-center token is removed
+  first, so ``PC2024`` is never read as 2024.
+* **period** -- the months a name states in words (``ARR_JanJun_2026``, ``Q2 2026``). Kept
+  for reference only: the reporting dates come from the data's AED / PED / TED, never
+  from the name (``ahi_bronze.validation``).
 
-Either can be missing from a name; the Ingest review then asks the reviewer for it.
+Either can be missing from a name; the Validate step then asks the reviewer for it.
 """
 
 from __future__ import annotations
@@ -114,9 +119,73 @@ def period_from_filename(filename: str) -> tuple[str, str] | None:
     return f"{year:04d}-{first:02d}", f"{year:04d}-{last:02d}"
 
 
-def file_date_from_filename(filename: str) -> date | None:
-    """The date a file name states (first day of the month when only a month is given)."""
+# Full dates. Eight digits alone are read year-first, then month-first, then day-first;
+# Y-M-D and M-D-Y with separators need the same separator twice and a four-digit year.
+_EIGHT = re.compile(r"(?<!\d)(\d{8})(?!\d)")
+_YMD = re.compile(r"(?<!\d)((?:19|20)\d{2})([-_./])(0?[1-9]|1[0-2])\2(0?[1-9]|[12]\d|3[01])(?!\d)")
+_MDY = re.compile(r"(?<![\d.])(\d{1,2})([-_./])(\d{1,2})\2((?:19|20)\d{2})(?!\d)")
+
+
+def received_date_from_filename(filename: str) -> tuple[date | None, str | None]:
+    """The file received date a name states, and a note on how it was read (or None).
+
+    The last full date in the name wins: the team appends the received date after any
+    date the report itself carries. Without a full date, a month counts (its 1st).
+    """
     stem = _PC.sub(" ", Path(filename or "").stem)
+    found: list[tuple[int, date, str | None]] = []
+    for match in _YMD.finditer(stem):
+        day = _safe_date(int(match.group(1)), int(match.group(3)), int(match.group(4)))
+        if day:
+            found.append((match.start(), day, None))
+    for match in _EIGHT.finditer(stem):
+        read = _eight_digits(match.group(1))
+        if read:
+            found.append((match.start(), *read))
+    for match in _MDY.finditer(stem):
+        read = _either_order(match.group(0), int(match.group(4)), int(match.group(1)), int(match.group(3)))
+        if read:
+            found.append((match.start(), *read))
+    if found:
+        _, day, note = max(found, key=lambda item: item[0])
+        return day, note
+    month = _month_from_filename(stem)
+    if month:
+        return month, f"The file name gives only a month; {month:%d %b %Y} is assumed."
+    return None, None
+
+
+def _eight_digits(text: str) -> tuple[date, str | None] | None:
+    """20260713 (year first), else 07132026 (month first), else 13072026 (day first)."""
+    year_first = _safe_date(int(text[:4]), int(text[4:6]), int(text[6:])) if text[:2] in ("19", "20") else None
+    if year_first:
+        return year_first, None
+    if text[4:6] not in ("19", "20"):
+        return None
+    return _either_order(text, int(text[4:]), int(text[:2]), int(text[2:4]))
+
+
+def _either_order(text: str, year: int, first: int, second: int) -> tuple[date, str | None] | None:
+    """Month-first (the business's convention), else day-first; a note when both fit."""
+    month_first = _safe_date(year, first, second)
+    day_first = _safe_date(year, second, first)
+    if month_first and day_first and month_first != day_first:
+        return month_first, (f"{text} reads as {month_first:%d %b %Y} (month first) or {day_first:%d %b %Y} "
+                             "(day first); month first is used.")
+    if month_first:
+        return month_first, None
+    if day_first:
+        return day_first, f"{text} is read day first: {day_first:%d %b %Y}."
+    return None
+
+
+def file_date_from_filename(filename: str) -> date | None:
+    """The file received date a name states (see :func:`received_date_from_filename`)."""
+    return received_date_from_filename(filename)[0]
+
+
+def _month_from_filename(stem: str) -> date | None:
+    """A date from a name with no full date: a month, its 1st."""
     for pattern, shape in _DATES:
         for match in pattern.finditer(stem):
             parts = match.groups()

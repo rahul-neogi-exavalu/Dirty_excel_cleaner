@@ -1,4 +1,4 @@
-"""The 14 test workbooks, clean -> bronze -> silver, through the HTTP API, on Postgres.
+"""The 14 test workbooks, clean -> validate -> bronze -> silver, through the HTTP API, on Postgres.
 
 Skipped unless AHI_TEST_DATABASE_URL points at a scratch database. Uses its own
 throwaway schemas and drops them afterwards. The files come from
@@ -35,6 +35,7 @@ def env(tmp_path_factory):
     work = tmp_path_factory.mktemp("workspace")
     names = ("WORK_DIR", "UPLOAD_DIR", "JOB_DIR", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD",
              "DB_SSLMODE", "BRONZE_SCHEMA", "CONTROL_SCHEMA", "SILVER_SCHEMA", "CLEANSED_SCHEMA", "LOTL_TABLE",
+             "STAGING_SCHEMA",
              "DB_CONFIGURED",
              "INGEST_ENABLED", "AI_ENABLED", "WORD2VEC_PATH")
     saved = {name: getattr(config, name) for name in names}
@@ -45,6 +46,7 @@ def env(tmp_path_factory):
     config.BRONZE_SCHEMA, config.CONTROL_SCHEMA = f"bronze_s{suffix}", f"ingest_s{suffix}"
     config.SILVER_SCHEMA, config.LOTL_TABLE = f"silver_s{suffix}", f"ingest_s{suffix}.lotl"
     config.CLEANSED_SCHEMA = f"cleansed_s{suffix}"
+    config.STAGING_SCHEMA = f"staging_s{suffix}"
     config.DB_CONFIGURED = config.INGEST_ENABLED = True
     config.AI_ENABLED, config.WORD2VEC_PATH = False, ""  # deterministic: no external calls
     db.close()
@@ -53,7 +55,8 @@ def env(tmp_path_factory):
     yield TestClient(app), config
     db.close()
     with psycopg.connect(URL, autocommit=True) as conn:
-        for schema in (config.BRONZE_SCHEMA, config.CONTROL_SCHEMA, config.SILVER_SCHEMA, config.CLEANSED_SCHEMA):
+        for schema in (config.BRONZE_SCHEMA, config.CONTROL_SCHEMA, config.SILVER_SCHEMA, config.CLEANSED_SCHEMA,
+                       config.STAGING_SCHEMA):
             conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
     for name, value in saved.items():
         setattr(config, name, value)
@@ -68,32 +71,69 @@ def _wait(client, url, active=("queued", "running", "draft")):
     raise AssertionError(f"{url} did not finish")
 
 
-def _bronze(client, filename: str) -> list[str]:
-    """Clean and ingest one test file, confirming everything; returns its table names."""
-    plan = _plan(client, filename)
-    keys = [item["key"] for item in plan["items"]]
-    approved = client.post(f"/api/bronze/plans/{plan['id']}/approve", json={"reviewed_by": "Test Reviewer", "confirmed": keys})
-    assert approved.status_code == 202, approved.text
-    assert _wait(client, f"/api/bronze/plans/{plan['id']}")["status"] == "succeeded"
-    return [item["table_name"] for item in plan["items"]]
-
-
-def _plan(client, filename: str) -> dict:
-    """Clean one test file and plan its ingestion (file date filled in when the name has none)."""
+def _validated(client, filename: str, fixes: dict[str, str] | None = None, dates: tuple[str, str] | None = None,
+               choice: str | None = None) -> dict:
+    """Clean one test file and validate it, making the reviewer's corrections: ``fixes``
+    maps a required column to the header the file wrote for it, ``dates`` are reporting
+    months. A file whose name has no full date gets the file received date entered."""
     with open(FILES / filename, "rb") as handle:
         upload = client.post("/api/workbooks", files={"file": (filename, handle.read())}).json()
     sheets = [s["name"] for s in upload["sheets"] if not s["hidden"]]
     job = client.post("/api/jobs", json={"workbook_id": upload["id"], "sheets": sheets}).json()
     assert _wait(client, f"/api/jobs/{job['id']}", ("queued", "running"))["status"] == "succeeded"
-    plan = client.post("/api/bronze/plans", json={"job_ids": [job["id"]]}).json()
-    # Most test names carry a year but no month: the reviewer enters the file date.
-    for file in plan["files"]:
-        if not file["file_date"]:
-            response = client.patch(f"/api/bronze/plans/{plan['id']}/files/{file['job_id']}", json={"file_date": "2026-06"})
+    response = client.post("/api/validations", json={"job_ids": [job["id"]]})
+    assert response.status_code == 201, response.text
+    session = response.json()
+    for file in session["files"]:
+        if not file["file_received_date"]:
+            session = client.patch(f"/api/validations/{session['id']}/files/{file['job_id']}",
+                                   json={"file_received_date": "2026-06-30"}).json()
+    for output in session["outputs"]:
+        change = {}
+        if fixes:
+            headers = {column["header"]: column["original"] for column in output["columns"]}
+            change["mapping"] = {name: headers[header] for name, header in fixes.items() if header in headers}
+        if dates:
+            change["reporting_start_date"], change["reporting_end_date"] = dates
+        if choice:
+            change["choice"] = choice
+        if change:
+            response = client.patch(f"/api/validations/{session['id']}/outputs/{output['key']}", json=change)
             assert response.status_code == 200, response.text
-            plan = response.json()
-    assert all(file["pc_id"] for file in plan["files"]), plan["files"]
-    return plan
+            session = response.json()
+    assert all(file["pc_id"] for file in session["files"]), session["files"]
+    return session
+
+
+def _stage(client, session: dict) -> dict:
+    waiting = [(o["name"], o["needs"]) for o in session["outputs"] if o["verdict"] == "needs_input"]
+    assert not waiting, waiting
+    response = client.post(f"/api/validations/{session['id']}/stage", json={})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _plan(client) -> dict:
+    """The plan of every file staged and not loaded yet."""
+    response = client.post("/api/bronze/plans", json={})
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _load(client, plan: dict) -> list[str]:
+    keys = [item["key"] for item in plan["items"]]
+    approved = client.post(f"/api/bronze/plans/{plan['id']}/approve", json={"confirmed": keys})
+    assert approved.status_code == 202, approved.text
+    assert _wait(client, f"/api/bronze/plans/{plan['id']}")["status"] == "succeeded"
+    return [item["table_name"] for item in plan["items"]]
+
+
+def _bronze(client, filename: str, **corrections) -> list[str]:
+    """Validate, stage and ingest one test file, confirming everything; returns the tables loaded."""
+    session = _stage(client, _validated(client, filename, **corrections))
+    if not any(o["staged"]["processing_action"] != "REJECTED" for o in session["outputs"]):
+        return []
+    return _load(client, _plan(client))
 
 
 def _silver_run(client, file_names: list[str]) -> dict:
@@ -120,7 +160,7 @@ def _approve(client, run: dict) -> dict:
     response = client.post(f"/api/silver/runs/{run['id']}/approve", json={"reviewed_by": "Test Reviewer"})
     assert response.status_code == 202, response.text
     state = _wait(client, f"/api/silver/runs/{run['id']}")
-    assert state["status"] == "succeeded", state
+    assert state["status"] == "succeeded", state.get("error")
     return state
 
 
@@ -172,15 +212,15 @@ def test_ten_files_through_silver(env):
     assert len(mapping) >= 650 and not [r for r in mapping if r["profit_center"] == "PC0101"]
     state = _approve(client, run)
     saved = [r for r in client.get("/api/silver/mapping").json() if r["profit_center"] == "PC0101"]
-    assert len(saved) == 9 and all(r["silver_column_name"] for r in saved)
-    assert state["result"]["mappings_saved"] == 9
+    assert len(saved) == 16 and all(r["silver_column_name"] for r in saved)
+    assert state["result"]["mappings_saved"] == 16
     # Saved under the headers the file wrote, with only the business's DRT labels.
     from api.services import reference_service
 
     labels = set(reference_service.drt_labels_from_file())
-    assert {r["pc_column"] for r in saved} == {"Profit Center Name", "Profit Center Number", "Insurance Company Name",
-                                               "Producer Name", "Policy Number", "Premium", "Accounting Effective Date",
-                                               "Policy Effective Date", "Transaction Effective Date"}
+    from tools.make_silver_test_files import BASE
+
+    assert {r["pc_column"] for r in saved} == set(BASE)
     assert all(r["drt_column"] is None or r["drt_column"] in labels for r in saved)
     assert {r["drt_column"] for r in saved if r["pc_column"] == "Premium"} == {"Premium"}
     assert {r["drt_column"] for r in saved if r["pc_column"] == "Profit Center Name"} == {None}
@@ -197,6 +237,9 @@ def test_ten_files_through_silver(env):
     identity = _q(config, "SELECT DISTINCT source_table, source_file, ingestion_timestamp FROM {s}.silver_detail")
     load = _q(config, "SELECT table_name, file_name, processing_date FROM {c}.ingestion WHERE status = 'ingested'")[0]
     assert identity == [(f"{config.BRONZE_SCHEMA}.{load[0]}", load[1], load[2])]
+    assert _q(config, "SELECT DISTINCT drt_reporting_start_date::text, drt_reporting_end_date::text, drt_reporting_year, "
+                      "drt_reporting_month, drt_reporting_period, drt_reporting_period_type FROM {s}.silver_detail") == [
+        ("2026-01-01", "2026-06-30", 2026, 6, "2026-06", "YTD")]
 
     # 2-3. July (identical) and August (reordered): the whole mapping is pre-filled from
     # the saved rows -- and still needs approval.
@@ -208,7 +251,9 @@ def test_ten_files_through_silver(env):
     assert _q(config, "SELECT count(*) FROM {s}.silver_detail WHERE source_system = 'pc0101'")[0][0] == 40
 
     # 4. Renamed + extra columns land in their own bronze table; Silver unifies them.
-    tables = _bronze(client, "04_ARR_pc0101_2026_Sep_newcols.xlsx")
+    tables = _bronze(client, "04_ARR_pc0101_2026_Sep_newcols.xlsx",
+                     fixes={"producer_agency_name": "Writing Agency", "premium": "Premium Amt",
+                            "insurance_company_name": "Carrier"})
     assert tables == ["ext_pc0101_arr_v2"]
     run = _silver_run(client, ["04_ARR_pc0101_2026_Sep_newcols.xlsx"])
     # The review lives in the database: it survives the API letting go of every connection.
@@ -238,7 +283,9 @@ def test_ten_files_through_silver(env):
     assert not [r for r in mapping if r["profit_center"] == "PC0101" and r["pc_column"].casefold() == "notes"]
 
     # 5. A second source with its own wording, unified into the same columns.
-    _bronze(client, "05_Prem_pc0202_2026.xlsx")
+    _bronze(client, "05_Prem_pc0202_2026.xlsx",
+            fixes={"producer_agency_name": "Agency", "insurance_company_name": "Carrier Name",
+                   "policy_number": "Policy #", "premium": "Written Premium"})
     run = _silver_run(client, ["05_Prem_pc0202_2026.xlsx"])
     methods = _methods(run)
     assert {"saved", "exact"} <= set(methods["acct_eff_date"]) and "fuzzy" in methods["written_premium"]
@@ -258,8 +305,8 @@ def test_ten_files_through_silver(env):
     assert "0094|Dayton Office" in values and "0303|Columbus Office" in values
 
     # 7-8. Date and money formats.
-    for name in ("07_Dates_pc0404_2026.xlsx", "08_Money_pc0505_2026.xlsx"):
-        _bronze(client, name)
+    for name, dates in (("07_Dates_pc0404_2026.xlsx", ("2026-01", "2026-01")), ("08_Money_pc0505_2026.xlsx", None)):
+        _bronze(client, name, dates=dates)
         _approve(client, _silver_run(client, [name]))
     assert _q(config, "SELECT count(*) FROM {s}.silver_detail WHERE source_system = 'pc0404' "
                       "AND accounting_effective_date IS NULL")[0][0] == 2
@@ -285,10 +332,11 @@ def test_ten_files_through_silver(env):
 
     # 10. A dirty report: the fact table loads, the side lookup table is left unprocessed.
     tables = _bronze(client, "10_Report_pc0606_2026_JanJul.xlsx")
-    assert len(tables) == 2
+    assert tables == ["ext_pc0606_report"]
     loads = client.get("/api/silver/eligible").json()["loads"]
-    # Both tables of the one sheet reached bronze (neither was taken for the other).
     assert {l["table_name"] for l in loads if l["file_name"] == "10_Report_pc0606_2026_JanJul.xlsx"} == set(tables)
+    rejected = client.get("/api/bronze/control", params={"status": "rejected"}).json()
+    assert [r["file_name"] for r in rejected] == ["10_Report_pc0606_2026_JanJul.xlsx"]
     fact = [l["ingestion_id"] for l in loads if l["table_name"] == "ext_pc0606_report"]
     run = client.post("/api/silver/runs", json={"ingestion_ids": fact}).json()
     _approve(client, run)
@@ -317,28 +365,29 @@ def test_audit_scenarios_11_to_14(env):
         def q(statement):
             return conn.execute(statement.format(b=bronze)).fetchall()
 
-        # 11. May-Jul overlaps the loaded Jan-Jun only partly: nothing runs until the reviewer chooses.
-        plan = _plan(client, "11_ARR_pc0101_2026_MayJul_overlap.xlsx")
-        item = plan["items"][0]
-        assert any("only partly" in blocker for blocker in item["blockers"])
-        assert plan["files"][0]["period_start"] == "2026-05" and plan["files"][0]["period_end"] == "2026-07"
-        refused = client.post(f"/api/bronze/plans/{plan['id']}/approve",
-                              json={"reviewed_by": "Test Reviewer", "confirmed": [item["key"]]})
-        assert refused.status_code == 409
+        # 11. May-Jul is neither year to date nor monthly: flagged, and rejected as it is.
+        session = _validated(client, "11_ARR_pc0101_2026_MayJul_overlap.xlsx")
+        output = session["outputs"][0]
+        assert output["verdict"] == "flagged" and output["reporting_start_date"] == "2026-05-01"
+        staged = _stage(client, session)["outputs"][0]["staged"]
+        assert staged["processing_action"] == "REJECTED"
+        assert client.post("/api/bronze/plans", json={}).status_code == 409  # nothing to load
 
         # 12. Reordered columns plus a new one: evolve the same table, keeping its order.
         before = [r[0] for r in q("SELECT column_name FROM information_schema.columns WHERE table_schema = '{b}' "
                                   "AND table_name = 'ext_pc0101_arr' ORDER BY ordinal_position")]
-        plan = _plan(client, "12_ARR_pc0101_2026_Oct_reorder_newcol.xlsx")
+        _stage(client, _validated(client, "12_ARR_pc0101_2026_Oct_reorder_newcol.xlsx"))
+        plan = _plan(client)
         assert [(i["action"], i["table_name"]) for i in plan["items"]] == [("evolve", "ext_pc0101_arr")]
         assert plan["items"][0]["comparison"]["reordered"]
-        assert _bronze(client, "12_ARR_pc0101_2026_Oct_reorder_newcol.xlsx") == ["ext_pc0101_arr"]
+        assert _load(client, plan) == ["ext_pc0101_arr"]
         after = [r[0] for r in q("SELECT column_name FROM information_schema.columns WHERE table_schema = '{b}' "
                                  "AND table_name = 'ext_pc0101_arr' ORDER BY ordinal_position")]
         assert "commission" in after and [c for c in after if c in before] == before
 
         # 13. Amounts the document's list does not cover, read exactly and strictly.
-        _bronze(client, "13_MoneyDates_pc0909_2026.xlsx")
+        # Unreadable accounting dates: PED decides and spans years, so the reviewer enters March.
+        _bronze(client, "13_MoneyDates_pc0909_2026.xlsx", dates=("2026-03", "2026-03"))
         _approve(client, _silver_run(client, ["13_MoneyDates_pc0909_2026.xlsx"]))
         premiums = sorted((r[0] for r in _q(config, "SELECT premium FROM {s}.silver_detail WHERE source_system = 'pc0909'")),
                           key=lambda v: (v is None, v))
@@ -352,8 +401,9 @@ def test_audit_scenarios_11_to_14(env):
 
         # 14. Duplicate headers listed the other way round still land in their own columns.
         _bronze(client, "14_Clash_pc0707_2026_Jan.xlsx")
-        plan = _plan(client, "14_Clash_pc0707_2026_Feb_swapped.xlsx")
+        _stage(client, _validated(client, "14_Clash_pc0707_2026_Feb_swapped.xlsx"))
+        plan = _plan(client)
         assert plan["items"][0]["column_map"] == {"amount": "amount_2", "amount_2": "amount"}
-        _bronze(client, "14_Clash_pc0707_2026_Feb_swapped.xlsx")
+        _load(client, plan)
         dollars = q("SELECT amount::numeric FROM {b}.ext_pc0707_clash ORDER BY policy_number")
         assert all(row[0] >= 100 for row in dollars) and len(dollars) == 8

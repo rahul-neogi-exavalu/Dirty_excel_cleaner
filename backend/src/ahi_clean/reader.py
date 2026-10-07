@@ -152,6 +152,26 @@ def open_workbook(path):
         archive.close()
 
 
+@contextmanager
+def raw_sheet(path, name: str):
+    """One sheet's values exactly as the file stores them, for showing the file as it is.
+
+    Yields ``(rows, merged)``: value tuples from row 1 on -- rows the file leaves out come
+    back empty, so each row keeps its own sheet position -- and the merged ranges. Unlike
+    :func:`read_sheet` nothing is trimmed, nulled or filled in: error cells keep their
+    ``#VALUE!``, a merged range's value sits in its top-left cell only, and formulas give
+    the result Excel last saved. Raises ``KeyError`` for a sheet the file does not have.
+    """
+    workbook, archive = _open_structure(path)
+    try:
+        worksheet = workbook[name]
+        _, merged, _ = _scan_sheet_xml(archive, worksheet._worksheet_path)
+        worksheet.reset_dimensions()
+        yield worksheet.iter_rows(values_only=True), merged
+    finally:
+        archive.close()
+
+
 def _open_structure(path):
     """openpyxl's read-only load, minus the per-sheet size probe (see ``_LazySheet``)."""
     # data_only=True gives cached formula results rather than formula text.

@@ -3,6 +3,8 @@
     python backend/tools/seed_reference.py                  # fill empty tables only
     python backend/tools/seed_reference.py --replace        # reload division_mapping and the LOTL
     python backend/tools/seed_reference.py --replace-drt    # also reload drt_column_mapping and its labels (!)
+    python backend/tools/seed_reference.py --replace-control   # reload the control table workbook's rows
+    python backend/tools/seed_reference.py --replace-mapping   # reload the DRT rows of bronze_column_mapping
     python backend/tools/seed_reference.py --add-lotl extra.csv   # add rows to the LOTL
 
 Uses the database in backend/.env (or .env). The tables are filled automatically the first
@@ -11,6 +13,10 @@ sends new workbooks, or to add LOTL rows (a test fixture, a new office).
 
 --replace-drt deletes every row of drt_column_mapping, including the mappings reviewers
 approved in Silver runs (they are saved in the same table), and reloads the workbook.
+
+--replace-control reloads the rows of assets/control_table 1.xlsx that nothing has staged
+yet; --replace-mapping reloads bronze_column_mapping's DRT rows and keeps the mappings the
+Validate step added.
 
 --add-lotl takes a CSV with the LOTL's columns: profit_center_number, legacy_office_name,
 status.
@@ -46,10 +52,13 @@ def add_lotl(path: Path) -> int:
     return len(rows)
 
 
-def seed(replace: bool = False, replace_drt: bool = False) -> dict[str, int]:
+def seed(replace: bool = False, replace_drt: bool = False, replace_control: bool = False,
+         replace_mapping: bool = False) -> dict[str, int]:
     with db.connection() as conn:
         loaded = reference_service.seed_control(conn, replace=replace)
         loaded.update(reference_service.seed_silver(conn, silver_service.catalog(), replace=replace_drt))
+        loaded.update(reference_service.seed_bronze_mapping(conn, replace=replace_mapping))
+        loaded.update(reference_service.seed_control_table(conn, replace=replace_control))
     return loaded
 
 
@@ -58,10 +67,14 @@ def main() -> int:
     parser.add_argument("--replace", action="store_true", help="reload division_mapping and the LOTL")
     parser.add_argument("--replace-drt", action="store_true",
                         help="reload drt_column_mapping, discarding approved mappings")
+    parser.add_argument("--replace-control", action="store_true",
+                        help="reload the control table workbook's rows that nothing has staged")
+    parser.add_argument("--replace-mapping", action="store_true",
+                        help="reload bronze_column_mapping's DRT rows (keeps added mappings)")
     parser.add_argument("--add-lotl", type=Path, help="CSV of LOTL rows to append")
     args = parser.parse_args()
     try:
-        loaded = seed(args.replace, args.replace_drt)
+        loaded = seed(args.replace, args.replace_drt, args.replace_control, args.replace_mapping)
         for table, count in loaded.items():
             print(f"{count} rows loaded into {table}")
         if not loaded:

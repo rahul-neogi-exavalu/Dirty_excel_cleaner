@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query
 from .. import config
 from ..auth import User, require_user
 from ..schemas import (
-    HeaderReset, HeaderUpdate, JobCreate, JobResults, JobStatus, OutputSummary, Preview,
+    ColumnExclusion, HeaderReset, HeaderUpdate, JobCreate, JobResults, JobStatus, OutputSummary, Preview,
 )
 from ..services import cleaning_service, results_service
 from ..store import STAGES, Job, store
@@ -108,4 +108,11 @@ def update_headers(job_id: str, output_id: str, body: HeaderUpdate) -> OutputSum
 def reset_headers(job_id: str, output_id: str, body: HeaderReset) -> OutputSummary:
     job = results_service.finished_job(job_id)
     record = results_service.reset_headers(job.output(output_id), body.columns)
+    return OutputSummary(**results_service.output_summary(record))
+
+
+@router.put("/{job_id}/outputs/{output_id}/exclusions", response_model=OutputSummary)
+def update_exclusions(job_id: str, output_id: str, body: ColumnExclusion) -> OutputSummary:
+    job = results_service.finished_job(job_id)
+    record = results_service.set_excluded(job.output(output_id), body.columns, body.excluded)
     return OutputSummary(**results_service.output_summary(record))

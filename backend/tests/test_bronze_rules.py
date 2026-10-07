@@ -356,3 +356,28 @@ def test_long_identifiers_hash_with_sha256_and_remember_the_old_name():
     item = only(planner.plan([candidate(sheets=["a" * 80], period=JULY)], [TableState(old, COLS)],
                              [Ingested("ing-1", old, "x.xlsx", "x", H1)]))
     assert item.table_name == old and item.action == planner.APPEND
+
+
+# --- the control table's decisions ------------------------------------------------
+
+
+def test_a_month_replacement_keeps_the_earlier_load_and_appends():
+    tables, history = _loaded()  # ing-1: Jan-Jun in ext_pc0515_arr
+    june = Period("2025-06", "2025-06")
+    plain = only(planner.plan([candidate(sha="june", period=june)], tables, history))
+    assert plain.action == planner.REPLACE and plain.blockers  # without a decision: only partly
+    item = only(planner.plan([candidate(sha="june", period=june, replace_month="2025-06",
+                                        month_replace_ids=("ing-1",))], tables, history))
+    assert item.action == planner.APPEND and not item.blockers and not item.replaces
+    assert item.replace_month == "2025-06" and [ref["id"] for ref in item.month_replaces] == ["ing-1"]
+    assert item.requires_confirmation and item.as_dict()["month_replaces"][0]["table_name"] == "ext_pc0515_arr"
+
+
+def test_a_year_to_date_file_supersedes_loads_in_other_tables_too():
+    tables = [TableState("ext_pc0515_arr", COLS), TableState("ext_pc0515_other", ["a", "b"])]
+    history = [Ingested("ing-1", "ext_pc0515_arr", "jan-may.xlsx", "old", Period("2025-01", "2025-05")),
+               Ingested("ing-2", "ext_pc0515_other", "june.xlsx", "other", Period("2025-06", "2025-06"))]
+    item = only(planner.plan([candidate(sha="ytd", period=H1, replaces_ids=("ing-1", "ing-2"))], tables, history))
+    assert item.action == planner.REPLACE and item.requires_confirmation
+    assert {(ref["id"], ref["table_name"]) for ref in item.replaces} == {
+        ("ing-1", "ext_pc0515_arr"), ("ing-2", "ext_pc0515_other")}

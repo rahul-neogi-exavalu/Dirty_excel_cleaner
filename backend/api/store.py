@@ -62,6 +62,9 @@ class OutputRecord:
     headers_updated_at: float | None = None
     # original column name -> its header as the source file wrote it.
     source_headers: dict[str, str] = field(default_factory=dict)
+    # Original names of the columns the user left out of bronze ingestion. The column
+    # stays in the cleaned table, its preview and its exports.
+    excluded: set[str] = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def current_name(self, original: str) -> str:

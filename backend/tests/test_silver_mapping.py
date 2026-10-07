@@ -58,7 +58,9 @@ def test_a_review_is_stored_and_read_back_whole():
         "net_premium", "premium", selection=matching.RECOMMENDED, also=["revenue"], samples=["1"],
         candidates=[matching.Candidate("premium", [matching.Vote(matching.SAVED, "premium", 1.0, "saved", own=True)], True)])
     load = service.Load("i1", "f.xlsx", 3, "2026-01", "2026-06", pc_id="PC0692",
-                        processing_date=datetime(2026, 7, 1, tzinfo=timezone.utc), file_date=date(2026, 6, 30))
+                        processing_date=datetime(2026, 7, 1, tzinfo=timezone.utc), file_received_date=date(2026, 6, 30),
+                        reporting_start_date=date(2026, 1, 1), reporting_end_date=date(2026, 6, 30),
+                        reporting_period_type="YTD")
     review = service.TableReview("ext_pc0692_arr", "pc0692", "PC0692", [load], ["net_premium"], [suggestion],
                                  {"rows": 3}, ["PC0692"], {"net_premium": "Net Premium"})
     run = service.Run("r1", [review], ["note"], [], lotl_rows=12, loaded={"i1": 3})
@@ -69,3 +71,10 @@ def test_a_review_is_stored_and_read_back_whole():
     assert back.tables[0].suggestions[0] == suggestion
     assert back.tables[0].headers == {"net_premium": "Net Premium"} and back.tables[0].pc_ids == ["PC0692"]
     assert (back.lotl_rows, back.loaded, back.version) == (12, {"i1": 3}, 2)
+    # A review saved before the file received date had its name still reads back.
+    old = service._load_state(load)
+    old["file_date"] = old.pop("file_received_date")
+    for name in ("reporting_start_date", "reporting_end_date", "reporting_period_type"):
+        old.pop(name)
+    restored = service._load_from(old)
+    assert restored.file_received_date == date(2026, 6, 30) and restored.reporting_start_date is None

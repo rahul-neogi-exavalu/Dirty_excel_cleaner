@@ -20,7 +20,7 @@ from ahi_clean import failures, reader
 from .. import config
 from ..errors import ApiError, conflict
 from ..store import ACTIVE, Upload, store
-from . import sheet_pool
+from . import sheet_pool, source_preview
 
 _CHUNK = 1024 * 1024
 # Rows scanned to decide whether a sheet holds anything at all.
@@ -152,4 +152,5 @@ def delete_upload(upload_id: str) -> None:
             "Wait for the run to finish, or cancel it, before removing the file.",
         )
     upload = store.remove_upload(upload_id)
+    source_preview.forget(upload_id)
     shutil.rmtree(upload.path.parent, ignore_errors=True)

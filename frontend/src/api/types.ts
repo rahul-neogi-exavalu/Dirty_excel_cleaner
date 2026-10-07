@@ -92,6 +92,8 @@ export interface OutputSummary {
   sheet_names: string[];
   flagged_columns: number;
   renamed_columns: number;
+  /** Columns left out of bronze ingestion. */
+  excluded_columns: number;
   headers_updated_at: number | null;
   file: string;
   metadata_file: string;
@@ -184,6 +186,8 @@ export interface PreviewColumn {
   original: string;
   dtype: string;
   renamed: boolean;
+  /** Left out of bronze ingestion. */
+  excluded: boolean;
 }
 
 export interface Preview {
@@ -193,6 +197,28 @@ export interface Preview {
   limit: number;
   total: number;
   total_unfiltered: number;
+}
+
+/** A window of one uploaded sheet's cells, as the file holds them (before cleaning). */
+export interface SourcePreview {
+  sheet: string;
+  hidden: boolean;
+  source_format: string;
+  /** The used extent: the sheet row of the last value, and the last used column. */
+  total_rows: number;
+  total_columns: number;
+  /** Rows that can be paged through; fewer than total_rows for a sheet too large to hold. */
+  available_rows: number;
+  offset: number;
+  limit: number;
+  col_offset: number;
+  col_limit: number;
+  /** Column letters of the window; row numbers are offset + 1 onwards. */
+  columns: string[];
+  rows: (string | number | boolean | null)[][];
+  /** Merged ranges (A1:B2) touching the window, and how many the sheet has in all. */
+  merged: string[];
+  merged_total: number;
 }
 
 export interface ColumnProfile {
@@ -289,39 +315,29 @@ export interface BronzeStatus {
   error: string | null;
 }
 
-export interface PeriodCandidate {
-  source: string;
-  column: string | null;
-  start: string | null;
-  end: string | null;
-  rows: number | null;
-  months?: number[];
-}
-
+/** A staged control row in the plan: decided in Validate, read-only at Ingest. */
 export interface PlanFile {
-  job_id: string;
+  key: string;
+  control_id: number;
   file_name: string;
-  source_system: string | null;
-  detected_source_system: string | null;
-  period_start: string | null;
-  period_end: string | null;
-  detected_period_start: string | null;
-  detected_period_end: string | null;
-  period_source: string | null;
-  period_candidates: PeriodCandidate[];
-  /** PC + 4-digit number, e.g. PC0796 (from the file name, or entered). */
+  output_name: string | null;
+  /** The control table's: EXT_PC0796. */
+  source_system: string;
   pc_id: string | null;
-  detected_pc_id: string | null;
-  /** YYYY-MM-DD. */
-  file_date: string | null;
-  detected_file_date: string | null;
   division_name: string | null;
-  /** The divisions division_mapping lists for the profit center (two for a few). */
-  division_matches: string[];
-  /** What the reviewer may choose from. */
-  division_options: string[];
-  /** Worth knowing, nothing to fix (no division listed, a file-name period the data disagrees with). */
-  warnings?: string[];
+  /** YYYY-MM-DD. */
+  file_received_date: string | null;
+  reporting_start_date: string;
+  reporting_end_date: string;
+  reporting_period_type: ReportingPeriodType | null;
+  date_detail: DateRole | null;
+  processing_action: ProcessingAction;
+  file_replaced: string | null;
+  replace_month: string | null;
+  rows: number;
+  fitness: number | null;
+  staging_table: string;
+  staged_at: number | null;
 }
 
 export interface PlanReplaceRef {
@@ -329,6 +345,7 @@ export interface PlanReplaceRef {
   file_name: string;
   period_start: string | null;
   period_end: string | null;
+  table_name?: string;
 }
 
 export interface PlanItem {
@@ -351,6 +368,9 @@ export interface PlanItem {
   requires_confirmation: boolean;
   reasons: string[];
   blockers: string[];
+  /** A monthly file replacing one month (YYYY-MM) of earlier loads, which keep their other months. */
+  replace_month: string | null;
+  month_replaces: PlanReplaceRef[];
 }
 
 export interface IngestPlan {
@@ -364,7 +384,7 @@ export interface IngestPlan {
   files: PlanFile[];
   items: PlanItem[];
   blockers: string[];
-  results: Record<string, { ingestion_id: string; rows_loaded: number; table_name: string }>;
+  results: Record<string, { ingestion_id: string; rows_loaded: number; table_name: string; control_id: number }>;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
@@ -382,9 +402,13 @@ export interface BronzeIngestion {
   created_at: number;
   superseded_by: string | null;
   pc_id: string | null;
-  file_date: string | null;
+  file_received_date: string | null;
   division_name: string | null;
   processing_date: number | null;
+  control_id: number | null;
+  reporting_start_date: string | null;
+  reporting_end_date: string | null;
+  reporting_period_type: ReportingPeriodType | null;
 }
 
 export interface BronzeTable {
@@ -398,6 +422,167 @@ export interface BronzeTable {
   created_at: number;
   updated_at: number;
   ingestions: BronzeIngestion[];
+}
+
+/* ---- Validate and the control table ------------------------------------------ */
+
+export type DateRole = "AED" | "PED" | "TED";
+export type ReportingPeriodType = "YTD" | "MONTHLY";
+export type ProcessingAction = "INSERT" | "APPEND" | "REJECTED";
+/** What Validate decided; DECIDE: the reviewer has to choose first. */
+export type ValidationAction = ProcessingAction | "DECIDE";
+export type Verdict = "ready" | "needs_input" | "flagged" | "rejected";
+/** The reviewer's choices: reject, replace (an older year-to-date file), replace_month (a month already loaded). */
+export type ValidationChoice = "reject" | "replace" | "replace_month";
+
+export interface ValidationFile {
+  job_id: string;
+  file_name: string;
+  pc_id: string | null;
+  detected_pc_id: string | null;
+  source_system: string | null;
+  /** YYYY-MM-DD. */
+  file_received_date: string | null;
+  detected_received_date: string | null;
+  received_note: string | null;
+  division_name: string | null;
+  division_matches: string[];
+  division_options: string[];
+  warnings: string[];
+}
+
+export interface OutputColumn {
+  original: string;
+  name: string;
+  current: string;
+  header: string;
+  excluded: boolean;
+  dtype: string;
+}
+
+export interface RequiredColumn {
+  name: string;
+  label: string;
+  date_role: DateRole | null;
+  /** The output's column (original name), or null: missing. */
+  column: string | null;
+  vote: { methods: MatchMethod[]; method: MatchMethod | "reviewer" | null; score: number | null; reason: string } | null;
+  options: { column: string; methods: MatchMethod[]; score: number }[];
+  reviewer: boolean;
+}
+
+export interface DateStat {
+  role: DateRole;
+  column: string | null;
+  rows: number;
+  populated: number;
+  invalid: number;
+  percent: number;
+  complete: boolean;
+  first: string | null;
+  last: string | null;
+}
+
+export interface FitnessCheck {
+  id: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface MonthView {
+  rows: number | null;
+  AED: number | null;
+  PED: number | null;
+  TED: number | null;
+}
+
+export interface ValidationOutput {
+  key: string;
+  job_id: string;
+  output_id: string;
+  name: string;
+  sheet_names: string[];
+  rows: number;
+  columns: OutputColumn[];
+  required: RequiredColumn[];
+  entered: boolean;
+  use_control_dates: boolean;
+  choice: ValidationChoice | null;
+  staged: { control_id: number; staging_table: string; processing_action: ProcessingAction; seeded: boolean } | null;
+  verdict: Verdict;
+  needs: string[];
+  warnings: string[];
+  missing: string[];
+  checks: FitnessCheck[];
+  fitness: number;
+  dates: Record<DateRole, DateStat>;
+  date_detail: DateRole | null;
+  origin: DateRole | "entered" | "control" | null;
+  flag: string | null;
+  period_type: ReportingPeriodType | null;
+  reporting_start_date: string | null;
+  reporting_end_date: string | null;
+  /** The reporting dates the control table lists for this file, when it lists them. */
+  listed: { start: string; end: string } | null;
+  months: Record<string, { rows: number } & Partial<Record<DateRole, number | null>>>;
+  action: ValidationAction | null;
+  reasons: string[];
+  options: ValidationChoice[];
+  confirm: boolean;
+  file_replaced: string | null;
+  replace_month: string | null;
+  compare: {
+    month: string;
+    this: { file_name: string; columns: number } & MonthView;
+    earlier: ({ control_id: number; file_name: string; columns: number | null } & MonthView)[];
+  } | null;
+  /** The control row this output fills in: one the business listed (seeded), or its own from an earlier staging. */
+  control: { control_id: number; seeded: boolean } | null;
+}
+
+export interface Validation {
+  id: string;
+  batch_id: string | null;
+  files: ValidationFile[];
+  outputs: ValidationOutput[];
+  notes: string[];
+  counts: Record<Verdict, number>;
+  created_at: number;
+  staged: number;
+}
+
+/** One row of the control table: the business's columns, then what the app adds. */
+export interface ControlRow {
+  control_id: number;
+  source_system: string;
+  file_name: string;
+  reporting_period_type: ReportingPeriodType | null;
+  processing_action: ProcessingAction | null;
+  bronze_load_flag: "Y" | "N";
+  file_received_date: string | null;
+  drt_reporting_start_date: string | null;
+  drt_reporting_end_date: string | null;
+  date_detail: DateRole | null;
+  file_replaced: string | null;
+  is_active: "Y" | "N";
+  pc_id: string | null;
+  division_name: string | null;
+  job_id: string | null;
+  output_id: string | null;
+  staging_table: string | null;
+  ingestion_id: string | null;
+  rejection_reason: string | null;
+  replace_month: string | null;
+  created_by: string | null;
+  created_at: number | null;
+  staged_at: number | null;
+  loaded_at: number | null;
+  bronze_table: string | null;
+  fitness: number | null;
+  reasons: string[];
+  rows: number | null;
+  output_name: string | null;
 }
 
 /* ---- Silver ---------------------------------------------------------------- */
@@ -458,8 +643,11 @@ export interface EligibleLoad {
   silver_status: string | null;
   pc_id: string | null;
   division_name: string | null;
-  file_date: string | null;
+  file_received_date: string | null;
   processing_date: number;
+  reporting_start_date: string | null;
+  reporting_end_date: string | null;
+  reporting_period_type: ReportingPeriodType | null;
 }
 
 export interface CleanupLoad {

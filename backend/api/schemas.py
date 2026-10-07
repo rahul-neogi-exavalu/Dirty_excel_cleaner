@@ -114,6 +114,8 @@ class OutputSummary(BaseModel):
     sheet_names: list[str]
     flagged_columns: int
     renamed_columns: int
+    # Columns the user left out of bronze ingestion.
+    excluded_columns: int = 0
     headers_updated_at: float | None
     file: str
     metadata_file: str
@@ -139,6 +141,8 @@ class PreviewColumn(BaseModel):
     original: str
     dtype: str
     renamed: bool
+    # Left out of bronze ingestion by the user.
+    excluded: bool = False
 
 
 class Preview(BaseModel):
@@ -150,6 +154,29 @@ class Preview(BaseModel):
     total_unfiltered: int
 
 
+class SourcePreview(BaseModel):
+    """A window of one uploaded sheet's cells, as the file holds them (before cleaning)."""
+
+    sheet: str
+    hidden: bool
+    source_format: str
+    # The used extent: the sheet row of the last value, and the last used column.
+    total_rows: int
+    total_columns: int
+    # Rows that can be paged through; fewer than total_rows for a sheet too large to hold.
+    available_rows: int
+    offset: int
+    limit: int
+    col_offset: int
+    col_limit: int
+    # Column letters of the window; row numbers are offset + 1 onwards.
+    columns: list[str]
+    rows: list[list[Any]]
+    # Merged ranges (A1:B2) that touch the window, and how many the sheet has in all.
+    merged: list[str]
+    merged_total: int
+
+
 class HeaderUpdate(BaseModel):
     # current (or original) column name -> new name
     renames: dict[str, str] = Field(min_length=1)
@@ -159,22 +186,20 @@ class HeaderReset(BaseModel):
     columns: list[str] | None = None
 
 
+class ColumnExclusion(BaseModel):
+    # current (or original) column names
+    columns: list[str] = Field(min_length=1)
+    # True leaves them out of bronze ingestion; False brings them back.
+    excluded: bool
+
+
 # --- Bronze ingestion ----------------------------------------------------------
 
 
 class PlanCreate(BaseModel):
-    job_ids: list[str] = Field(min_length=1)
+    # Control rows to load; none: every row staged and not loaded yet.
+    control_ids: list[int] | None = None
     batch_id: str | None = None
-
-
-class PlanFileUpdate(BaseModel):
-    source_system: str | None = None
-    period_start: str | None = None
-    period_end: str | None = None
-    # PC0796 (796 and PC796 are accepted), YYYY-MM or YYYY-MM-DD, a division name.
-    pc_id: str | None = None
-    file_date: str | None = None
-    division_name: str | None = None
 
 
 class PlanItemUpdate(BaseModel):
@@ -189,29 +214,28 @@ class PlanApprove(BaseModel):
 
 
 class PlanFile(BaseModel):
-    job_id: str
+    """A staged control row in the plan: decided in Validate, read-only here."""
+
+    key: str
+    control_id: int
     file_name: str
-    source_system: str | None
-    detected_source_system: str | None
-    period_start: str | None
-    period_end: str | None
-    detected_period_start: str | None
-    detected_period_end: str | None
-    period_source: str | None
-    period_candidates: list[dict[str, Any]]
-    pc_id: str | None = None
-    detected_pc_id: str | None = None
+    output_name: str | None = None
+    source_system: str
+    pc_id: str | None
+    division_name: str | None
     # ISO dates (YYYY-MM-DD).
-    file_date: str | None = None
-    detected_file_date: str | None = None
-    division_name: str | None = None
-    # The divisions division_mapping lists for the profit center (two for a few).
-    division_matches: list[str] = []
-    # What the reviewer may choose from: those, or every division when none is listed.
-    division_options: list[str] = []
-    # Worth knowing, nothing to fix: no division listed, a file-name period the data
-    # disagrees with, two profit centers in the name.
-    warnings: list[str] = []
+    file_received_date: str | None
+    reporting_start_date: str
+    reporting_end_date: str
+    reporting_period_type: str | None
+    date_detail: str | None
+    processing_action: str
+    file_replaced: str | None
+    replace_month: str | None
+    rows: int
+    fitness: int | None = None
+    staging_table: str
+    staged_at: float | None = None
 
 
 class PlanOut(BaseModel):
@@ -231,3 +255,35 @@ class PlanOut(BaseModel):
     created_at: float
     started_at: float | None
     finished_at: float | None
+
+
+# --- Validate (before Bronze) --------------------------------------------------------
+
+
+class ValidationCreate(BaseModel):
+    job_ids: list[str] = Field(min_length=1)
+    batch_id: str | None = None
+
+
+class ValidationFileUpdate(BaseModel):
+    # PC0796 (796 and PC796 are accepted), YYYY-MM-DD, a division name.
+    pc_id: str | None = None
+    file_received_date: str | None = None
+    division_name: str | None = None
+
+
+class ValidationOutputUpdate(BaseModel):
+    # Required column (Silver name) -> the output's column (original name), or null: missing.
+    mapping: dict[str, str | None] | None = None
+    # YYYY-MM (whole months); both null: back to what the data says.
+    reporting_start_date: str | None = None
+    reporting_end_date: str | None = None
+    # reject | replace (an older year-to-date file) | replace_month (a month already loaded) | null
+    choice: str | None = None
+    # Use the dates the control table lists for this file.
+    use_control_dates: bool | None = None
+
+
+class ValidationStage(BaseModel):
+    # Output keys to stage; none: every output not staged yet.
+    keys: list[str] | None = None

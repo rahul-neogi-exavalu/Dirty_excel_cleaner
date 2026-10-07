@@ -444,3 +444,53 @@ def test_cancelling_a_batch_skips_files_still_waiting(client, monkeypatch):
     assert status["status"] == "cancelled"
     assert [job["status"] for job in status["jobs"]] == ["cancelled", "cancelled"]
     assert client.get(f"/api/batches/{batch_id}/export/zip").status_code == 409
+
+
+def test_columns_can_be_left_out_of_ingestion(client):
+    workbook_id = _upload(client, MULTI_SHEET).json()["id"]
+    job_id = _run(client, workbook_id, ["Jan", "Feb"])["id"]
+    output = client.get(f"/api/jobs/{job_id}/results").json()["outputs"][0]
+    base = f"/api/jobs/{job_id}/outputs/{output['id']}"
+    names = output["column_names"]
+    assert output["excluded_columns"] == 0
+
+    unknown = client.put(f"{base}/exclusions", json={"columns": ["no such column"], "excluded": True})
+    assert unknown.status_code == 422
+
+    left_out = client.put(f"{base}/exclusions", json={"columns": [names[1]], "excluded": True})
+    assert left_out.status_code == 200, left_out.text
+    assert left_out.json()["excluded_columns"] == 1
+    columns = client.get(f"{base}/preview", params={"limit": 1}).json()["columns"]
+    assert [column["original"] for column in columns if column["excluded"]] == [names[1]]
+    # Only ingestion leaves it out: the cleaned table and its CSV keep every column.
+    assert client.get(f"{base}/export/csv").text.splitlines()[0].split(",") == names
+
+    everything = client.put(f"{base}/exclusions", json={"columns": names, "excluded": True})
+    assert everything.status_code == 422
+    assert everything.json()["error"]["message"] == "At least one column must be ingested."
+    assert client.get(f"/api/jobs/{job_id}/results").json()["outputs"][0]["excluded_columns"] == 1
+
+    back = client.put(f"{base}/exclusions", json={"columns": [names[1]], "excluded": False})
+    assert back.json()["excluded_columns"] == 0
+
+
+def test_bronze_load_drops_left_out_columns_without_renaming_others():
+    import polars as pl
+
+    from api.services import bronze_service
+    from api.store import OutputRecord
+
+    frame = pl.DataFrame({"Policy": ["P1"], "Premium": [10.5], "": ["x"], "Notes": ["n"]})
+    record = OutputRecord(
+        id="o", name="t", kind="standalone", frame=frame, tables=["A1:D2"], sheet_names=["S"],
+        type_flags={}, inferred={}, file="t.csv", metadata_file="t_meta.csv",
+        renames={"Notes": "Remarks"}, source_headers={"Policy": "Policy", "Premium": "Premium"},
+    )
+    everything = bronze_service.ingested_columns(record)
+    record.excluded = {"Premium"}
+    kept = bronze_service.ingested_columns(record)
+    assert [name for _, name in kept] == ["policy", "column_3", "remarks"]
+    # A headerless column keeps the bronze name it has with every column in.
+    assert dict(kept)[""] == dict(everything)[""]
+    assert bronze_service._as_text(record).columns == ["policy", "column_3", "remarks"]
+    assert bronze_service.record_headers(record) == {"policy": "Policy"}

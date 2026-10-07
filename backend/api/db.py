@@ -50,11 +50,16 @@ def pool():
             try:
                 migrate(_pool)
                 # The business's reference tables, filled from assets/ while they are empty.
-                from .services import reference_service, silver_service
+                from .services import bronze_service, reference_service, silver_service
 
                 with _pool.connection() as conn:
                     reference_service.seed_control(conn)
                     reference_service.seed_silver(conn, silver_service.catalog())
+                    # After the DRT mapping, which seeds the bronze mapping.
+                    reference_service.seed_bronze_mapping(conn)
+                    reference_service.seed_control_table(conn)
+                    # Bronze tables made before file_received_date and the reporting dates.
+                    bronze_service.upgrade_tables(conn)
             except Exception as error:
                 if _is_connection_error(error):
                     raise unreachable(error) from error
@@ -100,7 +105,7 @@ def migrate(target_pool) -> list[str]:
     """Apply the numbered SQL files in ``backend/migrations`` that have not run yet."""
     return run_migrations(target_pool, MIGRATIONS, config.CONTROL_SCHEMA, "{control}", "ahi-migrations",
                           extra={"{silver}": config.SILVER_SCHEMA, "{cleansed}": config.CLEANSED_SCHEMA,
-                                 "{bronze}": config.BRONZE_SCHEMA})
+                                 "{bronze}": config.BRONZE_SCHEMA, "{staging}": config.STAGING_SCHEMA})
 
 
 def run_migrations(target_pool, folder: Path, schema: str, placeholder: str, lock_key: str,

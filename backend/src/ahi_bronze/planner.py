@@ -16,6 +16,10 @@ The rules are the AHI File -> Bronze scenario document's:
   month.
 * The exact same file again (same content hash, same table region) -> SKIP, unless the
   reviewer chooses to re-ingest it.
+* The control table's decisions come in with the candidate: a year-to-date file names the
+  loads it supersedes (in whichever table they are), and a monthly file whose month is
+  already loaded may replace that month only (``replace_month``): the earlier loads keep
+  their other months.
 
 Files are planned oldest period first (Jan-Jun before Jan-Jul) against a running
 picture of the bronze layer, so several files in one batch with the same schema land in
@@ -65,6 +69,11 @@ class Candidate:
     headers: dict[str, str] = field(default_factory=dict, hash=False, compare=False)
     # The cleaner's sheet-provenance column, if this output has one.
     provenance: str | None = None
+    # From the control table: ingestions this file supersedes (a year-to-date file), and
+    # the month (YYYY-MM) it replaces in the ingestions that hold it (a monthly file).
+    replaces_ids: tuple[str, ...] = ()
+    replace_month: str | None = None
+    month_replace_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +128,9 @@ class PlanItem:
     # The file's column -> the table column it loads into, where the names differ only
     # because duplicate headers were numbered in another order (amount_2 is the table's amount).
     column_map: dict[str, str] = field(default_factory=dict)
+    # A monthly file replacing one month (YYYY-MM) of earlier loads, which stay otherwise.
+    replace_month: str | None = None
+    month_replaces: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -142,6 +154,8 @@ class PlanItem:
             "reasons": self.reasons,
             "blockers": self.blockers,
             "column_map": self.column_map,
+            "replace_month": self.replace_month,
+            "month_replaces": self.month_replaces,
         }
 
 
@@ -226,7 +240,7 @@ def _plan_one(c: Candidate, state: dict[str, _Table], by_hash: dict[str, list[In
     if not source:
         item.blockers.append("Enter the source system.")
     if c.period is None:
-        item.blockers.append("Confirm the period this file covers.")
+        item.blockers.append("Enter the reporting start and end dates this file covers.")
 
     # A file with several tables has one ingestion per table, all with the same hash:
     # only the one made from the same table region (or, for older loads, the same
@@ -258,11 +272,13 @@ def _plan_one(c: Candidate, state: dict[str, _Table], by_hash: dict[str, list[In
         _existing(item, c, table, state)
 
     _apply_override(item, c, state)
+    if item.action != SKIP:
+        _control_decisions(item, c, state)
     if covered_by and not c.action_override and item.action != SKIP:
         item.allowed_actions = [SKIP] + [action for action in item.allowed_actions if action != SKIP]
         item.action, item.replaces, item.rebuild = SKIP, [], False
         item.blockers = []
-        item.reasons.append(f"{covered_by} in this batch covers this file's period and replaces it; "
+        item.reasons.append(f"{covered_by} in this batch covers this file's reporting dates and replaces it; "
                             "choose another action to load this file as well.")
     _record(item, c, state)
     return item
@@ -357,6 +373,9 @@ def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Tab
     comparison = compare(table.columns, incoming, ignore=provenance)
     item.comparison = comparison.as_dict()
     overlapping = [load for load in table.loads if c.period and load[2] and load[2].overlaps(c.period)]
+    if c.replace_month:
+        # The reviewer chose to replace this month in the loads holding it: they stay.
+        overlapping = [load for load in overlapping if load[0] not in c.month_replace_ids]
     from_db = [load for load in overlapping if not load[3]]
     from_plan = [load for load in overlapping if load[3]]
     if c.provenance and c.provenance not in table.columns:
@@ -367,7 +386,7 @@ def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Tab
         item.replaces = [_ref(load[0], load[1], load[2], item.table_name) for load in from_db]
         item.requires_confirmation = True
         names = ", ".join(f"{load[1]} ({load[2].label()})" for load in from_db)
-        item.reasons.append(f"Period overlaps what is already loaded: replaces {names}.")
+        item.reasons.append(f"Reporting dates overlap what is already loaded: replaces {names}.")
         partial = [load for load in from_db if not c.period.covers(load[2])]
         if partial and not c.action_override:
             for load in partial:
@@ -398,7 +417,7 @@ def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Tab
     if from_plan:
         item.requires_confirmation = True
         names = ", ".join(load[1] for load in from_plan)
-        item.reasons.append(f"Same period as {names} in this batch; both will be kept.")
+        item.reasons.append(f"Same reporting dates as {names} in this batch; both will be kept.")
 
     if comparison.kind == DIFFERENT:
         _new_table(item, c, state, "Columns, order and count differ from the existing table.")
@@ -417,6 +436,29 @@ def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Tab
         if comparison.missing:
             item.reasons.append(f"{len(comparison.missing)} column(s) not in this file are left empty: {', '.join(comparison.missing)}.")
         item.requires_confirmation = item.requires_confirmation or table.in_database
+
+
+def _control_decisions(item: PlanItem, c: Candidate, state: dict[str, _Table]) -> None:
+    """Apply what the control table decided: the loads a year-to-date file supersedes (in
+    any table), and the month a monthly file replaces in the loads holding it."""
+    loads = {load[0]: (name, load) for name, table in state.items() for load in table.loads if not load[3]}
+    known = {ref["id"] for ref in item.replaces}
+    for past_id in c.replaces_ids:
+        if past_id in known or past_id not in loads:
+            continue
+        name, load = loads[past_id]
+        item.replaces.append(_ref(load[0], load[1], load[2], name))
+        item.requires_confirmation = True
+        item.reasons.append(f"Year to date: supersedes {load[1]} in {name}.")
+    if c.replace_month:
+        item.replace_month = c.replace_month
+        item.month_replaces = [_ref(load[0], load[1], load[2], name)
+                               for past_id in c.month_replace_ids if past_id in loads
+                               for name, load in [loads[past_id]]]
+        if item.month_replaces:
+            item.requires_confirmation = True
+            names = ", ".join(ref["file_name"] for ref in item.month_replaces)
+            item.reasons.append(f"Replaces {c.replace_month} in {names}; their other months stay.")
 
 
 def _kind_action(kind: str) -> str:

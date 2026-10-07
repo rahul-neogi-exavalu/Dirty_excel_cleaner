@@ -45,13 +45,19 @@ import polars as pl
 
 from ahi_bronze import file_meta, naming
 from ahi_silver import catalog as catalog_module
-from ahi_silver import matching, normalize, profit_center, semantic, transform
+from ahi_silver import matching, normalize, profit_center, transform
 from ahi_silver.catalog import MAPPED, SilverColumn
 from ahi_silver.matching import Suggestion
 
 from .. import config, db
 from ..errors import ApiError, conflict, not_found
 from . import job_history, reference_service
+from .column_matching import header_key as _header_key  # noqa: F401 - shared with the Validate step
+from .column_matching import matchers as _matchers
+from .column_matching import precedents as _precedents
+from .column_matching import same_pc as _same_pc
+from .column_matching import samples as _samples
+from .column_matching import saved_votes as _saved
 
 log = logging.getLogger("ahi.silver")
 
@@ -88,8 +94,12 @@ class Load:
     pc_id: str | None = None
     # The bronze load time: Silver's ingestion_timestamp and part of the load's identity.
     processing_date: datetime | None = None
-    file_date: date | None = None
+    file_received_date: date | None = None
     division_name: str | None = None
+    # The control table's reporting dates (whole months) and YTD / MONTHLY: Silver's drt_reporting_*.
+    reporting_start_date: date | None = None
+    reporting_end_date: date | None = None
+    reporting_period_type: str | None = None
 
 
 @dataclass
@@ -162,11 +172,6 @@ def _source_table(table: str) -> str:
     return f"{config.BRONZE_SCHEMA}.{table}"
 
 
-def _header_key(text: str | None) -> str:
-    """A header as written, without case or extra spaces: 'Net  Premium\\n' -> 'net premium'."""
-    return " ".join(str(text or "").split()).casefold()
-
-
 # --- reading ---------------------------------------------------------------------
 
 
@@ -177,8 +182,9 @@ def eligible() -> dict:
     with db.connection() as conn:
         rows = conn.execute(sql.SQL(
             "SELECT i.id, i.table_name, i.file_name, i.source_system, i.period_start, i.period_end, "
-            "i.rows_loaded, i.created_at, i.silver_status, i.pc_id, i.division_name, i.file_date, "
-            "coalesce(i.processing_date, i.created_at) FROM {}.ingestion i "
+            "i.rows_loaded, i.created_at, i.silver_status, i.pc_id, i.division_name, i.file_received_date, "
+            "coalesce(i.processing_date, i.created_at), i.reporting_start_date, i.reporting_end_date, "
+            "i.reporting_period_type FROM {}.ingestion i "
             "WHERE i.status = 'ingested' AND i.silver_status IS DISTINCT FROM 'succeeded' "
             "ORDER BY i.created_at DESC").format(_ident(config.CONTROL_SCHEMA))).fetchall()
         cleanup = _superseded(conn)
@@ -187,7 +193,9 @@ def eligible() -> dict:
             {"ingestion_id": r[0], "table_name": r[1], "file_name": r[2], "source_system": r[3],
              "period_start": r[4], "period_end": r[5], "rows": r[6], "ingested_at": r[7].timestamp(),
              "silver_status": r[8], "pc_id": r[9] or file_meta.normalize_pc_id(r[3]), "division_name": r[10],
-             "file_date": r[11].isoformat() if r[11] else None, "processing_date": r[12].timestamp()}
+             "file_received_date": r[11].isoformat() if r[11] else None, "processing_date": r[12].timestamp(),
+             "reporting_start_date": r[13].isoformat() if r[13] else None,
+             "reporting_end_date": r[14].isoformat() if r[14] else None, "reporting_period_type": r[15]}
             for r in rows
         ],
         "cleanup": cleanup,
@@ -293,120 +301,28 @@ def _mapping_rows(conn) -> list[tuple]:
         .format(_ident(config.SILVER_SCHEMA), _ident(DRT_TABLE))).fetchall()
 
 
-def _same_pc(left: str | None, right: str | None) -> bool:
-    return bool(left and right) and file_meta.normalize_pc_id(left) == file_meta.normalize_pc_id(right)
-
-
-def _saved(rows: list[tuple], pcs: list[str], columns: list[str],
-           headers: dict[str, str] | None = None) -> tuple[dict, dict[str, str], set[str]]:
-    """The table's profit centers' approved mapping for these bronze columns, and approved
-    names elsewhere (by normalized name).
-
-    The DRT mapping names a source column as the file wrote it ("Net Premium"). A bronze
-    column meets it by its own source header, exactly (spaces and case aside); a column
-    whose header is unknown (loaded before headers were kept) meets it on normalized words
-    ("net_premium"). Returns ({column: [silver, ...]}, {normalized name: silver}, and the
-    columns whose several targets are one header mapped twice -- a real one-to-many).
-    Two different headers that normalize alike ("Agent Commission" and "Agent
-    Commission%") are not one-to-many: their targets compete as votes. A row naming a DRT
-    label with no Silver column is not a decision and is skipped.
-    """
-    headers = headers or {}
-    by_header: dict[str, str] = {}
-    for column in columns:
-        by_header.setdefault(_header_key(headers.get(column) or column), column)
-    by_compact = {normalize.compact(column): column for column in columns}
-    own: dict[str, list[str]] = {}
-    seen_headers: dict[str, set[str]] = {}
-    votes: dict[str, Counter] = {}
-    for profit_center_code, pc_column, _drt_column, silver in rows:
-        key = normalize.compact(pc_column or "")
-        if not key or not silver:
-            continue
-        if any(_same_pc(profit_center_code, pc) for pc in pcs):
-            column = by_header.get(_header_key(pc_column)) or by_compact.get(key)
-            if column is None:
-                continue
-            targets = own.get(column) or []
-            if silver not in targets:
-                own[column] = targets + [silver]
-            seen_headers.setdefault(column, set()).add(_header_key(pc_column))
-        else:
-            votes.setdefault(key, Counter())[silver] += 1
-    known = {name: counter.most_common(1)[0][0] for name, counter in votes.items()}
-    one_to_many = {column for column, targets in own.items()
-                   if len(targets) > 1 and len(seen_headers.get(column, ())) == 1}
-    return own, known, one_to_many
-
-
-# Notes the business keeps in the mapping's source-column field ("check comments",
-# "08/05: Sara suggested ...") are not column names: never shown to the AI as examples.
-_NOT_A_COLUMN = ("comment", "disregard", "sara", "check ", "suggested", "backfill", "(tab", "data profile")
-
-
-def _precedents(rows: list[tuple], pc: str | None = None) -> list[tuple[str, str]]:
-    """Approved decisions worth showing the AI as examples, this profit center's first:
-    a renamed or abbreviated column (Bk MGA Comm -> gross_commission_amount). A column
-    named exactly like its Silver column teaches nothing."""
-    picked: dict[tuple[str, str], bool] = {}
-    for profit_center_code, pc_column, _drt_column, silver in rows:
-        header = " ".join((pc_column or "").split())
-        if not header or len(header) > 40 or any(word in header.casefold() for word in _NOT_A_COLUMN):
-            continue
-        if silver is None:
-            continue  # a DRT label without a Silver column: not a decision
-        if normalize.compact(header) == normalize.compact(silver):
-            continue
-        pair = (header, silver)
-        picked[pair] = picked.get(pair, False) or _same_pc(profit_center_code, pc)
-    return sorted(picked, key=lambda pair: (not picked[pair], pair[0].casefold(), pair[1]))
-
-
-def _samples(frame: pl.DataFrame, columns: list[str]) -> dict[str, list[str]]:
-    result = {}
-    for column in columns:
-        if column in frame.columns:
-            values = [value for value in frame[column].drop_nulls().unique(maintain_order=True).to_list() if str(value).strip()]
-            result[column] = [str(value) for value in values[:3]]
-    return result
-
-
-def _matchers(precedents=()):
-    similarity = None
-    notes = []
-    if config.WORD2VEC_PATH:
-        try:
-            similarity = semantic.load(config.WORD2VEC_PATH).similarity
-        except OSError as error:
-            notes.append(f"word2vec vectors could not be read: {error}")
-    llm = None
-    if config.AI_ENABLED and config.AI_PROVIDER == "azure_openai":
-        from ahi_silver.llm import azure_openai_matcher
-
-        llm = azure_openai_matcher(config.AZURE_OPENAI_API_KEY, config.AZURE_OPENAI_ENDPOINT,
-                                   config.AZURE_OPENAI_API_VERSION, config.AZURE_OPENAI_DEPLOYMENT,
-                                   config.AI_SEND_SAMPLES, precedents)
-    elif config.AI_ENABLED and config.AI_PROVIDER == "gemini":
-        from ahi_silver.llm import gemini_matcher
-
-        llm = gemini_matcher(config.GEMINI_API_KEY, config.GEMINI_MODEL, config.AI_SEND_SAMPLES, precedents)
-    return similarity, llm, notes
-
-
 # --- storing a review ------------------------------------------------------------
+
+
+_LOAD_DATES = ("file_received_date", "reporting_start_date", "reporting_end_date")
 
 
 def _load_state(load: Load) -> dict:
     data = dict(vars(load))
     data["processing_date"] = load.processing_date.isoformat() if load.processing_date else None
-    data["file_date"] = load.file_date.isoformat() if load.file_date else None
+    for name in _LOAD_DATES:
+        data[name] = data[name].isoformat() if data[name] else None
     return data
 
 
 def _load_from(data: dict) -> Load:
     data = dict(data)
+    # Reviews saved before the file received date had its name.
+    if "file_date" in data:
+        data.setdefault("file_received_date", data.pop("file_date"))
     data["processing_date"] = datetime.fromisoformat(data["processing_date"]) if data.get("processing_date") else None
-    data["file_date"] = date.fromisoformat(data["file_date"]) if data.get("file_date") else None
+    for name in _LOAD_DATES:
+        data[name] = date.fromisoformat(data[name]) if data.get(name) else None
     return Load(**data)
 
 
@@ -579,8 +495,9 @@ def create_run(ingestion_ids: list[str]) -> Run:
     with db.connection() as conn:
         rows = conn.execute(sql.SQL(
             "SELECT id, table_name, file_name, source_system, period_start, period_end, rows_loaded, status, "
-            "silver_status, job_id, file_sha256, pc_id, coalesce(processing_date, created_at), file_date, "
-            "division_name FROM {}.ingestion WHERE id = ANY(%s)").format(_ident(config.CONTROL_SCHEMA)), [ids]).fetchall()
+            "silver_status, job_id, file_sha256, pc_id, coalesce(processing_date, created_at), file_received_date, "
+            "division_name, reporting_start_date, reporting_end_date, reporting_period_type "
+            "FROM {}.ingestion WHERE id = ANY(%s)").format(_ident(config.CONTROL_SCHEMA)), [ids]).fetchall()
         found = {r[0]: r for r in rows}
         if any(i not in found for i in ids):
             raise not_found("A selected bronze load")
@@ -602,7 +519,8 @@ def create_run(ingestion_ids: list[str]) -> Run:
                 table_name=table, source_system=source, pc_id=pc, pc_ids=seen,
                 loads=[Load(m[0], m[2], m[6], m[4], m[5], job_id=m[9], file_sha256=m[10],
                             pc_id=file_meta.normalize_pc_id(m[11]) or m[11], processing_date=m[12],
-                            file_date=m[13], division_name=m[14]) for m in members],
+                            file_received_date=m[13], division_name=m[14], reporting_start_date=m[15],
+                            reporting_end_date=m[16], reporting_period_type=m[17]) for m in members],
                 columns=_bronze_columns(conn, table), suggestions=[],
             )
             review.headers = _bronze_headers(conn, table, [m[0] for m in members])
@@ -648,7 +566,9 @@ def _context(review: TableReview, processed_at: datetime | None = None) -> trans
         source_table=_source_table(review.table_name),
         processed_at=processed_at,
         loads={load.ingestion_id: transform.LoadInfo(load.file_name, load.processing_date, load.period_start,
-                                                      load.period_end, load.pc_id) for load in review.loads},
+                                                      load.period_end, load.pc_id, load.reporting_start_date,
+                                                      load.reporting_end_date, load.reporting_period_type)
+               for load in review.loads},
     )
 
 
@@ -850,12 +770,18 @@ def _ensure_table(conn, schema_name: str, table: str, columns: list[SilverColumn
     schema = _ident(schema_name)
     wanted = [definition(c, c.name == identity) for c in columns] + [_column_sql(n, t) for n, t in extra]
     conn.execute(sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(schema, _ident(table), sql.SQL(", ").join(wanted)))
-    present = {row[0] for row in conn.execute(
-        "SELECT column_name FROM information_schema.columns WHERE table_schema = %s AND table_name = %s",
+    present = {row[0]: row[1] for row in conn.execute(
+        "SELECT column_name, numeric_precision FROM information_schema.columns "
+        "WHERE table_schema = %s AND table_name = %s",
         [schema_name, table])}
     for column in columns:
         if column.name not in present:
             conn.execute(sql.SQL("ALTER TABLE {}.{} ADD COLUMN {}").format(schema, _ident(table), definition(column, False)))
+        elif column.kind == "decimal" and present[column.name] and present[column.name] < column.precision:
+            # Widen a numeric column whose catalog precision grew (e.g. aggregate 18 -> 28).
+            conn.execute(sql.SQL("ALTER TABLE {}.{} ALTER COLUMN {} TYPE {}").format(
+                schema, _ident(table), _ident(column.name),
+                sql.SQL(column.sql_type)))
     for name, type_sql in extra:
         if name not in present:
             # Added to a table with rows: a NOT NULL extra starts out nullable.
@@ -1117,7 +1043,7 @@ def _rebuild_aggregate(conn, sources: list[str]) -> None:
         "date_trunc('month', d.accounting_effective_date)::date AS month, sum(d.premium) AS premium, "
         "sum(d.policy_fees) AS policy_fees, sum(d.gross_commission_amount) AS gross, "
         "sum(d.producer_commission_amount) AS producer, sum(d.revenue) AS revenue, "
-        "count(DISTINCT d.policy_number) AS policies, max(i.file_date) AS file_date, "
+        "count(DISTINCT d.policy_number) AS policies, max(i.file_received_date) AS file_date, "
         "max(d.ingestion_timestamp) AS ingestion_timestamp, min(d.source_data_period_start_date) AS period_start, "
         "max(d.source_data_period_end_date) AS period_end "
         "FROM {s}.{detail} d LEFT JOIN {c}.ingestion i ON i.file_name = d.source_file "

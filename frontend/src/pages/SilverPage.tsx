@@ -66,7 +66,6 @@ const pct = (score: number) => `${Math.round(score * 100)}%`;
 const IGNORE = "__ignore__";
 const POLL_MS = 700;
 const toError = (error: unknown) => (error instanceof ApiError ? error : new ApiError(0, { code: "unknown", message: String(error) }));
-const period = (start: string | null, end: string | null) => (!start ? "—" : start === end || !end ? start : `${start} → ${end}`);
 /** The Silver columns a bronze column can map to (system columns are filled by the pipeline). */
 const targetsOf = (catalog: SilverCatalog) => catalog.columns.filter((column) => column.role !== "system");
 
@@ -254,7 +253,7 @@ function EligibleLoads({
       )}
       <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
       <div className="relative overflow-x-auto scroll-thin">
-        <table className="w-full min-w-[820px] border-collapse text-table">
+        <table className="w-full min-w-[900px] border-collapse text-table">
           <caption className="sr-only">Bronze loads eligible for Silver</caption>
           <thead className="bg-ink-50">
             <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
@@ -265,7 +264,8 @@ function EligibleLoads({
               <th scope="col" className="px-2 py-2.5">Bronze table</th>
               <th scope="col" className="px-3 py-2.5">File</th>
               <th scope="col" className="px-3 py-2.5">Profit center</th>
-              <th scope="col" className="px-3 py-2.5">Period</th>
+              <th scope="col" className="px-3 py-2.5">Reporting start date</th>
+              <th scope="col" className="px-3 py-2.5">Reporting end date</th>
               <th scope="col" className="px-4 py-2.5 text-right">Rows</th>
             </tr>
           </thead>
@@ -290,7 +290,11 @@ function EligibleLoads({
                     <span className="block font-mono text-ink-800">{load.pc_id ?? "—"}</span>
                     {load.division_name && <span className="block text-caption text-ink-500">{load.division_name}</span>}
                   </td>
-                  <td className="num px-3 py-2.5 text-ink-700">{period(load.period_start, load.period_end)}</td>
+                  <td className="num px-3 py-2.5 text-ink-700">{load.reporting_start_date ?? load.period_start ?? "—"}</td>
+                  <td className="num px-3 py-2.5 text-ink-700">
+                    {load.reporting_end_date ?? load.period_end ?? load.period_start ?? "—"}
+                    {load.reporting_period_type && <span className="block text-caption text-ink-500">{load.reporting_period_type}</span>}
+                  </td>
                   <td className="num px-4 py-2.5 text-right text-ink-800">{formatNumber(load.rows)}</td>
                 </tr>
               );

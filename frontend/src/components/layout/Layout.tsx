@@ -1,5 +1,6 @@
 import clsx from "clsx";
 import {
+  BadgeCheck,
   Check,
   ChevronRight,
   ClipboardCheck,
@@ -15,6 +16,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   PlayCircle,
+  ScanEye,
   SlidersHorizontal,
   Trash2,
   UsersRound,
@@ -29,10 +31,12 @@ import { Drawer, Modal, Tooltip } from "../ui/Overlay";
 
 export const PAGE_META: Record<StepPage, { step: number; label: string; icon: ReactNode }> = {
   configuration: { step: 1, label: "Configure", icon: <SlidersHorizontal /> },
-  run: { step: 2, label: "Run", icon: <PlayCircle /> },
-  results: { step: 3, label: "Results", icon: <ClipboardCheck /> },
-  ingest: { step: 4, label: "Ingest", icon: <DatabaseZap /> },
-  silver: { step: 5, label: "Silver", icon: <Layers3 /> },
+  preview: { step: 2, label: "Preview", icon: <ScanEye /> },
+  run: { step: 3, label: "Run", icon: <PlayCircle /> },
+  results: { step: 4, label: "Results", icon: <ClipboardCheck /> },
+  validate: { step: 5, label: "Validate", icon: <BadgeCheck /> },
+  ingest: { step: 6, label: "Ingest", icon: <DatabaseZap /> },
+  silver: { step: 7, label: "Silver", icon: <Layers3 /> },
 };
 
 /** Pages beside the workflow: not steps, so no number and no place in the stepper. */
@@ -83,14 +87,30 @@ function useStepState(page: StepPage): { done: boolean; locked: string | null; b
   const flow = useWorkflow();
   const configured = flow.files.length > 0 && flow.files.every((entry) => entry.selected.length > 0);
   if (page === "configuration") return { done: configured, locked: null, busy: false };
+  // Preview reads the uploaded files themselves: done once every one has been looked at.
+  if (page === "preview")
+    return {
+      done: flow.files.length > 0 && flow.files.every((entry) => flow.previewed.has(entry.workbook.id)),
+      locked: flow.files.length ? null : "Upload a workbook first.",
+      busy: false,
+    };
   if (page === "run")
     return {
       done: (flow.batch?.status === "succeeded" || flow.batch?.status === "partial") && !flow.stale,
       locked: flow.files.length ? null : flow.runBlockedReason,
       busy: flow.running,
     };
-  // Silver reads bronze loads from the database, not this session's files.
-  if (page === "silver") return { done: false, locked: null, busy: false };
+  // Every table of the batch staged (or recorded as rejected) in the control table.
+  if (page === "validate") {
+    const progress = flow.validation;
+    return {
+      done: Boolean(progress && progress.total > 0 && progress.staged >= progress.total && !flow.stale),
+      locked: flow.reviewBlockedReason,
+      busy: false,
+    };
+  }
+  // Ingest and Silver read the control table and the bronze loads, not this session's files.
+  if (page === "silver" || page === "ingest") return { done: false, locked: null, busy: false };
   // Results and Ingest both need at least one cleaned file.
   return { done: false, locked: flow.reviewBlockedReason, busy: false };
 }

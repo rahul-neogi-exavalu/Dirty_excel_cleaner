@@ -50,6 +50,10 @@ class LoadInfo:
     period_end: str | None = None
     # The load's own profit center (PC0796): a table can hold loads of several.
     pc_id: str | None = None
+    # The control table's reporting dates (whole months) and type (YTD / MONTHLY).
+    reporting_start_date: date | None = None
+    reporting_end_date: date | None = None
+    reporting_period_type: str | None = None
 
 
 @dataclass
@@ -168,6 +172,14 @@ def transform(
         "source_data_period_start_date": [p[0] for p in periods],
         "source_data_period_end_date": [p[1] for p in periods],
         "source_data_period_type": [p[2] for p in periods],
+        # The control table's reporting period, which the Validate step decided.
+        "drt_reporting_start_date": [load.reporting_start_date for load in loads],
+        "drt_reporting_end_date": [load.reporting_end_date for load in loads],
+        "drt_reporting_year": [load.reporting_end_date.year if load.reporting_end_date else None for load in loads],
+        "drt_reporting_month": [load.reporting_end_date.month if load.reporting_end_date else None for load in loads],
+        "drt_reporting_period": [f"{load.reporting_end_date:%Y-%m}" if load.reporting_end_date else None
+                                 for load in loads],
+        "drt_reporting_period_type": [load.reporting_period_type for load in loads],
     }
     ordered = []
     for column in catalog:
@@ -177,7 +189,7 @@ def transform(
             ordered.append(columns[column.name])
         elif column.name in system:
             ordered.append(_series(column, system[column.name]))
-        else:  # a system column nothing derives yet (drt_reporting_*): NULL
+        else:  # a system column nothing derives: NULL
             ordered.append(_series(column, [None] * height))
     if extras:
         ordered += [

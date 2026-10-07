@@ -10,6 +10,7 @@ import type {
   BronzeStatus,
   BronzeTable,
   ColumnProfile,
+  ControlRow,
   EligibleLoad,
   CleanupLoad,
   IngestPlan,
@@ -21,6 +22,9 @@ import type {
   JobStatus,
   OutputSummary,
   Preview,
+  SourcePreview,
+  Validation,
+  ValidationChoice,
   Workbook,
 } from "./types";
 
@@ -188,6 +192,21 @@ export const api = {
     if (params.desc) query.set("desc", "true");
     return request<Preview>(`/api/jobs/${jobId}/outputs/${outputId}/preview?${query}`, { signal });
   },
+  /** One sheet of an uploaded file as it is, before cleaning. */
+  getSourcePreview: (
+    workbookId: string,
+    params: { sheet: string; offset: number; limit: number; colOffset: number; colLimit: number },
+    signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams({
+      sheet: params.sheet,
+      offset: String(params.offset),
+      limit: String(params.limit),
+      col_offset: String(params.colOffset),
+      col_limit: String(params.colLimit),
+    });
+    return request<SourcePreview>(`/api/workbooks/${workbookId}/preview?${query}`, { signal });
+  },
   getColumns: (jobId: string, outputId: string) =>
     request<ColumnProfile[]>(`/api/jobs/${jobId}/outputs/${outputId}/columns`),
   renameHeaders: (jobId: string, outputId: string, renames: Record<string, string>) =>
@@ -200,25 +219,52 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ columns }),
     }),
+  /** Leave columns (original names) out of bronze ingestion, or bring them back. */
+  setExcluded: (jobId: string, outputId: string, columns: string[], excluded: boolean) =>
+    request<OutputSummary>(`/api/jobs/${jobId}/outputs/${outputId}/exclusions`, {
+      method: "PUT",
+      body: JSON.stringify({ columns, excluded }),
+    }),
 
   bronzeStatus: () => request<BronzeStatus>("/api/bronze/status"),
   bronzeTables: () => request<BronzeTable[]>("/api/bronze/tables"),
-  createPlan: (job_ids: string[], batch_id: string | null) =>
-    request<IngestPlan>("/api/bronze/plans", { method: "POST", body: JSON.stringify({ job_ids, batch_id }) }),
+  /** Every control row staged and not loaded yet, or these. */
+  createPlan: (control_ids: number[] | null, batch_id: string | null) =>
+    request<IngestPlan>("/api/bronze/plans", { method: "POST", body: JSON.stringify({ control_ids, batch_id }) }),
   getPlan: (id: string) => request<IngestPlan>(`/api/bronze/plans/${id}`),
-  updatePlanFile: (
+  bronzeControl: (params: { source_system?: string; status?: "pending" | "loaded" | "rejected" | "listed" } = {}) => {
+    const query = new URLSearchParams();
+    if (params.source_system) query.set("source_system", params.source_system);
+    if (params.status) query.set("status", params.status);
+    return request<ControlRow[]>(`/api/bronze/control${query.size ? `?${query}` : ""}`);
+  },
+
+  createValidation: (job_ids: string[], batch_id: string | null) =>
+    request<Validation>("/api/validations", { method: "POST", body: JSON.stringify({ job_ids, batch_id }) }),
+  getValidation: (id: string) => request<Validation>(`/api/validations/${id}`),
+  updateValidationFile: (
     id: string,
     jobId: string,
+    change: { pc_id?: string | null; file_received_date?: string | null; division_name?: string | null },
+  ) => request<Validation>(`/api/validations/${id}/files/${jobId}`, { method: "PATCH", body: JSON.stringify(change) }),
+  updateValidationOutput: (
+    id: string,
+    key: string,
     change: {
-      source_system?: string | null;
-      period_start?: string | null;
-      period_end?: string | null;
-      pc_id?: string | null;
-      file_date?: string | null;
-      division_name?: string | null;
+      mapping?: Record<string, string | null>;
+      reporting_start_date?: string | null;
+      reporting_end_date?: string | null;
+      choice?: ValidationChoice | null;
+      use_control_dates?: boolean;
     },
   ) =>
-    request<IngestPlan>(`/api/bronze/plans/${id}/files/${jobId}`, { method: "PATCH", body: JSON.stringify(change) }),
+    request<Validation>(`/api/validations/${id}/outputs/${encodeURIComponent(key)}`, {
+      method: "PATCH",
+      body: JSON.stringify(change),
+    }),
+  /** Write the outputs to staging and the control table; the signed-in user is recorded. */
+  stageValidation: (id: string, keys: string[] | null) =>
+    request<Validation>(`/api/validations/${id}/stage`, { method: "POST", body: JSON.stringify({ keys }) }),
   updatePlanItem: (id: string, key: string, change: { table_name?: string | null; action?: string | null }) =>
     request<IngestPlan>(`/api/bronze/plans/${id}/items/${encodeURIComponent(key)}`, { method: "PATCH", body: JSON.stringify(change) }),
   /** The signed-in user is recorded as the reviewer. */

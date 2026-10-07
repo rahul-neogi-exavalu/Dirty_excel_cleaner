@@ -238,7 +238,7 @@ function PreRunView({ cancelled }: { cancelled: BatchStatus | null }) {
                 >
                   {flow.batch ? "Run again" : count > 1 ? `Clean ${count} files` : "Start cleaning"}
                 </Button>
-                <Button variant="ghost" className="w-full sm:w-auto xl:w-full" icon={<ArrowLeft />} onClick={() => navigate("configuration")}>
+                <Button variant="ghost" className="w-full sm:w-auto xl:w-full" icon={<ArrowLeft />} onClick={() => navigate("preview")}>
                   Back
                 </Button>
               </div>

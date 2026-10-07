@@ -225,11 +225,12 @@ flowchart TD
 1. **Configure:** upload the workbooks and pick the sheets.
 2. **Run:** clean them.
 3. **Results:** optionally rename headers.
-4. **Ingest:**
-   - check each file's **source system** and **period**;
+4. **Validate:** check the mapping of the file's columns to the required Bronze columns (using saved DRT rules, exact matching, semantic/AI). A missing required column means the file is rejected. Correct the reporting dates if needed, and confirm replacements for monthly files overlapping existing data.
+5. **Ingest:**
+   - check each file's **source system**, **division**, and **file received date**;
    - review the **plan**: each target table, its action badge, its schema diff, and the reasons;
-   - tick the confirmations for risky items, enter **Reviewed by**, and click **Ingest**.
-5. **Bronze tables tab:** every table with its columns, row count, period coverage and full load history, including superseded and skipped loads.
+   - tick the confirmations for risky items and click **Ingest**.
+6. **Bronze tables tab:** every table with its columns, row count, period coverage and full load history, including superseded and skipped loads.
 
 ---
 

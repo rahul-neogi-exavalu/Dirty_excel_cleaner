@@ -55,8 +55,8 @@ export function ResultsPage() {
       title="Results"
       description="Review, refine and export cleaned data."
       actions={jobId && (
-        <Button variant="primary" iconRight={<ArrowRight />} onClick={() => navigate("ingest")}>
-          Ingest
+        <Button variant="primary" iconRight={<ArrowRight />} onClick={() => navigate("validate")}>
+          Validate
         </Button>
       )}
     />

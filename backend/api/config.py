@@ -92,6 +92,14 @@ ALLOWED_SUFFIXES = WORKBOOK_SUFFIXES | DELIMITED_SUFFIXES
 MAX_HEADER_LENGTH = 128
 PREVIEW_MAX_LIMIT = 100
 
+# The source preview (the uploaded file before cleaning). One page shows at most this many
+# columns; a sheet's cells are held for paging up to the per-sheet ceiling (a larger sheet
+# pages through its first rows and reports the rest as not shown), and the sheets held at
+# once share the cache budget, oldest dropped first.
+SOURCE_PREVIEW_MAX_COLUMNS = 100
+SOURCE_PREVIEW_MAX_CELLS = int(os.environ.get("AHI_SOURCE_PREVIEW_MAX_CELLS", "1000000"))
+SOURCE_PREVIEW_CACHE_CELLS = int(os.environ.get("AHI_SOURCE_PREVIEW_CACHE_CELLS", "3000000"))
+
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 CORS_ORIGINS = os.environ.get(
     "AHI_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
@@ -109,6 +117,13 @@ DB_SSLMODE = os.environ.get("AHI_DB_SSLMODE", "prefer").strip()
 # Raw cleaned tables, and the registry / audit tables that describe them.
 BRONZE_SCHEMA = os.environ.get("AHI_BRONZE_SCHEMA", "bronze").strip()
 CONTROL_SCHEMA = os.environ.get("AHI_CONTROL_SCHEMA", "ingest").strip()
+# A validated file is staged here (one table per cleaned output) while the control table
+# decides whether it is inserted, appended or rejected; Bronze loads from it.
+STAGING_SCHEMA = os.environ.get("AHI_STAGING_SCHEMA", "staging").strip()
+# The columns every file must map before it may reach Bronze, as Silver catalog names;
+# AED / PED / TED among them decide the reporting dates (backend/config).
+BRONZE_REQUIRED_COLUMNS_FILE = Path(os.environ.get(
+    "AHI_BRONZE_REQUIRED_COLUMNS_FILE", ROOT / "config" / "bronze_required_columns.csv"))
 # The team adds the source system to the file name as a suffix, e.g. ARR_pc0515.xlsx.
 # One capture group; the last match in the file stem wins.
 SOURCE_SYSTEM_PATTERN = os.environ.get(

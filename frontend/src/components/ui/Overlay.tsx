@@ -28,9 +28,37 @@ export function Tooltip({
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
+  const anchor = useRef<HTMLSpanElement>(null);
+  const tip = useRef<HTMLSpanElement>(null);
+  // Rendered at the end of <body> and placed against the viewport, so a scrolling or
+  // clipped container (a table's sticky header) never cuts it off.
+  const [style, setStyle] = useState<React.CSSProperties>(UNPLACED);
+  useLayoutEffect(() => {
+    if (!open || !anchor.current || !tip.current) {
+      setStyle(UNPLACED);
+      return;
+    }
+    const rect = anchor.current.getBoundingClientRect();
+    const { width, height } = tip.current.getBoundingClientRect();
+    const above = rect.top - height - 8;
+    const below = rect.bottom + 8;
+    // The preferred side, or the other one when it would run off the screen.
+    const top = side === "top" ? (above >= 8 ? above : below) : below + height <= window.innerHeight - 8 ? below : above;
+    const left = Math.max(8, Math.min(rect.left + rect.width / 2 - width / 2, document.documentElement.clientWidth - width - 8));
+    setStyle({ position: "fixed", top, left });
+    // Placed once: scrolling moves the anchor away, so the tooltip goes.
+    const close = () => setOpen(false);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open, side, content]);
   if (!content) return children;
   return (
     <span
+      ref={anchor}
       className={clsx("relative inline-flex", className)}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
@@ -40,18 +68,19 @@ export function Tooltip({
       aria-describedby={open ? id : undefined}
     >
       {children}
-      {open && (
-        <span
-          id={id}
-          role="tooltip"
-          className={clsx(
-            "pointer-events-none absolute left-1/2 z-50 w-max max-w-[260px] -translate-x-1/2 animate-fade-in rounded bg-ink-900 px-2.5 py-1.5 text-caption font-normal normal-case tracking-normal text-white shadow-pop",
-            side === "top" ? "bottom-full mb-2" : "top-full mt-2",
-          )}
-        >
-          {content}
-        </span>
-      )}
+      {open &&
+        createPortal(
+          <span
+            ref={tip}
+            id={id}
+            role="tooltip"
+            style={style}
+            className="pointer-events-none z-[60] w-max max-w-[260px] animate-fade-in rounded bg-ink-900 px-2.5 py-1.5 text-caption font-normal normal-case tracking-normal text-white shadow-pop"
+          >
+            {content}
+          </span>,
+          document.body,
+        )}
     </span>
   );
 }
