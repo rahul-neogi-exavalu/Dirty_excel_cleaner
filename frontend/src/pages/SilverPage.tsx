@@ -41,6 +41,7 @@ import type {
   SilverVote,
 } from "../api/types";
 import { PageHeader, SectionCard } from "../components/layout/Layout";
+import { MappingBands, WhenNear } from "../components/MappingBands";
 import { Badge } from "../components/ui/Badge";
 import { Button, IconButton } from "../components/ui/Button";
 import { Checkbox, LabeledCheckbox, SearchInput } from "../components/ui/Controls";
@@ -107,7 +108,8 @@ export function SilverPage() {
               value={tab}
               onChange={setTab}
               items={[
-                { id: "run", label: "Run", icon: <ListChecks /> },
+                // "Load", not "Run": the workflow's own Run step (cleaning) is in the sidebar.
+                { id: "run", label: "Load", icon: <ListChecks /> },
                 { id: "mapping", label: "Mapping", icon: <BookCheck /> },
                 { id: "aggregate", label: "Aggregate", icon: <Sigma /> },
               ]}
@@ -372,55 +374,70 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
     }
   };
 
+  const columns = run.tables.reduce((sum, table) => sum + table.mapping.length, 0);
   return (
-    <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
-      <div className="min-w-0 space-y-6">
-        {run.notes.map((note) => (
-          <Alert key={note} tone="info" title={note} />
-        ))}
-        {run.cleanup.length > 0 && (
-          <Alert tone="warning" title={`Removes ${plural(run.cleanup.length, "replaced load")} from Silver`}>
-            {run.cleanup.map((item) => `${item.file_name} (${item.table_name})`).join(", ")}
-          </Alert>
-        )}
-        <TablePicker tables={run.tables} catalog={catalog} busy={busy} onEdit={edit} onAlso={editAlso} onIgnoreAll={ignoreAll} />
-      </div>
+    <div className="space-y-5">
+      {run.notes.length > 0 && (
+        <Alert tone="info" title={run.notes.length === 1 ? run.notes[0] : `${plural(run.notes.length, "note")} on the matching`}>
+          {run.notes.length > 1 && <ul className="space-y-0.5">{run.notes.map((note) => <li key={note}>{note}</li>)}</ul>}
+        </Alert>
+      )}
+      {run.cleanup.length > 0 && (
+        <Alert tone="warning" title={`Removes ${plural(run.cleanup.length, "replaced load")} from Silver`}>
+          {run.cleanup.map((item) => `${item.file_name} (${item.table_name})`).join(", ")}
+        </Alert>
+      )}
 
-      <aside className="scroll-thin xl:sticky xl:top-[80px] xl:max-h-[calc(100dvh-96px)] xl:self-start xl:overflow-y-auto">
-        <section className="card p-6" aria-labelledby="silver-approve-title">
-          <h2 id="silver-approve-title" className="label-caps">Approval</h2>
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <StatTile icon={<Columns3 />} label="Mapped" value={mapped} />
-            <StatTile icon={<Rows3 />} label="Rows" value={formatNumber(rows)} />
-          </div>
-          <p className="mt-3 text-caption text-ink-500">
-            {prefilled ? `${prefilled} pre-filled from saved mappings. ` : ""}The whole mapping is saved on approval.
+      {/* Approval stays in reach while the mapping below is scrolled; only where it is one slim row. */}
+      <section className="card flex flex-col gap-3 px-4 py-3 md:px-5 xl:sticky xl:top-[68px] xl:z-20 xl:flex-row xl:items-center xl:justify-between xl:shadow-sm" aria-labelledby="silver-approve-title">
+        <h2 id="silver-approve-title" className="sr-only">Approval</h2>
+        <div className="min-w-0">
+          <dl className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <Columns3 className="h-4 w-4 text-ink-500" aria-hidden />
+              <dt className="text-caption text-ink-500">Mapped</dt>
+              <dd className="num text-body font-semibold text-ink-900">{mapped} of {columns}</dd>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Rows3 className="h-4 w-4 text-ink-500" aria-hidden />
+              <dt className="text-caption text-ink-500">Rows</dt>
+              <dd className="num text-body font-semibold text-ink-900">{formatNumber(rows)}</dd>
+            </div>
+            {prefilled > 0 && (
+              <div className="flex items-center gap-1.5">
+                <BookCheck className="h-4 w-4 text-ink-500" aria-hidden />
+                <dt className="text-caption text-ink-500">Pre-filled from saved mappings</dt>
+                <dd className="num text-body font-semibold text-ink-900">{prefilled}</dd>
+              </div>
+            )}
+            {split > 0 && (
+              <div className="flex items-center gap-1.5 text-amber-800">
+                <Split className="h-4 w-4" aria-hidden />
+                <dt className="text-caption">Methods disagree</dt>
+                <dd className="num text-body font-semibold">{split}</dd>
+              </div>
+            )}
+          </dl>
+          <p className="mt-1 flex flex-wrap items-center gap-x-1.5 text-caption text-ink-500">
+            <ShieldCheck className="h-3.5 w-3.5" aria-hidden /> All or nothing: the whole mapping is saved on approval.
+            <span className="inline-flex items-center gap-1"><UserCheck className="h-3.5 w-3.5" aria-hidden />Approving as <span className="font-medium text-ink-800">{reviewer}</span></span>
           </p>
-          {split > 0 && (
-            <p className="mt-2 flex items-center gap-1.5 text-caption text-amber-800">
-              <Split className="h-3.5 w-3.5" aria-hidden /> {plural(split, "column")} where methods disagree
-            </p>
-          )}
-          {run.blockers.length > 0 && (
-            <Alert tone="warning" className="mt-4" title={`${plural(run.blockers.length, "issue")} to resolve`}>
-              <ul className="space-y-0.5">{run.blockers.slice(0, 4).map((text) => <li key={text}>{text}</li>)}</ul>
-            </Alert>
-          )}
-          <p className="mt-5 flex items-center gap-2 text-body text-ink-600">
-            <UserCheck className="h-4 w-4 shrink-0 text-ink-400" aria-hidden />
-            Approving as <span className="font-medium text-ink-900">{reviewer}</span>
-          </p>
-          <Button variant="primary" size="lg" className="mt-5 w-full" icon={<Check />} disabled={!canApprove || busy} onClick={approve}>
-            Approve & load
-          </Button>
-          <Button variant="ghost" className="mt-2 w-full" onClick={onCancel} disabled={busy}>
-            Back
-          </Button>
-          <p className="mt-2 flex items-center justify-center gap-1.5 text-caption text-ink-500">
-            <ShieldCheck className="h-3.5 w-3.5" aria-hidden /> All or nothing
-          </p>
-        </section>
-      </aside>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button variant="ghost" onClick={onCancel} disabled={busy}>Back</Button>
+          <Button variant="primary" icon={<Check />} disabled={!canApprove || busy} onClick={approve}>Approve & load</Button>
+        </div>
+      </section>
+      {run.blockers.length > 0 && (
+        <Alert tone="warning" title={`${plural(run.blockers.length, "issue")} to resolve before approval`}>
+          <ul className="space-y-0.5">
+            {run.blockers.slice(0, 4).map((text) => <li key={text}>{text}</li>)}
+            {run.blockers.length > 4 && <li>And {run.blockers.length - 4} more: the tinted columns below.</li>}
+          </ul>
+        </Alert>
+      )}
+
+      <TablePicker tables={run.tables} catalog={catalog} busy={busy} onEdit={edit} onAlso={editAlso} onIgnoreAll={ignoreAll} />
     </div>
   );
 }
@@ -492,11 +509,9 @@ function TableMapping({
   onIgnoreAll: () => void;
   picker?: React.ReactNode;
 }) {
-  const list = useRef<HTMLDivElement>(null);
   const [onlyOpen, setOnlyOpen] = useState(false);
   const openRows = table.mapping.filter((row) => !row.silver_column && !row.ignored);
   const rows = onlyOpen && openRows.length ? openRows : table.mapping;
-  const paged = usePaged(rows, useFitPageSize(list, { min: 4, fallbackRow: 76, reserve: 140 }), onlyOpen);
   // Which bronze column currently holds each Silver column, to flag a second use.
   const usedBy = useMemo(() => {
     const map = new Map<string, string>();
@@ -543,26 +558,21 @@ function TableMapping({
           )}
         </div>
       )}
-      <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
-      <div className="relative overflow-x-auto scroll-thin">
-        <table className="w-full min-w-[560px] border-collapse text-table">
-          <caption className="sr-only">Column mapping for {table.table_name}</caption>
-          <thead className="bg-ink-50">
-            <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
-              <th scope="col" className="px-4 py-2.5">Bronze column</th>
-              <th scope="col" className="px-3 py-2.5">Silver column · votes</th>
-            </tr>
-          </thead>
-          <tbody>
-            {paged.slice.map((row) => (
-              <MappingRow key={row.bronze_column} row={row} catalog={catalog} usedBy={usedBy} busy={busy}
-                onEdit={(value) => onEdit(row.bronze_column, value)} onAlso={(also) => onAlso(row.bronze_column, also)} />
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <Pagination {...paged} onPage={paged.setPage} noun="column" />
-      </div>
+      <p className="mb-3 text-caption text-ink-500">
+        {plural(table.mapping.length, "bronze column")}, each under the Silver column it loads into.
+        {openRows.length > 0 ? ` ${openRows.length} still to choose, tinted.` : " Every column is decided."}
+      </p>
+      <MappingBands
+        items={rows}
+        keyOf={(row) => row.bronze_column}
+        caption={`Column mapping for ${table.table_name}`}
+        attention={(row) => !row.silver_column && !row.ignored}
+        top={(row) => (
+          <SilverCell row={row} catalog={catalog} usedBy={usedBy} busy={busy}
+            onEdit={(value) => onEdit(row.bronze_column, value)} onAlso={(also) => onAlso(row.bronze_column, also)} />
+        )}
+        bottom={(row) => <BronzeCell row={row} />}
+      />
       {(invalid.length > 0 || pcs.length > 0 || quality.unmapped_silver_columns?.length > 0) && (
         <div className="mt-4 grid gap-3 md:grid-cols-3">
           <QualityBlock icon={<TriangleAlert />} title="Unreadable → NULL" empty="None">
@@ -604,7 +614,23 @@ function candidateLabel(candidate: SilverCandidate) {
   return `${candidate.silver_column ?? "Ignore"} (${methods.join(" + ") || "2nd choice"})`;
 }
 
-function MappingRow({
+/** The bronze side of a mapping: the column, its header as the file wrote it, and sample values. */
+function BronzeCell({ row }: { row: SilverMappingRow }) {
+  return (
+    <div className="min-w-0">
+      <p className="truncate font-mono text-[12.5px] font-medium text-ink-900" title={row.bronze_column}>{row.bronze_column}</p>
+      {row.source_header && row.source_header !== row.bronze_column && (
+        <p className="truncate text-caption text-ink-600" title={`Header in the file: ${row.source_header}`}>“{row.source_header}”</p>
+      )}
+      {row.samples.length > 0 && (
+        <p className="truncate text-caption text-ink-500" title={row.samples.join(", ")}>{row.samples.join(", ")}</p>
+      )}
+    </div>
+  );
+}
+
+/** The Silver side of a mapping: the choice, who voted for it, and any extra columns it also loads. */
+function SilverCell({
   row,
   catalog,
   usedBy,
@@ -671,15 +697,7 @@ function MappingRow({
   );
 
   return (
-    <tr data-row className={clsx("border-b border-ink-100 last:border-0", open && "bg-amber-50/50")}>
-      <td className="max-w-0 px-4 py-3 align-top">
-        <p className="truncate font-mono font-medium text-ink-900" title={row.bronze_column}>{row.bronze_column}</p>
-        {row.source_header && row.source_header !== row.bronze_column && (
-          <p className="truncate text-caption text-ink-600" title={`Header in the file: ${row.source_header}`}>“{row.source_header}”</p>
-        )}
-        {row.samples.length > 0 && <p className="truncate text-caption text-ink-500" title={row.samples.join(" · ")}>{row.samples.join(" · ")}</p>}
-      </td>
-      <td className="w-[58%] px-3 py-2.5 align-top">
+    <div className="min-w-0">
         <Select<string>
           value={value}
           options={options}
@@ -689,12 +707,12 @@ function MappingRow({
           placeholder={row.candidates.length ? "Choose a suggestion…" : "Choose…"}
           disabled={busy}
           width={400}
-          className="max-w-[360px]"
+          className="w-full"
         />
         <Tooltip content={detail}>
           <span tabIndex={0} className="mt-1.5 inline-flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded focus-visible:outline-none focus-visible:shadow-focus">
             {open ? (
-              <span className="text-caption font-medium text-amber-800">{row.candidates.length ? `${plural(row.candidates.length, "suggestion")} · choose one` : "No method found a match"}</span>
+              <span className="text-caption font-medium text-amber-800">{row.candidates.length ? `${plural(row.candidates.length, "suggestion")}: choose one` : "No method found a match"}</span>
             ) : backing.length ? (
               <Votes votes={backing} />
             ) : (
@@ -705,7 +723,7 @@ function MappingRow({
           </span>
         </Tooltip>
         {row.silver_column && !row.ignored && (
-          <div className="mt-1.5 flex max-w-[360px] flex-wrap items-center gap-1.5">
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {row.also.map((extra) => (
               <span key={extra} className="inline-flex items-center gap-0.5 rounded bg-ink-100 py-0.5 pl-2 pr-0.5 text-caption text-ink-700">
                 <span className="text-ink-500">Also</span> <span className="font-mono">{extra}</span>
@@ -738,8 +756,7 @@ function MappingRow({
             )}
           </div>
         )}
-      </td>
-    </tr>
+    </div>
   );
 }
 
@@ -792,8 +809,6 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
   const [rows, setRows] = useState<DrtMapping[] | null>(null);
   const [query, setQuery] = useState("");
   const [profitCenter, setProfitCenter] = useState(ALL);
-  const list = useRef<HTMLDivElement>(null);
-  const pageSize = useFitPageSize(list, { reserve: 130 });
   const load = useCallback(() => {
     setRows(null);
     api.silverMapping().then(setRows).catch((err) => toast({ severity: "error", title: toError(err).body.message }));
@@ -812,12 +827,17 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
     ];
   }, [rows]);
   const needle = query.trim().toLowerCase();
-  const visible = (rows ?? []).filter(
+  const visible = useMemo(() => (rows ?? []).filter(
     (row) =>
       (profitCenter === ALL || row.profit_center === profitCenter) &&
       (!needle || [row.profit_center, row.pc_column, row.drt_column ?? "", row.silver_column_name ?? ""].some((v) => v.toLowerCase().includes(needle))),
-  );
-  const paged = usePaged(visible, pageSize, `${profitCenter}|${needle}`);
+  ), [rows, profitCenter, needle]);
+  // One group per profit center, in the order the mapping lists them.
+  const groups = useMemo(() => {
+    const byCenter = new Map<string, DrtMapping[]>();
+    for (const row of visible) byCenter.set(row.profit_center, [...(byCenter.get(row.profit_center) ?? []), row]);
+    return [...byCenter.entries()];
+  }, [visible]);
 
   if (!rows) return <div className="card space-y-2 p-6"><Skeleton className="h-10" /><Skeleton className="h-10" /></div>;
   if (!rows.length) return <div className="card"><EmptyState icon={<BookCheck />} title="No mappings" description="Add drt_column_mapping.xlsx to assets/." /></div>;
@@ -854,38 +874,46 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
         </div>
       }
     >
-      <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
-      <div className="relative overflow-x-auto scroll-thin">
-        <table className="w-full min-w-[760px] border-separate border-spacing-0 text-table">
-          <caption className="sr-only">DRT column mapping</caption>
-          <thead>
-            <tr className="text-left text-caption font-semibold text-ink-600">
-              {["Profit center", "Source column", "DRT column", "Silver column", ""].map((label) => (
-                <th key={label} scope="col" className="border-b border-ink-200 bg-ink-50 px-3 py-2.5">{label}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {paged.slice.map((row) => (
-              <tr key={`${row.profit_center}|${row.pc_column}|${row.silver_column_name}|${row.drt_column}`} data-row>
-                <td className="border-b border-ink-100 px-3 py-2 font-mono text-ink-700">{row.profit_center}</td>
-                <td className="max-w-[280px] truncate border-b border-ink-100 px-3 py-2 font-mono font-medium text-ink-900" title={row.pc_column}>{row.pc_column}</td>
-                <td className="border-b border-ink-100 px-3 py-2 text-ink-600">{row.drt_column ?? ""}</td>
-                <td className="w-[240px] border-b border-ink-100 px-3 py-1.5">
-                  <Select<string> value={row.silver_column_name} options={options} onChange={(value) => save(row, value)} label={`Silver column for ${row.pc_column}`} hideLabel placeholder="Not resolved" width={300} />
-                </td>
-                <td className="w-10 border-b border-ink-100 px-2 py-1.5 text-right">
-                  <IconButton label={`Remove the mapping of ${row.pc_column} for ${row.profit_center}`} onClick={() => remove(row)}>
+      <p className="mb-4 text-caption text-ink-500">
+        {plural(visible.length, "mapping")} across {plural(groups.length, "profit center")}: each source column under the Silver column it fills.
+      </p>
+      {!visible.length && <EmptyState compact icon={<BookCheck />} title="No matching mappings" description="Try another profit center or search." />}
+      <div className="space-y-6">
+        {groups.map(([center, items]) => (
+          <section key={center} aria-label={`Mappings for ${center}`}>
+            <h3 className="mb-2 flex items-baseline gap-2">
+              <span className="font-mono text-body font-semibold text-ink-900">{center}</span>
+              <span className="text-caption text-ink-500">{plural(items.length, "mapping")}</span>
+            </h3>
+            {/* Groups far below are built as they are scrolled near: hundreds of mappings stay quick. */}
+            <WhenNear estimate={Math.ceil(items.length / 4) * 112}>
+            <MappingBands
+              items={items}
+              keyOf={(row) => `${row.profit_center}|${row.pc_column}|${row.silver_column_name}|${row.drt_column}`}
+              caption={`DRT column mapping for ${center}`}
+              bottomLabel="Source column"
+              attention={(row) => !row.silver_column_name}
+              top={(row) => (
+                <Select<string> value={row.silver_column_name} options={options} onChange={(value) => save(row, value)}
+                  label={`Silver column for ${row.pc_column}`} hideLabel placeholder="Not resolved" width={300} className="w-full" />
+              )}
+              bottom={(row) => (
+                <div className="flex min-w-0 items-start gap-1">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-mono text-[12.5px] font-medium text-ink-900" title={row.pc_column}>{row.pc_column}</p>
+                    <p className="truncate text-caption text-ink-500" title={row.drt_column ? `DRT column: ${row.drt_column}` : undefined}>
+                      {row.drt_column ? `DRT: ${row.drt_column}` : "No DRT column"}
+                    </p>
+                  </div>
+                  <IconButton label={`Remove the mapping of ${row.pc_column} for ${row.profit_center}`} className="!h-7 !w-7 shrink-0" onClick={() => remove(row)}>
                     <Trash2 />
                   </IconButton>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {!visible.length && <EmptyState compact icon={<BookCheck />} title="No matching mappings" description="Try another profit center or search." />}
-      </div>
-      <Pagination {...paged} onPage={paged.setPage} noun="row" />
+                </div>
+              )}
+            />
+            </WhenNear>
+          </section>
+        ))}
       </div>
     </SectionCard>
   );

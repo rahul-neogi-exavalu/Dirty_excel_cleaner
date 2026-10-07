@@ -23,8 +23,10 @@ import type {
   OutputSummary,
   Preview,
   SourcePreview,
+  TaskProgress,
   Validation,
   ValidationChoice,
+  ValidationRun,
   Workbook,
 } from "./types";
 
@@ -239,9 +241,11 @@ export const api = {
     return request<ControlRow[]>(`/api/bronze/control${query.size ? `?${query}` : ""}`);
   },
 
-  createValidation: (job_ids: string[], batch_id: string | null) =>
-    request<Validation>("/api/validations", { method: "POST", body: JSON.stringify({ job_ids, batch_id }) }),
-  getValidation: (id: string) => request<Validation>(`/api/validations/${id}`),
+  /** Starts validating in the background; follow it with `watchValidation`. */
+  startValidation: (job_ids: string[], batch_id: string | null) =>
+    request<ValidationRun>("/api/validations", { method: "POST", body: JSON.stringify({ job_ids, batch_id }) }),
+  /** The review once built; until then its progress, or why it stopped. */
+  getValidation: (id: string) => request<Validation | ValidationRun>(`/api/validations/${id}`),
   updateValidationFile: (
     id: string,
     jobId: string,
@@ -297,6 +301,50 @@ export const api = {
     request<void>("/api/silver/mapping", { method: "DELETE", body: JSON.stringify(row) }),
   silverAggregate: () => request<SilverAggregateRow[]>("/api/silver/aggregate"),
 };
+
+export interface ValidationWatch {
+  /** Each step as it happens (bursts arrive coalesced, at most ~10 a second). */
+  progress: (progress: TaskProgress) => void;
+  done: (validation: Validation, progress: TaskProgress) => void;
+  failed: (error: ApiError, progress: TaskProgress) => void;
+  /** The connection dropped; the browser is reconnecting by itself. */
+  reconnecting: () => void;
+  /** The server would not stream (gone, signed out, or SSE blocked on the way): ask it directly. */
+  lost: () => void;
+}
+
+/** Follow a validation's progress over Server-Sent Events until it is done or fails.
+ *  Returns a function that stops listening. */
+export function watchValidation(id: string, on: ValidationWatch): () => void {
+  const source = new EventSource(`/api/validations/${encodeURIComponent(id)}/events`, { withCredentials: true });
+  let ended = false;
+  const end = () => {
+    ended = true;
+    source.close();
+  };
+  const read = (event: Event) => JSON.parse((event as MessageEvent<string>).data);
+  source.addEventListener("progress", (event) => on.progress(read(event)));
+  source.addEventListener("done", (event) => {
+    end();
+    const { result, progress } = read(event);
+    on.done(result, progress);
+  });
+  source.addEventListener("failed", (event) => {
+    end();
+    const { error, progress } = read(event);
+    on.failed(new ApiError(0, error), progress);
+  });
+  source.onerror = () => {
+    if (ended) return;
+    // CONNECTING: a dropped connection, retried by the browser. CLOSED: the server
+    // answered with something other than a stream (404, 401...) and it won't retry.
+    if (source.readyState === EventSource.CLOSED) {
+      end();
+      on.lost();
+    } else on.reconnecting();
+  };
+  return end;
+}
 
 export const exportUrls = {
   csv: (jobId: string, outputId: string) => `/api/jobs/${jobId}/outputs/${outputId}/export/csv`,

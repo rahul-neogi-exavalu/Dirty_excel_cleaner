@@ -72,6 +72,11 @@ def pool():
     return _pool
 
 
+def prepared() -> bool:
+    """Whether the pool is open and the database migrated and seeded (the first use does both)."""
+    return _pool is not None and _migrated
+
+
 @contextmanager
 def connection():
     """A pooled connection (one transaction); lost connections become a clear 503."""

@@ -3,6 +3,7 @@
 
 import io
 import sys
+import threading
 import time
 from datetime import date
 from pathlib import Path
@@ -15,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
+from sse_client import read_events, validate  # noqa: E402
 
 HEADERS = ["AccountingEffectiveDate", "CommissionPct", "GrossCommissionAmount", "InsuranceCompany Name",
            "MarketProvider", "Pol_Ef_Dt", "PolicyNumber", "Premium", "Producer/Agency Name",
@@ -50,7 +52,7 @@ def context(monkeypatch):
         divisions=[("AH Programs", "No", "0101")],
         mapping_rows=[("PC0101", "Pol_Ef_Dt", None, "policy_effective_date")],
     )
-    monkeypatch.setattr(validation_service, "_read", lambda names, conn=None: found)
+    monkeypatch.setattr(validation_service, "_read", lambda names, conn=None, tracker=None: found)
     return found
 
 
@@ -113,9 +115,7 @@ def _clean(client, name, content):
 
 
 def _validate(client, name, content):
-    response = client.post("/api/validations", json={"job_ids": [_clean(client, name, content)]})
-    assert response.status_code == 201, response.text
-    data = response.json()
+    data = validate(client, [_clean(client, name, content)])
     return data, data["outputs"][0]
 
 
@@ -313,3 +313,117 @@ def test_staging_one_sheet_stages_the_whole_file(client, context, monkeypatch):
     response = client.post(f"/api/validations/{data['id']}/stage", json={"keys": keys[:1]})
     assert response.status_code == 200, response.text
     assert sorted(staged) == sorted(keys) and response.json()["staged"] == 2
+
+
+# --- the progress of a validation, streamed -------------------------------------------
+
+
+def _start(client, name, content):
+    response = client.post("/api/validations", json={"job_ids": [_clean(client, name, content)]})
+    assert response.status_code == 202, response.text
+    return response.json()
+
+
+def _ai(monkeypatch, answer):
+    """The AI matcher replaced by ``answer`` (columns, catalog) -> {}: AI matching runs."""
+    from api.services import column_matching
+
+    monkeypatch.setattr(column_matching, "matchers",
+                        lambda precedents=(), vectors_progress=None: (None, answer, []))
+
+
+def test_the_stream_walks_each_step_to_the_review(client, context, monkeypatch):
+    def slow_ai(columns, catalog):
+        time.sleep(0.4)  # long enough for the stream to show the AI at work
+        return {}
+
+    _ai(monkeypatch, slow_ai)
+    started = _start(client, "PC0101_Progress_07132026.xlsx", _sheets(
+        ("Jan", range(1, 7), HEADERS, ()), ("Feb", range(1, 7), HEADERS + ["Notes"], ())))
+    assert [phase["id"] for phase in started["progress"]["phases"]] == ["connect", "read", "matchers", "match", "check"]
+    assert started["progress"]["counters"]["tables_matched"] == {"done": 0, "total": 2}
+    events = read_events(client, f"/api/validations/{started['id']}/events")
+    names = [name for name, _ in events]
+    assert names[-1] == "done" and set(names[:-1]) == {"progress"}
+    states = [data for name, data in events if name == "progress"] + [events[-1][1]["progress"]]
+    fractions = [state["fraction"] for state in states]
+    assert fractions == sorted(fractions) and states[-1]["percent"] == 100
+    order = ["connect", "read", "matchers", "match", "check"]
+    steps = [order.index(state["phase"]) for state in states[:-1] if state["phase"]]
+    assert steps == sorted(steps) and order.index("match") in steps
+    asked = [state for state in states if "asking the AI to read" in (state["detail"] or "")]
+    assert asked and asked[0]["detail"].startswith("PC0101_Progress_07132026.xlsx · ")
+    assert 0 < asked[0]["fraction"] < 1 and asked[0]["counters"]["tables_matched"]["done"] < 2
+    final = states[-1]
+    assert final["counters"]["tables_matched"] == {"done": 2, "total": 2}
+    assert final["counters"]["rows_checked"] == {"done": 24, "total": 24}
+    assert all(phase["state"] == "done" for phase in final["phases"])
+    review = events[-1][1]["result"]
+    assert review["status"] == "ready" and len(review["outputs"]) == 2
+    # The review is also what GET answers now.
+    assert client.get(f"/api/validations/{started['id']}").json()["outputs"] == review["outputs"]
+
+
+def test_a_running_validation_shows_its_progress_and_waits_for_edits(client, context, monkeypatch):
+    release = threading.Event()
+
+    def held_ai(columns, catalog):
+        assert release.wait(10)
+        return {}
+
+    _ai(monkeypatch, held_ai)
+    started = _start(client, "PC0101_Held_07132026.xlsx", _book(range(1, 7)))
+    url = f"/api/validations/{started['id']}"
+    try:
+        for _ in range(200):
+            running = client.get(url).json()
+            if "asking the AI" in (running["progress"]["detail"] or ""):
+                break
+            time.sleep(0.05)
+        assert running["status"] == "running" and running["progress"]["phase"] == "match"
+        assert running["progress"]["detail"] == "PC0101_Held_07132026.xlsx: asking the AI to read 14 columns"
+        assert "outputs" not in running and 0 < running["progress"]["percent"] < 100
+        busy = client.post(f"{url}/stage", json={})
+        assert busy.status_code == 409 and busy.json()["error"]["message"] == "This validation is still running."
+    finally:
+        release.set()
+    events = read_events(client, f"{url}/events")
+    assert events[-1][0] == "done" and client.get(url).json()["status"] == "ready"
+
+
+def test_a_failed_validation_says_why_on_the_stream(client, context, monkeypatch):
+    from api.errors import ApiError
+    from api.services import silver_service
+
+    def broken():
+        raise ApiError(500, "silver_catalog", "The Silver column list could not be read.", "Check silver_columns.csv.")
+
+    monkeypatch.setattr(silver_service, "catalog", broken)
+    started = _start(client, "PC0101_Broken_07132026.xlsx", _book(range(1, 7)))
+    events = read_events(client, f"/api/validations/{started['id']}/events")
+    name, data = events[-1]
+    assert name == "failed" and data["error"]["code"] == "silver_catalog"
+    assert data["error"]["advice"] == "Check silver_columns.csv." and data["progress"]["status"] == "failed"
+    failed = client.get(f"/api/validations/{started['id']}").json()
+    assert failed["status"] == "failed" and failed["error"]["message"] == "The Silver column list could not be read."
+    patched = client.patch(f"/api/validations/{started['id']}/files/x", json={"pc_id": "PC0101"})
+    assert patched.status_code == 409
+
+
+def test_an_unexpected_error_is_reported_not_swallowed(client, context, monkeypatch):
+    from api.services import validation_service
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(validation_service, "_evaluate", crash)
+    started = _start(client, "PC0101_Crash_07132026.xlsx", _book(range(1, 7)))
+    name, data = read_events(client, f"/api/validations/{started['id']}/events")[-1]
+    assert name == "failed" and data["error"]["code"] == "validation_failed"
+    assert data["error"]["detail"] == "RuntimeError: disk on fire" and data["progress"]["phase"] == "check"
+
+
+def test_files_that_cannot_be_validated_are_refused_at_once(client, context):
+    response = client.post("/api/validations", json={"job_ids": ["no-such-job"]})
+    assert response.status_code == 404
+    assert client.get("/api/validations/no-such-session/events").status_code == 404

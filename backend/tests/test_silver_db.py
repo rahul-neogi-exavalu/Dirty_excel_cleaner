@@ -22,6 +22,7 @@ pytestmark = pytest.mark.skipif(not URL or not FILES.exists(), reason="AHI_TEST_
 
 psycopg = pytest.importorskip("psycopg")
 from fastapi.testclient import TestClient  # noqa: E402
+from sse_client import validate  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -81,9 +82,7 @@ def _validated(client, filename: str, fixes: dict[str, str] | None = None, dates
     sheets = [s["name"] for s in upload["sheets"] if not s["hidden"]]
     job = client.post("/api/jobs", json={"workbook_id": upload["id"], "sheets": sheets}).json()
     assert _wait(client, f"/api/jobs/{job['id']}", ("queued", "running"))["status"] == "succeeded"
-    response = client.post("/api/validations", json={"job_ids": [job["id"]]})
-    assert response.status_code == 201, response.text
-    session = response.json()
+    session = validate(client, [job["id"]])
     for file in session["files"]:
         if not file["file_received_date"]:
             session = client.patch(f"/api/validations/{session['id']}/files/{file['job_id']}",

@@ -24,6 +24,7 @@ pytestmark = pytest.mark.skipif(not URL, reason="AHI_TEST_DATABASE_URL is not se
 
 psycopg = pytest.importorskip("psycopg")
 from fastapi.testclient import TestClient  # noqa: E402
+from sse_client import validate  # noqa: E402
 
 # Every required column, under the business's DRT names -- except the policy effective
 # date, which this profit center writes its own way (the mapping learns it).
@@ -113,9 +114,7 @@ def _clean(client, filename: str, content: bytes) -> str:
 
 
 def _validate(client, filename: str, content: bytes) -> tuple[dict, dict]:
-    response = client.post("/api/validations", json={"job_ids": [_clean(client, filename, content)]})
-    assert response.status_code == 201, response.text
-    session = response.json()
+    session = validate(client, [_clean(client, filename, content)])
     return session, session["outputs"][0]
 
 

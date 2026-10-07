@@ -23,14 +23,21 @@ APPEND or REJECTED -- which drives the Ingest step. A file the control table alr
 (seeded from the business's workbook, or staged before and not loaded) fills in that row
 instead of adding one.
 
+Building a session takes a while (the database, word2vec, the AI), so it runs on a worker
+thread: ``start`` answers at once, and the session's tracker reports each step as it
+finishes -- streamed to the browser as Server-Sent Events (``api.progress``). It can be
+edited and staged once built.
+
 Sessions live in memory, like cleaning jobs and Bronze plans; what is staged is in the
 database.
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
+import traceback
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
@@ -38,14 +45,15 @@ from datetime import date, datetime
 from functools import lru_cache
 
 import polars as pl
+from fastapi.encoders import jsonable_encoder
 
 from ahi_bronze import file_meta, naming
 from ahi_bronze import validation as rules
 from ahi_bronze.validation import Decision, Loaded
 from ahi_clean.orchestrate import SOURCE_SHEET_COLUMN
-from ahi_silver import matching
+from ahi_silver import matching, semantic
 
-from .. import config, db
+from .. import config, db, progress
 from ..errors import ApiError, conflict, not_found
 from ..store import SUCCEEDED, OutputRecord, store
 from . import bronze_service, column_matching, reference_service
@@ -55,6 +63,8 @@ SAMPLE_ROWS = 200
 CHOICES = (rules.REJECT, rules.REPLACE, rules.REPLACE_MONTH)
 # Even a rejected file needs it: the control table records its source system.
 PC_NEEDED = "Enter the profit center."
+
+log = logging.getLogger("ahi.validation")
 
 
 @lru_cache(maxsize=1)
@@ -127,6 +137,8 @@ class Session:
     loaded: dict[str, list[Loaded]] = field(default_factory=dict, repr=False)
     created_at: float = field(default_factory=time.time)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # How far building the session has got; finished once it can be reviewed.
+    tracker: progress.Tracker = field(default_factory=lambda: progress.Tracker.of(*PHASES), repr=False)
 
     def file(self, job_id: str) -> FileCheck:
         found = next((item for item in self.files if item.job_id == job_id), None)
@@ -158,37 +170,58 @@ class Context:
 
 
 _CONTROL_FIELDS = ("control_id", "source_system", "file_name", "sheet_name", "reporting_period_type",
-                   "processing_action", "bronze_load_flag", "file_received_date", "drt_reporting_start_date", "drt_reporting_end_date",
+                   "processing_action", "bronze_load_flag", "file_received_date", "drt_reporting_start_date",
+                   "drt_reporting_end_date",
                    "date_detail", "file_replaced", "is_active", "pc_id", "division_name", "job_id", "output_id",
                    "staging_table", "ingestion_id", "rejection_reason", "validation", "replace_month",
                    "created_by", "created_at", "staged_at", "loaded_at", "bronze_table")
 
 
-def _read(file_names: list[str], conn=None) -> Context:
+READ_STEPS = 4
+
+
+def _read(file_names: list[str], conn=None, tracker: progress.Tracker | None = None) -> Context:
     """The division table, the bronze column mapping, these files' pending control rows,
-    and every profit center's files in Bronze (on ``conn`` when given)."""
+    and every profit center's files in Bronze (on ``conn`` when given). ``tracker`` is told
+    of connecting (the CONNECT phase, when there is no ``conn``) and of each of the four
+    reads (READ)."""
     if conn is None:
+        if tracker is not None:
+            tracker.start(CONNECT, 1, "Opening a connection" if db.prepared() else
+                          "Preparing the database on first use: migrations and reference data")
         with db.connection() as own:
-            return _read(file_names, own)
+            if tracker is not None:
+                tracker.advance(1)
+            return _read(file_names, own, tracker)
     from psycopg import sql
 
+    def done(detail: str | None = None) -> None:
+        if tracker is not None:
+            tracker.advance(1, detail)
+
+    if tracker is not None:
+        tracker.start(READ, READ_STEPS, "Reading the division table")
     control = sql.SQL("{}.{}").format(sql.Identifier(config.CONTROL_SCHEMA), sql.Identifier("control_table"))
     fields = sql.SQL(", ").join(sql.Identifier(name) for name in _CONTROL_FIELDS)
     context = Context(divisions=reference_service.divisions(conn))
+    done("Reading the bronze column mapping")
     context.mapping_rows = [
         (row[0], row[1], None, row[2]) for row in conn.execute(sql.SQL(
             "SELECT profit_center, file_columns, silver_column_name FROM {}.{} ORDER BY profit_center, file_columns")
             .format(sql.Identifier(config.BRONZE_SCHEMA), sql.Identifier(reference_service.MAPPING_TABLE)))
     ]
+    done(f"Reading the control rows of {len(file_names)} file{'s' if len(file_names) != 1 else ''}")
     context.pending = [dict(zip(_CONTROL_FIELDS, row)) for row in conn.execute(sql.SQL(
         "SELECT {} FROM {} WHERE file_name = ANY(%s) AND bronze_load_flag = 'N' "
         "AND processing_action IS DISTINCT FROM 'REJECTED' ORDER BY control_id").format(fields, control), [file_names])]
+    done("Reading the files already loaded into Bronze")
     for row in conn.execute(sql.SQL(
             "SELECT {} FROM {} WHERE bronze_load_flag = 'Y' AND is_active = 'Y' "
             "AND processing_action IN ('INSERT', 'APPEND') AND drt_reporting_start_date IS NOT NULL "
             "AND drt_reporting_end_date IS NOT NULL ORDER BY control_id").format(fields, control)):
         data = dict(zip(_CONTROL_FIELDS, row))
         context.loaded.setdefault(data["source_system"], []).append(loaded_from(data))
+    done()
     return context
 
 
@@ -204,8 +237,33 @@ def loaded_from(row: dict) -> Loaded:
 
 # --- building a session --------------------------------------------------------------
 
+# Building a session, in order, with each step's share of the progress bar. Matching is
+# most of the work: every method reads every column, and the AI is a network call.
+CONNECT, READ, MATCHERS, MATCH, CHECK = "connect", "read", "matchers", "match", "check"
+PHASES = (
+    (CONNECT, "Connect to the database", 4),
+    (READ, "Read the control table and the column mapping", 6),
+    (MATCHERS, "Prepare the matchers", 5),
+    (MATCH, "Match each table's columns to the required ones", 65),
+    (CHECK, "Check reporting dates and the rules", 20),
+)
+# What matching one column costs each method, relative to the others. Saved and exact
+# are lookups; fuzzy and word2vec compare against the whole catalog; the AI reads the
+# table in one network call, the slowest by far.
+METHOD_COST = {matching.SAVED: 0.05, matching.EXACT: 0.05, matching.FUZZY: 0.5, matching.SEMANTIC: 2.0,
+               matching.AI: 10.0}
+METHOD_DOING = {matching.SAVED: "looking up saved mappings", matching.EXACT: "comparing exact names",
+                matching.FUZZY: "comparing spellings", matching.SEMANTIC: "comparing meanings (word2vec)",
+                matching.AI: "asking the AI"}
+# The units the word2vec file is worth while it is read (first use only): most of its phase.
+VECTOR_UNITS = 4.0
+# Checking a table costs its rows (dates are parsed on each) plus a fixed part for the rules.
+CHECK_BASE_ROWS = 1_000
 
-def create(job_ids: list[str], batch_id: str | None) -> Session:
+
+def start(job_ids: list[str], batch_id: str | None) -> Session:
+    """Check the files can be validated, then build the session on a worker thread. Its
+    tracker reports how far it has got; ``events`` streams that to the browser."""
     db.require()
     jobs = []
     for job_id in dict.fromkeys(job_ids):
@@ -217,14 +275,61 @@ def create(job_ids: list[str], batch_id: str | None) -> Session:
             jobs.append(job)
     if not jobs:
         raise conflict("None of these files produced a table to validate.")
-    context = _read([job.source_name for job in jobs])
-    session = Session(id=str(uuid.uuid4()), batch_id=batch_id, files=[], outputs=[],
-                      divisions=context.divisions, pending=context.pending, loaded=context.loaded)
+    session = Session(id=str(uuid.uuid4()), batch_id=batch_id, files=[], outputs=[])
+    records = [record for job in jobs for record in job.outputs]
+    # The counters the progress shows, at nought of their totals.
+    session.tracker.count("tables_matched", 0, len(records))
+    session.tracker.count("columns_matched", 0, sum(len(record.frame.columns) for record in records))
+    session.tracker.count("tables_checked", 0, len(records))
+    session.tracker.count("rows_checked", 0, sum(record.frame.height for record in records))
+    with _sessions_lock:
+        _sessions[session.id] = session
+    threading.Thread(target=_run, args=(session, jobs), name=f"validate-{session.id}", daemon=True).start()
+    return session
+
+
+def _run(session: Session, jobs: list) -> None:
+    tracker = session.tracker
+    try:
+        with session.lock:
+            _build(session, jobs)
+        tracker.succeed(lambda: jsonable_encoder(session_out(session)))
+    except Exception as error:  # noqa: BLE001 - reported to the reviewer on the stream
+        if isinstance(error, ApiError):
+            failure = error.as_dict()
+        else:
+            log.exception("Validation %s failed", session.id)
+            failure = {"code": "validation_failed", "message": "The validation stopped unexpectedly.",
+                       "advice": "Validate again. If it keeps happening, check the server logs.",
+                       "detail": "".join(traceback.format_exception_only(type(error), error)).strip()[:500],
+                       "field": None}
+        tracker.fail(failure)
+
+
+def _build(session: Session, jobs: list) -> None:
+    tracker = session.tracker
+    context = _read([job.source_name for job in jobs], tracker=tracker)
+    session.divisions, session.pending, session.loaded = context.divisions, context.pending, context.loaded
     from . import silver_service
 
     catalog_columns = silver_service.catalog()
+    rows = context.mapping_rows
+
+    # The matchers, per file (the AI is shown this profit center's precedents first).
+    vectors = bool(config.WORD2VEC_PATH) and not semantic.loaded(config.WORD2VEC_PATH)
+    tracker.start(MATCHERS, len(jobs) + (VECTOR_UNITS if vectors else 0),
+                  "Reading the word2vec vectors" if vectors else "Setting up the matching methods")
+    read_so_far = 0.0
+
+    def on_words(read: int, wanted: int) -> None:
+        nonlocal read_so_far
+        units = VECTOR_UNITS * read / wanted if wanted else VECTOR_UNITS
+        tracker.advance(units - read_so_far, f"Reading the word2vec vectors: {read:,} of {wanted:,} words")
+        read_so_far = units
+
     notes: list[str] = []
-    for job in jobs:
+    prepared = []
+    for index, job in enumerate(jobs):
         tokens = file_meta.pc_tokens(job.source_name)
         pc = tokens[0] if len(tokens) == 1 else None
         received, note = file_meta.received_date_from_filename(job.source_name)
@@ -236,22 +341,83 @@ def create(job_ids: list[str], batch_id: str | None) -> Session:
         _prefill_from_control(session, file)
         _lookup_division(session, file)
         session.files.append(file)
-        rows = context.mapping_rows
-        similarity, llm, matcher_notes = column_matching.matchers(column_matching.precedents(rows, pc))
+        similarity, llm, matcher_notes = column_matching.matchers(column_matching.precedents(rows, pc), on_words)
+        if vectors and index == 0:
+            tracker.advance(VECTOR_UNITS - read_so_far)  # read in full, or from the cache
         notes.extend(matcher_notes)
-        for record in job.outputs:
-            mapping, votes, options, found_notes = _match(record, pc, rows, catalog_columns, similarity, llm)
-            notes.extend(found_notes)
-            session.outputs.append(OutputCheck(
-                key=f"{job.id}.{record.id}", job_id=job.id, output_id=record.id, name=record.name,
-                sheet_names=list(record.sheet_names), rows=record.frame.height, columns=_columns(record),
-                mapping=mapping, votes=votes, options=options,
-            ))
+        prepared.append((job, file, similarity, llm))
+        tracker.advance(1, f"Ready for {job.source_name}" if index == len(jobs) - 1 else
+                        f"Setting up the matching methods for {jobs[index + 1].source_name}")
+
+    # Matching, table by table: each method's cost per column, for the methods its file runs.
+    tables = [(job, file, similarity, llm, record)
+              for job, file, similarity, llm in prepared for record in job.outputs]
+    costs = [sum(METHOD_COST[method] for method in matching.methods_run(similarity, llm)) * len(record.frame.columns)
+             for *_, similarity, llm, record in tables]
+    total_columns = sum(len(record.frame.columns) for *_, record in tables)
+    tracker.start(MATCH, sum(costs))
+    matched_columns = 0
+    for index, (job, file, similarity, llm, record) in enumerate(tables):
+        label = _table_label(file, record, len(job.outputs))
+        reached: dict[str, float] = {}
+
+        def on_method(method: str, columns_done: int, columns: int, label=label, reached=reached) -> None:
+            units = METHOD_COST[method] * columns_done
+            if method == matching.AI and columns_done < columns:
+                doing = f"asking the AI to read {columns} columns"
+            elif columns_done < columns:
+                doing = f"{METHOD_DOING[method]}, {columns_done} of {columns} columns"
+            else:
+                doing = f"{METHOD_DOING[method]}, done"
+            tracker.advance(units - reached.get(method, 0.0), f"{label}: {doing}")
+            reached[method] = units
+
+        mapping, votes, options, found_notes = _match(record, file.pc_id, rows, catalog_columns, similarity, llm,
+                                                      on_method)
+        notes.extend(found_notes)
+        session.outputs.append(OutputCheck(
+            key=f"{job.id}.{record.id}", job_id=job.id, output_id=record.id, name=record.name,
+            sheet_names=list(record.sheet_names), rows=record.frame.height, columns=_columns(record),
+            mapping=mapping, votes=votes, options=options,
+        ))
+        matched_columns += len(record.frame.columns)
+        tracker.count("tables_matched", index + 1, len(tables))
+        tracker.count("columns_matched", matched_columns, total_columns)
     session.notes = list(dict.fromkeys(notes))
-    _evaluate(session)
-    with _sessions_lock:
-        _sessions[session.id] = session
-    return session
+
+    # The rules, table by table: dates are parsed on every row.
+    outputs = session.outputs
+    total_rows = sum(output.rows for output in outputs)
+
+    def checking(output: OutputCheck) -> str:
+        return f"{_output_label(session, output)}: reporting dates and required columns"
+
+    tracker.start(CHECK, sum(output.rows + CHECK_BASE_ROWS for output in outputs), checking(outputs[0]))
+    checked = {"tables": 0, "rows": 0}
+
+    def on_checked(output: OutputCheck) -> None:
+        checked["tables"] += 1
+        checked["rows"] += output.rows
+        last = checked["tables"] == len(outputs)
+        tracker.advance(output.rows + CHECK_BASE_ROWS,
+                        "Checking every sheet of each file together" if last else checking(outputs[checked["tables"]]))
+        tracker.count("tables_checked", checked["tables"], len(outputs))
+        tracker.count("rows_checked", checked["rows"], total_rows)
+
+    _evaluate(session, on_checked)
+
+
+def _table_label(file: FileCheck, record: OutputRecord, tables_in_file: int) -> str:
+    """How the progress names a table: its file, and its sheets when the file has several tables."""
+    if tables_in_file == 1:
+        return file.file_name
+    return f"{file.file_name} · {_sheet_name(record.sheet_names) or record.name}"
+
+
+def _output_label(session: Session, output: OutputCheck) -> str:
+    file = session.file(output.job_id)
+    siblings = sum(1 for other in session.outputs if other.job_id == output.job_id)
+    return file.file_name if siblings == 1 else f"{file.file_name} · {_sheet_name(output.sheet_names) or output.name}"
 
 
 def get(session_id: str) -> Session:
@@ -260,6 +426,16 @@ def get(session_id: str) -> Session:
     if found is None:
         raise not_found("That validation")
     return found
+
+
+def ready(session_id: str) -> Session:
+    """The session, once it is built: it can then be edited and staged."""
+    session = get(session_id)
+    if session.tracker.status == progress.RUNNING:
+        raise conflict("This validation is still running.", "Wait for it to finish, then try again.")
+    if session.tracker.status == progress.FAILED:
+        raise conflict("This validation did not finish.", "Validate the files again.")
+    return session
 
 
 def _record(output: OutputCheck) -> OutputRecord:
@@ -276,7 +452,8 @@ def _columns(record: OutputRecord) -> list[dict]:
     ]
 
 
-def _match(record: OutputRecord, pc: str | None, rows: list[tuple], catalog_columns, similarity, llm):
+def _match(record: OutputRecord, pc: str | None, rows: list[tuple], catalog_columns, similarity, llm,
+           on_method: matching.Progress | None = None):
     """Every method's vote for every column against the whole Silver catalog -- so other
     targets absorb look-alikes (Policy Expiration Date is not policy_effective_date) -- and
     from that, the column found for each required one."""
@@ -289,7 +466,8 @@ def _match(record: OutputRecord, pc: str | None, rows: list[tuple], catalog_colu
     head = record.frame.head(SAMPLE_ROWS).rename(dict(zip(originals, names)))
     suggestions, notes = matching.suggest(
         names, catalog_columns, own, known, column_matching.samples(head, names), similarity, llm,
-        fuzzy_min=config.MATCH_FUZZY_MIN, semantic_min=config.MATCH_SEMANTIC_MIN, one_to_many=one_to_many)
+        fuzzy_min=config.MATCH_FUZZY_MIN, semantic_min=config.MATCH_SEMANTIC_MIN, one_to_many=one_to_many,
+        progress=on_method)
     wanted = {item.name for item in required()}
     mapping: dict[str, str | None] = {name: None for name in wanted}
     votes: dict[str, dict] = {}
@@ -364,7 +542,9 @@ def division_options(session: Session, file: FileCheck) -> list[str]:
 # --- the rules, per output -------------------------------------------------------------
 
 
-def _evaluate(session: Session) -> None:
+def _evaluate(session: Session, on_checked=None) -> None:
+    """Every output against the rules, then every file whole. ``on_checked`` hears of each
+    output as it is done."""
     taken: set[int] = set()
     for output in session.outputs:
         file = session.file(output.job_id)
@@ -372,6 +552,8 @@ def _evaluate(session: Session) -> None:
         if control:
             taken.add(control["control_id"])
         _evaluate_one(session, file, output, control)
+        if on_checked is not None:
+            on_checked(output)
     for file in session.files:
         _evaluate_file(file, [output for output in session.outputs if output.job_id == file.job_id])
 
@@ -576,7 +758,7 @@ def _editable(output: OutputCheck) -> None:
 
 def update_file(session_id: str, job_id: str, fields: set[str], pc_id: str | None = None,
                 file_received_date: str | None = None, division_name: str | None = None) -> Session:
-    session = get(session_id)
+    session = ready(session_id)
     with session.lock:
         file = session.file(job_id)
         if all(output.staged for output in session.outputs if output.job_id == job_id):
@@ -604,7 +786,7 @@ def update_file(session_id: str, job_id: str, fields: set[str], pc_id: str | Non
 def update_output(session_id: str, key: str, fields: set[str], mapping: dict[str, str | None] | None = None,
                   reporting_start_date: str | None = None, reporting_end_date: str | None = None,
                   choice: str | None = None, use_control_dates: bool | None = None) -> Session:
-    session = get(session_id)
+    session = ready(session_id)
     with session.lock:
         output = session.output(key)
         _editable(output)
@@ -668,7 +850,7 @@ def _parse_month(value: str | None, name: str) -> date:
 def stage(session_id: str, keys: list[str] | None, user_name: str) -> Session:
     """Write the chosen outputs to staging and the control table, in one transaction. A file
     is staged whole: choosing one of its outputs stages every one."""
-    session = get(session_id)
+    session = ready(session_id)
     with session.lock:
         files = {output.job_id for output in session.outputs if not keys or output.key in keys}
         targets = [output for output in session.outputs if output.job_id in files and not output.staged]
@@ -834,9 +1016,20 @@ def session_out(session: Session) -> dict:
         })
     counts = {verdict: sum(1 for output in outputs if output["verdict"] == verdict)
               for verdict in (READY, NEEDS_INPUT, FLAGGED, REJECTED)}
-    return {"id": session.id, "batch_id": session.batch_id, "files": files, "outputs": outputs,
+    return {"id": session.id, "batch_id": session.batch_id, "status": "ready", "files": files, "outputs": outputs,
             "notes": session.notes, "counts": counts, "created_at": session.created_at,
             "staged": sum(1 for output in session.outputs if output.staged)}
+
+
+def session_view(session: Session) -> dict:
+    """What the API shows of a session: the review once it is built, else how far building
+    it has got (``running``) or why it stopped (``failed``)."""
+    tracker = session.tracker
+    if tracker.status == progress.SUCCEEDED:
+        return session_out(session)
+    _, state = tracker.snapshot()
+    return {"id": session.id, "batch_id": session.batch_id, "status": tracker.status, "progress": state,
+            "error": tracker.error}
 
 
 def control_rows(source_system: str | None = None, status: str | None = None, limit: int = 500) -> list[dict]:

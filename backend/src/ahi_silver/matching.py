@@ -141,6 +141,21 @@ class Suggestion:
 LlmMatcher = Callable[[dict[str, list[str]], list[SilverColumn]], dict[str, tuple]]
 # word2vec: (words, words) -> cosine or None
 Similarity = Callable[[tuple[str, ...], tuple[str, ...]], float | None]
+# Told how far each method has got: (method, columns done, columns in all). Each method
+# reports 0 when it starts and every column when it ends; fuzzy and semantic report each
+# column as they go.
+Progress = Callable[[str, int, int], None]
+
+
+def methods_run(similarity: Similarity | None, llm: LlmMatcher | None) -> list[str]:
+    """The methods ``suggest`` runs with these matchers, in order."""
+    return [method for method, available in ((SAVED, True), (EXACT, True), (FUZZY, process is not None),
+                                              (SEMANTIC, similarity is not None), (AI, llm is not None))
+            if available]
+
+
+def _quiet(_method: str, _done: int, _total: int) -> None:
+    pass
 
 
 # Words that say what *kind* of value a column holds, not what it is about.
@@ -228,8 +243,10 @@ def _exact_votes(columns, catalog, votes) -> None:
             votes[column].append(Vote(EXACT, target, 1.0, "Same name"))
 
 
-def _fuzzy_votes(columns, catalog, votes, minimum, margin) -> None:
-    for column in columns:
+def _fuzzy_votes(columns, catalog, votes, minimum, margin, progress: Progress = _quiet) -> None:
+    for index, column in enumerate(columns):
+        if index:
+            progress(FUZZY, index, len(columns))
         source = normalize.words(column)
         choices = {}
         for silver in catalog:
@@ -260,8 +277,10 @@ def _fuzzy_votes(columns, catalog, votes, minimum, margin) -> None:
             votes[column].append(Vote(FUZZY, target, round(score / 100, 3), f"Similar spelling ({score:.0f}%)"))
 
 
-def _semantic_votes(columns, catalog, votes, similarity, minimum, margin) -> None:
-    for column in columns:
+def _semantic_votes(columns, catalog, votes, similarity, minimum, margin, progress: Progress = _quiet) -> None:
+    for index, column in enumerate(columns):
+        if index:
+            progress(SEMANTIC, index, len(columns))
         source = normalize.words(column)
         if _has_abbreviation(source):
             # word2vec reads "acc" as a word (the sports conference), not as
@@ -341,6 +360,7 @@ def suggest(
     fuzzy_margin: float = 5,
     semantic_margin: float = 0.05,
     one_to_many: set[str] | None = None,
+    progress: Progress | None = None,
 ) -> tuple[list[Suggestion], list[str]]:
     """One suggestion per bronze column, with every method's vote, plus notes on methods
     that could not run.
@@ -350,6 +370,7 @@ def suggest(
     ``known``: approved mappings elsewhere, by normalized column name.
     ``one_to_many``: columns whose saved targets all load (one header mapped twice);
     for the others several saved targets are competing votes. None: every list loads.
+    ``progress``: told how far each method has got (see ``Progress``).
     Only the catalog's mapped columns are targets; system columns are never offered.
     """
     catalog = [column for column in catalog if column.role == MAPPED]
@@ -358,21 +379,34 @@ def suggest(
     by_name = {column.name: column for column in catalog}
     votes: dict[str, list[Vote]] = {column: [] for column in columns}
     stale: dict[str, str] = {}
+    report = progress or _quiet
+    total = len(columns)
 
+    report(SAVED, 0, total)
     _saved_votes(columns, saved, known, by_name, votes, stale)
+    report(SAVED, total, total)
+    report(EXACT, 0, total)
     _exact_votes(columns, catalog, votes)
+    report(EXACT, total, total)
     if process is None:
         notes.append("Fuzzy matching unavailable (install rapidfuzz).")
     else:
-        _fuzzy_votes(columns, catalog, votes, fuzzy_min, fuzzy_margin)
+        report(FUZZY, 0, total)
+        _fuzzy_votes(columns, catalog, votes, fuzzy_min, fuzzy_margin, report)
+        report(FUZZY, total, total)
     if similarity is None:
         notes.append("Semantic matching skipped: no word2vec vectors configured (AHI_WORD2VEC_PATH).")
     else:
-        _semantic_votes(columns, catalog, votes, similarity, semantic_min, semantic_margin)
+        report(SEMANTIC, 0, total)
+        _semantic_votes(columns, catalog, votes, similarity, semantic_min, semantic_margin, report)
+        report(SEMANTIC, total, total)
     if llm is None:
         notes.append("AI matching skipped: not configured (AZURE_OPENAI_* or GEMINI_API_KEY, AHI_AI_ENABLED).")
-    elif columns:
-        _ai_votes(columns, catalog, by_name, votes, samples, llm, notes)
+    else:
+        report(AI, 0, total)
+        if columns:
+            _ai_votes(columns, catalog, by_name, votes, samples, llm, notes)
+        report(AI, total, total)
 
     candidates = {column: _candidates(votes[column]) for column in columns}
 

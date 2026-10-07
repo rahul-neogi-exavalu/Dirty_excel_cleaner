@@ -26,6 +26,7 @@ export function Select<T extends string>({
   icon,
   width = "anchor",
   hideLabel,
+  hideSelectedMeta,
 }: {
   value: T | null;
   options: SelectOption<T>[];
@@ -37,6 +38,8 @@ export function Select<T extends string>({
   icon?: ReactNode;
   width?: number | "anchor";
   hideLabel?: boolean;
+  /** Leave the chosen option's meta (a badge) out of the closed control, where space is tight. */
+  hideSelectedMeta?: boolean;
 }) {
   const { open, setOpen, anchor, panel } = usePopover();
   const [active, setActive] = useState(0);
@@ -116,10 +119,10 @@ export function Select<T extends string>({
             {selected?.icon ?? icon}
           </span>
         )}
-        <span id={`${id}-value`} className={clsx("min-w-0 flex-1 truncate", selected ? "font-medium text-ink-900" : "text-ink-400")}>
+        <span id={`${id}-value`} title={selected?.label} className={clsx("min-w-0 flex-1 truncate", selected ? "font-medium text-ink-900" : "text-ink-400")}>
           {selected?.label ?? placeholder}
         </span>
-        {selected?.meta && <span className="hidden shrink-0 sm:inline-flex">{selected.meta}</span>}
+        {selected?.meta && !hideSelectedMeta && <span className="hidden shrink-0 sm:inline-flex">{selected.meta}</span>}
         <ChevronDown className={clsx("h-4 w-4 shrink-0 text-ink-500 transition-transform", open && "rotate-180")} aria-hidden />
       </button>
       <PopoverPanel

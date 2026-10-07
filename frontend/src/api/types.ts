@@ -545,9 +545,55 @@ export interface ValidationOutput {
   control: { control_id: number; seeded: boolean } | null;
 }
 
+/* ---- live progress (Server-Sent Events) ------------------------------------ */
+
+export type ProgressPhaseState = "pending" | "active" | "done" | "failed";
+
+/** One step of a long task: its share of units done, what it is doing, how long it took. */
+export interface ProgressPhase {
+  id: string;
+  label: string;
+  state: ProgressPhaseState;
+  detail: string | null;
+  done: number;
+  total: number;
+  fraction: number;
+  /** Seconds spent so far (active) or in all (done); null before it starts. */
+  seconds: number | null;
+}
+
+/** How far a long server task has got, as each `progress` event carries it. */
+export interface TaskProgress {
+  status: "running" | "succeeded" | "failed";
+  /** 0..1, weighted by the work each step does; never goes backwards. */
+  fraction: number;
+  percent: number;
+  /** The step running now (or the one it failed at). */
+  phase: string | null;
+  label: string | null;
+  detail: string | null;
+  step: number;
+  steps: number;
+  phases: ProgressPhase[];
+  counters: Record<string, { done: number; total: number }>;
+  started_at: number;
+  elapsed: number;
+  error: ApiErrorBody | null;
+}
+
+/** A validation still being built, or one that stopped: what GET and POST answer until it is ready. */
+export interface ValidationRun {
+  id: string;
+  batch_id: string | null;
+  status: "running" | "failed";
+  progress: TaskProgress;
+  error: ApiErrorBody | null;
+}
+
 export interface Validation {
   id: string;
   batch_id: string | null;
+  status: "ready";
   files: ValidationFile[];
   outputs: ValidationOutput[];
   notes: string[];

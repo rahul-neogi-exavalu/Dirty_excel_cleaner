@@ -525,49 +525,9 @@ export function PageHeader({
         <h1 className="mt-1.5 text-[24px] font-semibold leading-8 text-ink-900 sm:text-page">{title}</h1>
         {description && <p className="mt-1 max-w-xl text-body text-ink-500">{description}</p>}
       </div>
-      <div className="flex items-center gap-4">
-        {actions}
-        {step && <WorkflowStepper current={page as StepPage} />}
-      </div>
+      {/* The sidebar already lists every step with its progress: no second stepper here. */}
+      {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
     </div>
-  );
-}
-
-function WorkflowStepper({ current }: { current: StepPage }) {
-  const pages = Object.keys(PAGE_META) as StepPage[];
-  return (
-    <ol className="hidden shrink-0 items-center xl:flex" aria-label="Workflow progress">
-      {pages.map((page, i) => (
-        <StepperItem key={page} page={page} index={i} current={page === current} last={i === pages.length - 1} />
-      ))}
-    </ol>
-  );
-}
-
-/** One step: ticked only when its work is actually done, not because it comes earlier. */
-function StepperItem({ page, index, current, last }: { page: StepPage; index: number; current: boolean; last: boolean }) {
-  const { done } = useStepState(page);
-  const state = current ? "current" : done ? "done" : "upcoming";
-  return (
-    <li className="flex items-center">
-      <div className="flex flex-col items-center gap-1.5">
-        <span
-          aria-current={current ? "step" : undefined}
-          className={clsx(
-            "num flex h-8 w-8 items-center justify-center rounded-full font-display text-[13px] font-semibold transition-colors",
-            state === "current" && "bg-brand-600 text-white ring-4 ring-brand-100",
-            state === "done" && "bg-ink-800 text-white",
-            state === "upcoming" && "border border-ink-200 bg-white text-ink-500",
-          )}
-        >
-          {state === "done" ? <Check className="h-3.5 w-3.5" strokeWidth={3} aria-label="Complete" /> : index + 1}
-        </span>
-        <span className={clsx("whitespace-nowrap text-caption", current ? "font-semibold text-ink-900" : "text-ink-500")}>
-          {PAGE_META[page].label}
-        </span>
-      </div>
-      {!last && <span className={clsx("mx-2 mb-5 h-0.5 w-10 rounded-full", done ? "bg-ink-500" : "bg-ink-200")} aria-hidden />}
-    </li>
   );
 }
 

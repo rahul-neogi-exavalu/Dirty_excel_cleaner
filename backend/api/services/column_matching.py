@@ -101,12 +101,14 @@ def samples(frame: pl.DataFrame, columns: list[str]) -> dict[str, list[str]]:
     return result
 
 
-def matchers(precedents=()):
+def matchers(precedents=(), vectors_progress: semantic.Progress | None = None):
+    """The word2vec similarity and the AI matcher (each None when not configured), and notes.
+    ``vectors_progress`` hears how far reading the word2vec file has got (first use only)."""
     similarity = None
     notes = []
     if config.WORD2VEC_PATH:
         try:
-            similarity = semantic.load(config.WORD2VEC_PATH).similarity
+            similarity = semantic.load(config.WORD2VEC_PATH, progress=vectors_progress).similarity
         except OSError as error:
             notes.append(f"word2vec vectors could not be read: {error}")
     llm = None
