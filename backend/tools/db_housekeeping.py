@@ -134,9 +134,9 @@ def _retire_orphans(conn, found: Survey) -> list[str]:
     control = _ident(config.CONTROL_SCHEMA)
     # Silver rows that came from these tables stay in Silver; the loads say so.
     in_silver: set[str] = set()
-    if _exists(conn, config.SILVER_SCHEMA, "silver_detail"):
+    if _exists(conn, config.SILVER_SCHEMA, "silver_transaction"):
         in_silver = {row[0].rpartition(".")[2] for row in conn.execute(sql.SQL(
-            "SELECT DISTINCT source_table FROM {}.silver_detail WHERE split_part(source_table, '.', 2) = ANY(%s)").format(
+            "SELECT DISTINCT source_table FROM {}.silver_transaction WHERE split_part(source_table, '.', 2) = ANY(%s)").format(
                 _ident(config.SILVER_SCHEMA)), [names])}
     marked = conn.execute(sql.SQL(
         "UPDATE {}.ingestion SET status = %s, "

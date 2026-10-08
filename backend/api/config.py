@@ -141,7 +141,8 @@ def _flag(name: str, default: str) -> bool:
 # --- Silver layer --------------------------------------------------------------
 SILVER_SCHEMA = os.environ.get("AHI_SILVER_SCHEMA", "silver").strip()
 # The AHI doc's "source-specific Silver Cleansed" tables: one per bronze table, under the
-# same name, holding its rows mapped and typed. Final Silver (silver_detail) loads from them.
+# same name, holding its rows mapped and typed. Final Silver (silver_transaction, or
+# silver_aggregate for a profit center's own aggregates) loads from them.
 CLEANSED_SCHEMA = os.environ.get("AHI_CLEANSED_SCHEMA", "bronze_cleansed").strip()
 # A Silver review not approved within this many hours is discarded (sliding: every edit renews it).
 SILVER_DRAFT_TTL_HOURS = float(os.environ.get("AHI_SILVER_DRAFT_TTL_HOURS") or "72")
@@ -149,7 +150,7 @@ SILVER_DRAFT_TTL_HOURS = float(os.environ.get("AHI_SILVER_DRAFT_TTL_HOURS") or "
 # real one exists this is a placeholder in the control schema, seeded for testing.
 # Empty: <control schema>.lotl, resolved when used (the control schema can be overridden).
 LOTL_TABLE = os.environ.get("AHI_LOTL_TABLE", "").strip()
-# The silver_detail columns, exactly as the business's silver_schema lists them.
+# The silver_transaction columns, exactly as the business's silver_schema lists them.
 SILVER_COLUMNS_FILE = Path(os.environ.get("AHI_SILVER_COLUMNS_FILE", ROOT / "config" / "silver_columns.csv"))
 # The silver_aggregate columns, exactly as the business's silver_aggregate_schema lists them.
 SILVER_AGGREGATE_COLUMNS_FILE = Path(os.environ.get(

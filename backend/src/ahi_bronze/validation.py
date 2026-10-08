@@ -6,19 +6,28 @@
    alternatives: one of them is enough, and more are fine (CommissionPct or
    GrossCommissionAmount). One requirement missing: the file is rejected.
 2. **Reporting dates.** The accounting effective date (AED) decides them if it is
-   populated -- a readable date -- on every row; else the policy effective date (PED) on
-   every row; else the transaction effective date (TED). 99 rows of 100 is not every
-   row. When none is, a person enters the dates. They are whole months: the 1st of the
-   first month to the last day of the last.
+   populated -- a readable date -- on every row; else the transaction effective date
+   (TED) on every row; else the policy effective date (PED). 99 rows of 100 is not every
+   row. The reviewer may pick another date column populated on every row (its range is
+   YTD or monthly where the first's is not); that column is the file's ``date_detail``.
+   When none is, a person enters the dates: ``date_detail`` is the date column whose
+   range they match, else blank. They are whole months: the 1st of the first month to
+   the last day of the last.
 3. **YTD or monthly.** A file from January to some month of one year is year-to-date; a
    file of one month is monthly. Anything else (Feb-Jun, or 2024-2026) is flagged: the
    reviewer may correct the dates, and a file left flagged is rejected.
 4. **What the control table does.** Against the profit center's files already in Bronze
-   that year: a year-to-date file is inserted and replaces them; a monthly file is
-   appended; a monthly file for a month already loaded is the reviewer's call (replace
-   that month, or reject the file).
-5. **A file is fit whole.** One sheet (cleaned table) of a file not fit for Bronze --
-   rejected for itself -- rejects every sheet of that file.
+   that year (the profit center read from the file name): a year-to-date file is inserted
+   and replaces them; a monthly file for a month not loaded yet is appended -- into the
+   same bronze table as the files it continues; a monthly file for a month already loaded
+   is flagged and rejected. A file with exactly the reporting dates of one
+   already loaded is the reviewer's call too: a **revision** replaces the file the
+   reviewer names (looked up among the loaded files of those dates), a **companion**
+   came with it and is kept beside it (joined in Silver), or it is rejected.
+5. **A file is fit whole, but for sheets that are not data.** A sheet (cleaned table)
+   missing required columns -- a lookup or notes sheet beside the data -- is left out on
+   its own, and the file's other sheets go ahead. Any other sheet not fit for Bronze
+   (flagged dates, rejected by the reviewer) rejects every sheet of that file.
 """
 
 from __future__ import annotations
@@ -32,13 +41,15 @@ from pathlib import Path
 import polars as pl
 
 AED, PED, TED = "AED", "PED", "TED"
-DATE_ORDER = (AED, PED, TED)
+DATE_ORDER = (AED, TED, PED)
 YTD, MONTHLY = "YTD", "MONTHLY"
 INSERT, APPEND, REJECTED = "INSERT", "APPEND", "REJECTED"
 # Not an action the control table records: the reviewer has to choose first.
 DECIDE = "DECIDE"
 # The reviewer's choices.
 REJECT, REPLACE, REPLACE_MONTH = "reject", "replace", "replace_month"
+# A revised file replacing the one the reviewer names; a companion kept beside its primary.
+REVISE, COMPANION = "revise", "companion"
 
 
 @dataclass(frozen=True)
@@ -149,8 +160,34 @@ def date_stats(frame: pl.DataFrame, columns: dict[str, str | None]) -> dict[str,
 
 
 def reporting_source(stats: dict[str, DateStat]) -> DateStat | None:
-    """AED, else PED, else TED: the first populated on every row."""
+    """AED, else TED, else PED: the first populated on every row."""
     return next((stats[role] for role in DATE_ORDER if role in stats and stats[role].complete), None)
+
+
+def role_range(stat: DateStat) -> tuple[date, date]:
+    """The whole months a date column spans."""
+    return month_start(stat.first), month_end(stat.last)
+
+
+def role_ranges(stats: dict[str, DateStat]) -> dict[str, dict]:
+    """Every date column populated on every row -- the ones that may decide the reporting
+    dates -- with its whole-month range and whether that is YTD, monthly, or neither."""
+    ranges = {}
+    for role in DATE_ORDER:
+        stat = stats.get(role)
+        if stat is None or not stat.complete:
+            continue
+        start, end = role_range(stat)
+        kind, flag = classify(start, end)
+        ranges[role] = {"start": start, "end": end, "period_type": kind, "flag": flag}
+    return ranges
+
+
+def matching_role(stats: dict[str, DateStat], start: date, end: date) -> str | None:
+    """The date column, in priority order, populated on every row whose range is exactly
+    these whole months: what dates a person entered came from, if any did."""
+    return next((role for role in DATE_ORDER if role in stats and stats[role].complete
+                 and role_range(stats[role]) == (start, end)), None)
 
 
 def month_start(day: date) -> date:
@@ -178,11 +215,36 @@ def classify(start: date, end: date) -> tuple[str | None, str | None]:
                   "Enter this file's reporting dates, or it is rejected.")
 
 
-def row_months(frame: pl.DataFrame, column: str | None, fixed: str | None = None) -> pl.Series:
-    """Each row's month (YYYY-MM): from ``column``'s dates, or ``fixed`` for every row."""
+def row_months(frame: pl.DataFrame, column: str | None, fixed: str | None = None,
+               sheets: tuple[str, dict[str, str]] | None = None) -> pl.Series:
+    """Each row's month (YYYY-MM): from ``column``'s dates, from the month its sheet is
+    (``sheets``: the sheet column and sheet -> month), or ``fixed`` for every row."""
     if column is not None and column in frame.columns:
         return parse_dates(frame[column]).dt.strftime("%Y-%m").alias("_reporting_month")
+    if sheets and sheets[0] in frame.columns:
+        return frame[sheets[0]].cast(pl.String).replace_strict(sheets[1], default=None, return_dtype=pl.String) \
+            .alias("_reporting_month")
     return pl.Series("_reporting_month", [fixed] * frame.height, dtype=pl.String)
+
+
+def sheet_month(name: str) -> str | None:
+    """The one month (YYYY-MM) a sheet's name states -- "January 2026", "Jun 2026" -- if
+    it states exactly one month of one year."""
+    from .period_tokens import period_months, years_in
+
+    months, years = period_months(name or ""), set(years_in(name or ""))
+    if months is None or months[0] != months[1] or len(years) != 1:
+        return None
+    return f"{years.pop():04d}-{months[0]:02d}"
+
+
+def sheet_months(names) -> dict[str, str] | None:
+    """Each sheet -> its month, when every sheet names one month: a summary sent a month
+    to a sheet."""
+    found = {name: sheet_month(name) for name in dict.fromkeys(names) if name}
+    if not found or any(month is None for month in found.values()):
+        return None
+    return found
 
 
 def month_stats(frame: pl.DataFrame, months: pl.Series, columns: dict[str, str | None]) -> dict[str, dict]:
@@ -219,6 +281,15 @@ class Loaded:
     rows: int | None = None
     columns: int | None = None
     months: dict = field(default_factory=dict, hash=False, compare=False)
+    # The file received date, the date column its dates are the range of, and the required
+    # columns (Silver names) it carries: what a companion arriving later needs of it.
+    received: date | None = field(default=None, compare=False)
+    date_detail: str | None = field(default=None, compare=False)
+    present: frozenset = field(default_factory=frozenset, compare=False)
+    # Its bronze columns, in order (what a file appended to it is compared with), and
+    # whether it holds the profit center's own aggregates rather than transactions.
+    column_names: tuple = field(default=(), compare=False)
+    aggregated: bool = field(default=False, compare=False)
 
     def label(self) -> str:
         return f"{self.file_name} ({_span(self.start, self.end)})"
@@ -233,31 +304,70 @@ class Decision:
     replace_month: str | None = None  # YYYY-MM removed from the overlapping files
     confirm: bool = False  # the reviewer confirms it when ingesting
     options: list[str] = field(default_factory=list)  # for DECIDE
+    # Earlier files this one continues in their bronze table (a month appended after them).
+    appends: list[Loaded] = field(default_factory=list)
+    # Rejected for a reason the reviewer is shown prominently (a month loaded twice).
+    flagged: bool = False
 
     def file_replaced(self) -> str | None:
         files = self.replaces or (self.overlaps if self.replace_month else [])
         return ", ".join(dict.fromkeys(item.file_name for item in files)) or None
 
 
+def overlapping(loaded: list[Loaded], start: date, end: date) -> list[Loaded]:
+    """The loaded files whose reporting dates share a month with these: the ones a revision
+    of this period may name."""
+    return [item for item in loaded if item.start <= end and start <= item.end]
+
+
 def business_action(*, missing: list[str], flag: str | None, period_type: str | None,
                     start: date | None, end: date | None, loaded: list[Loaded],
-                    choice: str | None = None) -> Decision:
+                    choice: str | None = None, revises: Loaded | None = None,
+                    companion: str | None = None, partners: bool = False, pair: str | None = None) -> Decision:
     """What the control table records for a file (or DECIDE: the reviewer chooses first).
 
     ``loaded``: this profit center's files in Bronze -- control rows loaded and active.
-    ``choice``: the reviewer's ``reject``, ``replace`` (an older year-to-date file) or
-    ``replace_month`` (a month already loaded).
+    ``choice``: the reviewer's ``reject``, ``replace`` (an older year-to-date file),
+    ``replace_month`` (a month already loaded), ``revise`` (with ``revises``: the loaded
+    file it replaces, as the reviewer named it) or ``companion`` (with ``companion``: the
+    file it came with, whose reporting dates it takes).
+    ``missing``: for a pair, what neither file carries; ``pair`` names the two.
+    ``partners``: files of this profit center came with it, so it may be one's companion.
     """
     if choice == REJECT:
         return Decision(REJECTED, ["Rejected by the reviewer."])
     if missing:
-        return Decision(REJECTED, [f"Missing required column{'s' if len(missing) > 1 else ''}: {', '.join(missing)}."])
+        across = f" (across {pair})" if pair else ""
+        reasons = [f"Missing required column{'s' if len(missing) > 1 else ''}: {', '.join(missing)}{across}."]
+        if partners and choice != COMPANION:
+            # A list beside the data (a broker list) carries few of them on its own.
+            reasons.append("If it came with another file of this profit center, make it that file's companion: "
+                           "the two are checked together and joined in Silver.")
+            return Decision(REJECTED, reasons, options=[COMPANION])
+        return Decision(REJECTED, reasons)
+    if choice == COMPANION and companion:
+        return Decision(APPEND, [f"Companion of {companion}: kept beside it, with its reporting dates, and joined "
+                                 "with it in Silver."])
     if flag:
         return Decision(REJECTED, [flag])
     if period_type is None or start is None or end is None:
         raise ValueError("business_action needs the reporting dates")
 
     same_year = [item for item in loaded if item.end.year == end.year]
+    if choice == REVISE and revises is not None:
+        later = [item for item in same_year if item.start > end and item != revises]
+        reasons = [f"Revision: replaces {revises.label()}."]
+        if later:
+            reasons.append(f"Keeps the later {', '.join(item.label() for item in later)}.")
+        return Decision(INSERT, reasons, replaces=[revises], confirm=True)
+    # Exactly the reporting dates of a file already loaded: a revision of it, or a file
+    # that came with it. Only the reviewer can tell.
+    same = [item for item in loaded if (item.start, item.end) == (start, end)]
+    if same:
+        return Decision(DECIDE, [f"{', '.join(item.file_name for item in same)} already {'has' if len(same) == 1 else 'have'} "
+                                 f"{_span(start, end)}. A revision replaces the file you name; a companion came with "
+                                 "it and is kept beside it, joined in Silver."],
+                        overlaps=same, options=[REVISE, COMPANION, REJECT])
     if period_type == YTD:
         if not same_year:
             return Decision(INSERT, [f"First file of {end.year} for this profit center."])
@@ -282,28 +392,27 @@ def business_action(*, missing: list[str], flag: str | None, period_type: str | 
     month = month_key(start)
     holding = [item for item in same_year if item.start <= start and end <= item.end]
     if holding:
+        # A month is loaded once: the control table rejects it, and the reviewer is told.
         holders = ", ".join(item.label() for item in holding)
-        if choice == REPLACE_MONTH:
-            return Decision(APPEND, [f"Replaces {start:%b %Y} in {holders}; their other months stay."],
-                            overlaps=holding, replace_month=month, confirm=True)
-        return Decision(DECIDE, [f"{start:%b %Y} is already loaded from {holders}."],
-                        overlaps=holding, options=[REPLACE_MONTH, REJECT])
+        return Decision(REJECTED, [f"{start:%b %Y} is already loaded from {holders}: a month already in Bronze is "
+                                   "not loaded again, so this file is rejected."], overlaps=holding, flagged=True)
     if not same_year:
         return Decision(INSERT, [f"First file of {end.year} for this profit center."])
-    reasons = [f"Adds {start:%b %Y} to {end.year}'s files."]
+    reasons = [f"Adds {start:%b %Y} to {end.year}'s files: appended in the same bronze table as "
+               f"{', '.join(item.file_name for item in same_year)}."]
     covered = {key for item in same_year for key in _months_between(item.start, item.end)}
     gap = [key for key in _months_between(date(end.year, 1, 1), month_start(start)) if key not in covered and key != month]
     if gap:
         reasons.append(f"Not received yet: {', '.join(_month_label(key) for key in gap)}.")
-    return Decision(APPEND, reasons)
+    return Decision(APPEND, reasons, appends=same_year)
 
 
 def rejected_with_file(unfit: dict[str, str]) -> Decision:
-    """A sheet whose file has other sheets not fit for Bronze. ``unfit``: each of those
+    """A sheet whose file has other data sheets not fit for Bronze. ``unfit``: each of those
     sheets -> why it is rejected."""
     named = "; ".join(f"{sheet} ({why.rstrip('.')})" for sheet, why in unfit.items())
-    return Decision(REJECTED, [f"Rejected with its file: every sheet of a file must be fit for Bronze, and {named} "
-                               f"{'is' if len(unfit) == 1 else 'are'} not."])
+    return Decision(REJECTED, [f"Rejected with its file: every data sheet of a file must be fit for Bronze, and "
+                               f"{named} {'is' if len(unfit) == 1 else 'are'} not."])
 
 
 def _months_between(start: date, end: date) -> list[str]:

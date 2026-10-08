@@ -9,7 +9,9 @@ import {
   EyeOff,
   Info,
   Layers3,
+  Link2,
   ListChecks,
+  Plus,
   RefreshCw,
   Rows3,
   ServerOff,
@@ -19,7 +21,9 @@ import {
   Table2,
   Trash2,
   TriangleAlert,
+  Undo2,
   UserCheck,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api/client";
@@ -32,6 +36,8 @@ import type {
   SilverAggregateRow,
   SilverCatalog,
   SilverColumnDef,
+  SilverJoinHow,
+  SilverLink,
   SilverMappingRow,
   SilverPick,
   SilverRun,
@@ -51,13 +57,16 @@ import { TabPanel, Tabs } from "../components/ui/Tabs";
 import { formatNumber, humanize, plural } from "../lib/format";
 import { useAuth } from "../state/auth";
 
-const METHOD: Record<MatchMethod, string> = { saved: "Saved", exact: "Exact", fuzzy: "Fuzzy", semantic: "Semantic", ai: "AI" };
+const METHOD: Record<MatchMethod, string> = {
+  saved: "Saved", exact: "Exact", fuzzy: "Fuzzy", semantic: "Semantic", ai: "AI", overlap: "Shared values",
+};
 const DOT: Record<MatchMethod, string> = {
   saved: "bg-ink-500",
   exact: "bg-emerald-500",
   fuzzy: "bg-sky-400",
   semantic: "bg-sky-700",
   ai: "bg-brand-600",
+  overlap: "bg-amber-500",
 };
 // Saved and exact votes are certain by definition; the others carry a score.
 const SCORED = new Set<MatchMethod>(["fuzzy", "semantic", "ai"]);
@@ -283,7 +292,14 @@ function EligibleLoads({
                   <td className="px-4 py-2.5" onClick={(event) => event.stopPropagation()}>
                     <Checkbox label={`Select ${load.file_name}`} checked={on} onChange={toggle} />
                   </td>
-                  <td className="px-2 py-2.5 font-mono font-medium text-ink-900">{load.table_name}</td>
+                  <td className="px-2 py-2.5">
+                    <span className="block font-mono font-medium text-ink-900">{load.table_name}</span>
+                    {load.aggregated && (
+                      <span className="mt-0.5 inline-flex items-center gap-1 text-caption text-amber-800" title="The profit center's own aggregates: loaded into silver_aggregate as reported">
+                        <Sigma className="h-3 w-3" aria-hidden />Aggregated · to silver_aggregate
+                      </span>
+                    )}
+                  </td>
                   <td className="max-w-[260px] truncate px-3 py-2.5 text-ink-700" title={load.file_name}>{load.file_name}</td>
                   <td className="px-3 py-2.5">
                     <span className="block font-mono text-ink-800">{load.pc_id ?? "—"}</span>
@@ -317,11 +333,14 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const reviewer = useAuth().user?.user_name ?? "";
-  const rows = run.tables.reduce((sum, table) => sum + table.quality.rows, 0);
-  const picks = run.tables.flatMap((table) => table.targets);
+  const reviewed = run.tables.filter((table) => !table.joined_into);
+  const rows = reviewed.reduce((sum, table) => sum + (table.quality.rows_loaded ?? table.quality.rows ?? 0), 0);
+  const picks = reviewed.filter((table) => !table.aggregated).flatMap((table) => table.targets);
   const mapped = picks.filter((pick) => pick.bronze_column).length;
-  const saved = picks.filter((pick) => pick.votes.some((vote) => vote.method === "saved")).length;
-  const unloaded = run.tables.reduce((sum, table) => sum + table.mapping.filter((row) => !row.silver_column).length, 0);
+  const aggregatePicks = reviewed.filter((table) => table.aggregated).flatMap((table) => table.targets);
+  const aggregateMapped = aggregatePicks.filter((pick) => pick.bronze_column).length;
+  const saved = [...picks, ...aggregatePicks].filter((pick) => pick.votes.some((vote) => vote.method === "saved")).length;
+  const unloaded = reviewed.reduce((sum, table) => sum + table.mapping.filter((row) => !row.silver_column).length, 0);
   const canApprove = !run.blockers.length;
 
   const assign = async (table: string, silver: string, bronze: string | null) => {
@@ -330,6 +349,18 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
       onChange(await api.assignSilverTarget(run.id, { table_name: table, silver_column: silver, bronze_column: bronze }));
     } catch (err) {
       toast({ severity: "error", title: "Change not saved", description: toError(err).body.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const mutate = async (call: () => Promise<SilverRun>) => {
+    setBusy(true);
+    try {
+      onChange(await call());
+    } catch (err) {
+      const apiError = toError(err);
+      toast({ severity: "error", title: apiError.body.message, description: apiError.body.advice ?? undefined });
     } finally {
       setBusy(false);
     }
@@ -359,11 +390,20 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
         <h2 id="silver-approve-title" className="sr-only">Approval</h2>
         <div className="min-w-0">
           <dl className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
-            <div className="flex items-center gap-1.5">
-              <Columns3 className="h-4 w-4 text-ink-500" aria-hidden />
-              <dt className="text-caption text-ink-500">DRT columns mapped</dt>
-              <dd className="num text-body font-semibold text-ink-900">{mapped} of {picks.length}</dd>
-            </div>
+            {picks.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <Columns3 className="h-4 w-4 text-ink-500" aria-hidden />
+                <dt className="text-caption text-ink-500">DRT columns mapped</dt>
+                <dd className="num text-body font-semibold text-ink-900">{mapped} of {picks.length}</dd>
+              </div>
+            )}
+            {aggregatePicks.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <Sigma className="h-4 w-4 text-ink-500" aria-hidden />
+                <dt className="text-caption text-ink-500">Aggregate columns mapped</dt>
+                <dd className="num text-body font-semibold text-ink-900">{aggregateMapped}</dd>
+              </div>
+            )}
             <div className="flex items-center gap-1.5">
               <Rows3 className="h-4 w-4 text-ink-500" aria-hidden />
               <dt className="text-caption text-ink-500">Rows</dt>
@@ -405,23 +445,165 @@ function ReviewView({ run, catalog, onChange, onCancel }: { run: SilverRun; cata
         </Alert>
       )}
 
-      <TablePicker tables={run.tables} catalog={catalog} busy={busy} onAssign={assign} />
+      {run.links.map((link) => (
+        <JoinPanel key={`${link.left_table}|${link.right_table}`} run={run} link={link} busy={busy}
+          onChange={(change) => mutate(() => api.joinSilverTables(run.id, change))} />
+      ))}
+
+      <TablePicker tables={run.tables} catalog={catalog} busy={busy} onAssign={assign}
+        aggregateTargets={run.aggregate_targets}
+        onSpread={(change) => mutate(() => api.spreadSilverTable(run.id, change))} />
     </div>
+  );
+}
+
+/* ---- files that came together: joined ------------------------------------------- */
+
+const HOW: { id: SilverJoinHow; label: string; hint: string }[] = [
+  { id: "left", label: "Left", hint: "Every row of the data table; list columns empty where nothing matches" },
+  { id: "inner", label: "Inner", hint: "Only the rows that match" },
+  { id: "right", label: "Right", hint: "Every row of the list table" },
+];
+
+/**
+ * Two tables of files that came together -- the transactions and the broker list sent with
+ * them -- joined into one before Silver. The keys are suggested by the same votes as the
+ * mapping, and by the values themselves (a column whose values are the other's).
+ */
+function JoinPanel({ run, link, busy, onChange }: {
+  run: SilverRun;
+  link: SilverLink;
+  busy: boolean;
+  onChange: (change: { left_table: string; right_table: string; how: SilverJoinHow | null; keys: { left: string; right: string }[]; ignore_case: boolean }) => void;
+}) {
+  const tables = new Map(run.tables.map((table) => [table.table_name, table]));
+  const left = tables.get(link.left_table);
+  const right = tables.get(link.right_table);
+  const keeper = left?.join ? left : right?.join ? right : null;
+  const asked = keeper?.join?.asked;
+  const initial = asked ? asked.keys.map(([a, b]) => ({ left: a, right: b }))
+    : link.keys.length ? [{ left: link.keys[0].left, right: link.keys[0].right }] : [{ left: "", right: "" }];
+  const [how, setHow] = useState<SilverJoinHow>(asked?.how ?? "left");
+  const [keys, setKeys] = useState(initial);
+  const [ignoreCase, setIgnoreCase] = useState(keeper?.join?.ignore_case ?? true);
+  useEffect(() => {
+    setHow(asked?.how ?? "left");
+    setKeys(initial);
+    // Reset when the join itself changes, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asked?.how, JSON.stringify(asked?.keys)]);
+  if (!left || !right) return null;
+  const own = (table: SilverTableReview) => table.columns.filter((column) => !column.includes("."));
+  const leftOptions: SelectOption<string>[] = own(left).map((column) => ({ value: column, label: column }));
+  const rightOptions: SelectOption<string>[] = own(right).map((column) => {
+    const vote = link.keys.find((pair) => pair.right === column);
+    return {
+      value: column, label: column,
+      description: vote ? `${vote.methods.map((method) => METHOD[method]).join(" + ")}${vote.overlap !== null ? ` · ${pct(vote.overlap)} of values shared` : ""}` : undefined,
+    };
+  });
+  const stats = keeper?.join?.stats && "rows" in keeper.join.stats ? keeper.join.stats : null;
+  const ready = keys.every((key) => key.left && key.right);
+  const apply = () => onChange({ left_table: link.left_table, right_table: link.right_table, how, keys, ignore_case: ignoreCase });
+  return (
+    <SectionCard
+      icon={<Link2 />}
+      title={`${link.left_table} ⟷ ${link.right_table}`}
+      description={`Files that came together${link.saved ? " · joined as approved before" : ""}: ${right.loads.map((load) => load.file_name).join(", ")} came with ${left.loads.map((load) => load.file_name).join(", ")}.`}
+      actions={keeper ? <Badge tone="success">Joined</Badge> : <Badge tone="warning">Join to load</Badge>}
+    >
+      <div className="flex flex-wrap items-end gap-4">
+        <div role="radiogroup" aria-label="Join type" className="inline-flex rounded-lg border border-ink-200 bg-ink-50 p-0.5">
+          {HOW.map((option) => (
+            <button key={option.id} type="button" role="radio" aria-checked={how === option.id} title={option.hint} disabled={busy}
+              onClick={() => setHow(option.id)}
+              className={clsx("rounded-md px-3 py-1.5 text-body font-medium transition-colors disabled:opacity-50",
+                how === option.id ? "bg-white text-ink-900 shadow-sm" : "text-ink-600 hover:text-ink-900")}>
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <Checkbox label="Match ignoring case and extra spaces" checked={ignoreCase} onChange={setIgnoreCase} disabled={busy} />
+      </div>
+      <p className="mt-2 text-caption text-ink-500">{HOW.find((option) => option.id === how)?.hint}.</p>
+
+      <div className="mt-4 space-y-2">
+        {keys.map((key, index) => (
+          <div key={index} className="grid items-end gap-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto]">
+            <Select<string> label={index ? `${link.left_table} (key ${index + 1})` : link.left_table} value={key.left}
+              options={leftOptions} placeholder="Key column" disabled={busy}
+              onChange={(value) => setKeys(keys.map((item, at) => (at === index ? { ...item, left: value } : item)))} />
+            <span className="pb-2 text-center text-body font-semibold text-ink-400" aria-hidden>=</span>
+            <Select<string> label={index ? `${link.right_table} (key ${index + 1})` : link.right_table} value={key.right}
+              options={rightOptions} placeholder="Key column" disabled={busy}
+              onChange={(value) => setKeys(keys.map((item, at) => (at === index ? { ...item, right: value } : item)))} />
+            <IconButton label="Remove this key" disabled={busy || keys.length === 1}
+              onClick={() => setKeys(keys.filter((_, at) => at !== index))}><X className="h-4 w-4" /></IconButton>
+          </div>
+        ))}
+      </div>
+      {link.keys.length > 0 && (
+        <p className="mt-2 flex flex-wrap items-center gap-1.5 text-caption text-ink-500">
+          Suggested:
+          {link.keys.slice(0, 4).map((pair) => (
+            <button key={`${pair.left}=${pair.right}`} type="button" disabled={busy}
+              onClick={() => setKeys([{ left: pair.left, right: pair.right }])}
+              className="rounded-md border border-ink-200 bg-white px-2 py-0.5 font-mono text-[11.5px] text-ink-700 hover:border-brand-300">
+              {pair.left} = {pair.right}
+              <span className="ml-1 font-sans text-ink-400">{pair.methods.map((method) => METHOD[method]).join(" + ")}</span>
+            </button>
+          ))}
+        </p>
+      )}
+
+      {stats && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Badge tone="success">{formatNumber(stats.matched)} of {formatNumber(stats.rows)} rows matched</Badge>
+          {stats.unmatched > 0 && <Badge tone={keeper?.join?.how === "inner" ? "warning" : "neutral"}>{formatNumber(stats.unmatched)} {keeper?.join?.how === "inner" ? "left out" : "without a match"}</Badge>}
+          {stats.repeated_keys > 0 && <Badge tone="danger">{plural(stats.repeated_keys, "key")} repeated in {keeper?.join?.table}</Badge>}
+        </div>
+      )}
+      {stats && stats.duplicates.length > 0 && (
+        <Alert tone="error" className="mt-3" title="A key repeats in the joined table">
+          Each repeat would count its rows twice: {stats.duplicates.slice(0, 5).map((item) => `${item.key} (${item.rows} rows)`).join(", ")}. Add a key column so each row matches one.
+        </Alert>
+      )}
+
+      <div className="mt-4 flex flex-wrap gap-2 border-t border-ink-100 pt-3">
+        <Button size="sm" variant="ghost" icon={<Plus />} disabled={busy} onClick={() => setKeys([...keys, { left: "", right: "" }])}>Add a key column</Button>
+        <span className="flex-1" />
+        {keeper && (
+          <Button size="sm" variant="ghost" icon={<Undo2 />} disabled={busy}
+            onClick={() => onChange({ left_table: link.left_table, right_table: link.right_table, how: null, keys: [], ignore_case: ignoreCase })}>
+            Undo the join
+          </Button>
+        )}
+        <Button size="sm" variant="primary" icon={<Link2 />} disabled={busy || !ready} onClick={apply}>
+          {keeper ? "Join again" : "Join"}
+        </Button>
+      </div>
+    </SectionCard>
   );
 }
 
 /** Several bronze tables are reviewed one at a time, picked from a list, rather than stacked. */
 function TablePicker({
-  tables,
+  tables: all,
   catalog,
   busy,
   onAssign,
+  aggregateTargets,
+  onSpread,
 }: {
   tables: SilverTableReview[];
   catalog: SilverCatalog;
   busy: boolean;
   onAssign: (table: string, silver: string, bronze: string | null) => void;
+  aggregateTargets: { name: string; measure: boolean }[];
+  onSpread: (change: { table_name: string; columns: string[]; measure: string | null; dimension: string | null; label?: string | null; rollups?: string[] }) => void;
 }) {
+  // A table joined into another is mapped there: one review for the pair.
+  const tables = all.filter((item) => !item.joined_into);
   const [name, setName] = useState(tables[0]?.table_name ?? "");
   const table = tables.find((item) => item.table_name === name) ?? tables[0];
   if (!table) return null;
@@ -438,21 +620,115 @@ function TablePicker({
           return {
             value: item.table_name,
             label: item.table_name,
-            description: `${plural(item.mapping.length, "column")} · ${formatNumber(item.quality.rows)} rows`,
-            meta: <Badge tone="neutral">{done} of {item.targets.length} mapped</Badge>,
+            description: `${plural(item.mapping.length, "column")} · ${formatNumber(item.quality.rows)} rows${item.aggregated ? " · aggregated" : item.join ? ` · joined with ${item.join.table}` : ""}`,
+            meta: <Badge tone="neutral">{done} mapped</Badge>,
           };
         })}
       />
     ) : null;
   return (
-    <TableMapping
-      key={table.table_name}
-      table={table}
-      catalog={catalog}
-      busy={busy}
-      picker={picker}
-      onAssign={(silver, bronze) => onAssign(table.table_name, silver, bronze)}
-    />
+    <div className="space-y-4">
+      {table.aggregated && (
+        <SpreadPanel key={`spread-${table.table_name}`} table={table} targets={aggregateTargets} busy={busy}
+          onChange={(change) => onSpread({ table_name: table.table_name, ...change })} />
+      )}
+      <TableMapping
+        key={table.table_name}
+        table={table}
+        catalog={catalog}
+        busy={busy}
+        picker={picker}
+        onAssign={(silver, bronze) => onAssign(table.table_name, silver, bronze)}
+      />
+    </div>
+  );
+}
+
+/**
+ * A profit center's own aggregates: columns that are one measure across a dimension (premium
+ * by product line, a column each) are unpivoted, their headers becoming the dimension's values;
+ * columns totalling others are roll-ups, left out. Silver keeps the figures as reported.
+ */
+function SpreadPanel({ table, targets, busy, onChange }: {
+  table: SilverTableReview;
+  targets: { name: string; measure: boolean }[];
+  busy: boolean;
+  onChange: (change: { columns: string[]; measure: string | null; dimension: string | null; label?: string | null; rollups?: string[] }) => void;
+}) {
+  const spread = table.spread;
+  const [label, setLabel] = useState(spread?.label ?? "category");
+  useEffect(() => setLabel(spread?.label ?? "category"), [spread?.label]);
+  const measures: SelectOption<string>[] = targets.filter((item) => item.measure).map((item) => ({ value: item.name, label: item.name }));
+  const dimensions: SelectOption<string>[] = [
+    { value: NONE, label: "A generic dimension", description: `aggregation_dimension, named “${label}”` },
+    ...targets.filter((item) => !item.measure).map((item) => ({ value: item.name, label: item.name })),
+  ];
+  const own = table.columns.filter((column) => !table.rollups.includes(column) && !table.lineage.includes(column));
+  const send = (change: Partial<{ columns: string[]; measure: string | null; dimension: string | null; label: string | null; rollups: string[] }>) =>
+    onChange({ columns: spread?.columns ?? [], measure: spread?.measure ?? null, dimension: spread?.dimension ?? null,
+      label: spread?.label ?? null, ...change });
+  const toggle = (column: string) => {
+    const columns = spread?.columns ?? [];
+    send({ columns: columns.includes(column) ? columns.filter((item) => item !== column) : [...columns, column] });
+  };
+  return (
+    <SectionCard
+      icon={<Sigma />}
+      title="Aggregated figures"
+      description={`${table.table_name} holds the profit center's own aggregates: it loads into silver_aggregate as reported, never into the transaction table.`}
+      actions={<Badge tone="warning">{formatNumber(table.quality.rows_loaded ?? 0)} aggregate rows</Badge>}
+    >
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <div>
+          <p className="text-caption font-semibold text-ink-700">One measure spread across columns</p>
+          <p className="mb-2 text-caption text-ink-500">Their headers are the values of a dimension (a product line each): one row per cell.</p>
+          <div className="flex flex-wrap gap-1.5">
+            {own.map((column) => {
+              const on = spread?.columns.includes(column) ?? false;
+              return (
+                <button key={column} type="button" aria-pressed={on} disabled={busy} onClick={() => toggle(column)}
+                  className={clsx("rounded-md border px-2 py-1 font-mono text-[12px] transition-colors disabled:opacity-50",
+                    on ? "border-brand-400 bg-brand-50 text-brand-800" : "border-ink-200 bg-white text-ink-600 hover:border-ink-300")}>
+                  {on && <Check className="mr-1 inline h-3 w-3" aria-hidden />}{column}
+                </button>
+              );
+            })}
+          </div>
+          {table.rollups.length > 0 && (
+            <p className="mt-3 flex flex-wrap items-center gap-1.5 text-caption text-ink-500">
+              Roll-ups, left out:
+              {table.rollups.map((column) => (
+                <span key={column} className="inline-flex items-center gap-1 rounded-md border border-ink-200 bg-ink-50 px-2 py-0.5 font-mono text-[11.5px] text-ink-600">
+                  {column}
+                  <button type="button" aria-label={`Load ${column} after all`} disabled={busy} className="text-ink-400 hover:text-ink-700"
+                    onClick={() => send({ rollups: table.rollups.filter((item) => item !== column) })}><X className="h-3 w-3" /></button>
+                </span>
+              ))}
+              {table.quality.rollup_rows ? <span>· {plural(table.quality.rollup_rows, "total row")} too</span> : null}
+            </p>
+          )}
+        </div>
+        <div className="space-y-3">
+          <Select<string> label="The measure the cells are" value={spread?.measure ?? ""} options={measures} placeholder="Choose the measure"
+            disabled={busy || !spread?.columns.length} onChange={(value) => send({ measure: value })} />
+          <Select<string> label="The dimension the headers fill" value={spread?.dimension ?? NONE} options={dimensions}
+            disabled={busy || !spread?.columns.length} onChange={(value) => send({ dimension: value === NONE ? null : value })} />
+          {!spread?.dimension && spread?.columns.length ? (
+            <label className="block">
+              <span className="mb-1 block text-caption font-medium text-ink-600">Name of the generic dimension</span>
+              <input value={label} disabled={busy} onChange={(event) => setLabel(event.target.value)}
+                onBlur={() => label.trim() && label !== spread?.label && send({ label: label.trim() })}
+                className="h-9 w-full rounded-lg border border-ink-200 px-3 text-body" />
+            </label>
+          ) : null}
+        </div>
+      </div>
+      {table.quality.measures && Object.keys(table.quality.measures).length > 0 && (
+        <p className="mt-4 border-t border-ink-100 pt-3 text-caption text-ink-500">
+          Totals as loaded: {Object.entries(table.quality.measures).map(([name, value]) => `${name} ${formatNumber(Math.round(value * 100) / 100)}`).join(" · ")}
+        </p>
+      )}
+    </SectionCard>
   );
 }
 
@@ -478,6 +754,8 @@ function TableMapping({
   picker?: React.ReactNode;
 }) {
   const drt = useMemo(() => new Map(targetsOf(catalog).map((column) => [column.name, column])), [catalog]);
+  const noun = table.aggregated ? "aggregate column" : "DRT column";
+  const Noun = table.aggregated ? "Aggregate column" : "DRT column";
   const bronze = useMemo(() => new Map(table.mapping.map((row) => [row.bronze_column, row])), [table.mapping]);
   const mapped = useMemo(() => table.targets.filter((pick) => pick.bronze_column), [table.targets]);
   const open = useMemo(() => table.targets.filter((pick) => !pick.bronze_column), [table.targets]);
@@ -500,7 +778,7 @@ function TableMapping({
     <SectionCard
       icon={<Table2 />}
       title={table.table_name}
-      description={`${table.loads.map((load) => load.file_name).join(", ")} · ${table.pc_id ?? "no profit center"}`}
+      description={`${table.loads.map((load) => load.file_name).join(", ")} · ${table.pc_id ?? "no profit center"}${table.join ? ` · joined with ${table.join.table} (its columns are prefixed with its name)` : ""}`}
       actions={
         <span className="flex items-center gap-2">
           {picker}
@@ -526,31 +804,31 @@ function TableMapping({
 
       <TabPanel idPrefix={`map-${table.table_name}`} id="mapped" active={tab === "mapped"}>
         {mapped.length ? (
-          <PagedBands items={mapped} keyOf={(pick) => pick.silver_column} caption={`DRT columns mapped in ${table.table_name}`}
-            noun="DRT column" reset={tab} top={silverTop} bottom={bronzeBottom} width={pickWidth} />
+          <PagedBands items={mapped} keyOf={(pick) => pick.silver_column} caption={`${Noun}s mapped in ${table.table_name}`}
+            noun={noun} reset={tab} top={silverTop} bottom={bronzeBottom} width={pickWidth} />
         ) : (
-          <EmptyState compact icon={<Columns3 />} title="No DRT column mapped yet" description="Choose bronze columns on the Not mapped tab." />
+          <EmptyState compact icon={<Columns3 />} title={`No ${noun} mapped yet`} description="Choose bronze columns on the Not mapped tab." />
         )}
       </TabPanel>
       <TabPanel idPrefix={`map-${table.table_name}`} id="open" active={tab === "open"}>
         {open.length ? (
           <>
             <p className="mb-3 text-caption text-ink-500">
-              No bronze column was recommended for these. Choose one where the file has it; a DRT column left here loads empty.
+              No bronze column was recommended for these. Choose one where the file has it; a {noun} left here loads empty.
             </p>
-            <PagedBands items={open} keyOf={(pick) => pick.silver_column} caption={`DRT columns not mapped in ${table.table_name}`}
-              noun="DRT column" reset={tab} top={silverTop} bottom={bronzeBottom} width={pickWidth}
+            <PagedBands items={open} keyOf={(pick) => pick.silver_column} caption={`${Noun}s not mapped in ${table.table_name}`}
+              noun={noun} reset={tab} top={silverTop} bottom={bronzeBottom} width={pickWidth}
               attention={(pick) => pick.candidates.length > 0} />
           </>
         ) : (
-          <EmptyState compact icon={<Check />} title="Every DRT column is mapped" description="Nothing left to choose for this table." />
+          <EmptyState compact icon={<Check />} title={`Every ${noun} is mapped`} description="Nothing left to choose for this table." />
         )}
       </TabPanel>
       <TabPanel idPrefix={`map-${table.table_name}`} id="unloaded" active={tab === "unloaded"}>
         {unloaded.length ? (
           <>
             <p className="mb-3 text-caption text-ink-500">
-              No DRT column takes these bronze columns, so they are not loaded to Silver. Load one into a DRT column here if it belongs.
+              No {noun} takes these bronze columns, so they are not loaded to Silver. Load one into a {noun} here if it belongs.
             </p>
             <PagedBands items={unloaded} keyOf={(row) => row.bronze_column} caption={`Bronze columns of ${table.table_name} not loaded`}
               noun="bronze column" reset={tab} topLabel="Bronze column" bottomLabel="Load into"

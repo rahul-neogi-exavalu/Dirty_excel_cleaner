@@ -398,3 +398,58 @@ def test_a_year_to_date_file_supersedes_loads_in_other_tables_too():
     assert item.action == planner.REPLACE and item.requires_confirmation
     assert {(ref["id"], ref["table_name"]) for ref in item.replaces} == {
         ("ing-1", "ext_pc0515_arr"), ("ing-2", "ext_pc0515_other")}
+
+
+# --- the profit center's data at its level ------------------------------------------
+
+
+def test_a_month_appended_after_the_year_to_date_file_joins_its_table_whatever_its_sheet():
+    # H1 came on a sheet called ARR; July's sheet is "July 2025" (a period: ext_pc0515_data).
+    tables = [TableState("ext_pc0515_arr", COLS)]
+    history = [Ingested("ing-h1", "ext_pc0515_arr", "ARR_pc0515.xlsx", "sha-h1", H1)]
+    july = candidate(file="July_pc0515.xlsx", sha="sha-july", sheets=("July 2025",), period=JULY,
+                     home_ids=("ing-h1",))
+    item = only(planner.plan([july], tables, history))
+    assert item.table_name == "ext_pc0515_arr" and item.action == planner.APPEND
+    assert any("Continues ARR_pc0515.xlsx in ext_pc0515_arr" in reason for reason in item.reasons)
+    # A column added on the way: the table evolves, confirmed by the reviewer.
+    wider = candidate(file="July_pc0515.xlsx", sha="sha-july", sheets=("July 2025",), period=JULY,
+                      cols=COLS + ["commission"], home_ids=("ing-h1",))
+    evolved = only(planner.plan([wider], tables, history))
+    assert evolved.table_name == "ext_pc0515_arr" and evolved.action == planner.EVOLVE
+    assert evolved.columns_after == COLS + ["commission"] and evolved.requires_confirmation
+
+
+def test_without_a_home_the_sheet_name_decides_the_table():
+    tables = [TableState("ext_pc0515_arr", COLS)]
+    history = [Ingested("ing-h1", "ext_pc0515_arr", "ARR_pc0515.xlsx", "sha-h1", H1)]
+    july = candidate(file="July_pc0515.xlsx", sha="sha-july", sheets=("July 2025",), period=JULY)
+    assert only(planner.plan([july], tables, history)).table_name == "ext_pc0515_data"
+
+
+def test_a_companion_never_replaces_the_file_it_came_with():
+    # The broker list lands on the same sheet name, same dates, other columns.
+    tables = [TableState("ext_pc0515_sheet1", COLS)]
+    history = [Ingested("ing-txn", "ext_pc0515_sheet1", "Txn_pc0515.xlsx", "sha-txn", H1)]
+    brokers = candidate(file="Brokers_pc0515.xlsx", sha="sha-brk", sheets=("Sheet1",),
+                        cols=["account_name", "market_provider"], keep_ids=("ing-txn",))
+    item = only(planner.plan([brokers], tables, history))
+    assert item.replaces == [] and not item.rebuild and item.action == planner.NEW_TABLE
+    assert item.table_name == "ext_pc0515_sheet1_v2"
+
+
+def test_aggregates_get_an_agg_table_and_never_share_one_with_transactions():
+    assert naming.table_name("pc2030", ["January 2026", "March 2026"], aggregated=True) == "ext_pc2030_data_agg"
+    assert naming.staging_table(naming.table_name("pc2030", ["Summary"], aggregated=True)) == "ext_pc2030_summary_agg_stg"
+    tables = [TableState("ext_pc2030_data", ["partner", "premium"])]
+    summary = candidate(file="Summary_pc2030.xlsx", src="pc2030", sheets=("January 2026", "March 2026"),
+                        cols=["partner", "premium"], aggregated=True)
+    item = only(planner.plan([summary], tables, []))
+    assert item.table_name == "ext_pc2030_data_agg" and item.action == planner.CREATE
+
+
+def test_a_long_aggregate_name_keeps_its_suffix():
+    name = naming.table_name("pc2030", ["Premium summary by delegated authority partner and product line x"],
+                             aggregated=True)
+    assert len(name) <= 63 and name.endswith("_agg")
+

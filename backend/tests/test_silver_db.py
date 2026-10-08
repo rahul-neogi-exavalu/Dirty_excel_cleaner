@@ -73,10 +73,11 @@ def _wait(client, url, active=("queued", "running", "draft")):
 
 
 def _validated(client, filename: str, fixes: dict[str, str] | None = None, dates: tuple[str, str] | None = None,
-               choice: str | None = None) -> dict:
+               choice: str | None = None, revises: str | None = None) -> dict:
     """Clean one test file and validate it, making the reviewer's corrections: ``fixes``
     maps a required column to the header the file wrote for it, ``dates`` are reporting
-    months. A file whose name has no full date gets the file received date entered."""
+    months, ``revises`` the loaded file a revision replaces. A file whose name has no
+    full date gets the file received date entered."""
     with open(FILES / filename, "rb") as handle:
         upload = client.post("/api/workbooks", files={"file": (filename, handle.read())}).json()
     sheets = [s["name"] for s in upload["sheets"] if not s["hidden"]]
@@ -96,6 +97,8 @@ def _validated(client, filename: str, fixes: dict[str, str] | None = None, dates
             change["reporting_start_date"], change["reporting_end_date"] = dates
         if choice:
             change["choice"] = choice
+        if revises:
+            change["choice"], change["replaces_file"] = "revise", revises
         if change:
             response = client.patch(f"/api/validations/{session['id']}/outputs/{output['key']}", json=change)
             assert response.status_code == 200, response.text
@@ -213,31 +216,32 @@ def test_ten_files_through_silver(env):
     saved = [r for r in client.get("/api/silver/mapping").json() if r["profit_center"] == "PC0101"]
     assert len(saved) == 16 and all(r["silver_column_name"] for r in saved)
     assert state["result"]["mappings_saved"] == 16
-    # Saved under the headers the file wrote, with only the business's DRT labels.
-    from api.services import reference_service
+    # Saved under the headers the file wrote, with only the business's DRT labels (the
+    # catalog's 48 DRT columns).
+    from ahi_silver import catalog
 
-    labels = set(reference_service.drt_labels_from_file())
+    labels = {column.drt_name for column in catalog.load(config.SILVER_COLUMNS_FILE) if column.drt_name}
     from tools.make_silver_test_files import BASE
 
     assert {r["pc_column"] for r in saved} == set(BASE)
     assert all(r["drt_column"] is None or r["drt_column"] in labels for r in saved)
     assert {r["drt_column"] for r in saved if r["pc_column"] == "Premium"} == {"Premium"}
-    assert {r["drt_column"] for r in saved if r["pc_column"] == "Profit Center Name"} == {None}
-    assert _q(config, "SELECT count(*) FROM {s}.silver_detail")[0][0] == 30
+    assert {r["drt_column"] for r in saved if r["pc_column"] == "Profit Center Name"} == {"Profit Center Name"}
+    assert _q(config, "SELECT count(*) FROM {s}.silver_transaction")[0][0] == 30
     # Bronze -> Silver Cleansed (its own schema, the bronze table's name) -> Final Silver.
     assert _q(config, "SELECT count(*) FROM {cl}.ext_pc0101_arr")[0][0] == 30
     assert _q(config, "SELECT bronze_table, cleansed_table FROM {c}.silver_cleansed_table") == [
         ("ext_pc0101_arr", f"{config.CLEANSED_SCHEMA}.ext_pc0101_arr")]
     assert _q(config, "SELECT status FROM {c}.silver_draft WHERE id = %s", state["id"]) == [("succeeded",)]
     # Exactly the business's columns, in order.
-    assert _columns(config, "silver_detail") == [c.name for c in catalog.load(config.SILVER_COLUMNS_FILE)]
+    assert _columns(config, "silver_transaction") == [c.name for c in catalog.load(config.SILVER_COLUMNS_FILE)]
     assert _columns(config, "silver_aggregate") == [c.name for c in catalog.load_plain(config.SILVER_AGGREGATE_COLUMNS_FILE)]
     # A load's rows carry its identity: bronze table, file and processing_date.
-    identity = _q(config, "SELECT DISTINCT source_table, source_file, ingestion_timestamp FROM {s}.silver_detail")
+    identity = _q(config, "SELECT DISTINCT source_table, source_file, ingestion_timestamp FROM {s}.silver_transaction")
     load = _q(config, "SELECT table_name, file_name, processing_date FROM {c}.ingestion WHERE status = 'ingested'")[0]
     assert identity == [(f"{config.BRONZE_SCHEMA}.{load[0]}", load[1], load[2])]
     assert _q(config, "SELECT DISTINCT drt_reporting_start_date::text, drt_reporting_end_date::text, drt_reporting_year, "
-                      "drt_reporting_month, drt_reporting_period, drt_reporting_period_type FROM {s}.silver_detail") == [
+                      "drt_reporting_month, drt_reporting_period, drt_reporting_period_type FROM {s}.silver_transaction") == [
         ("2026-01-01", "2026-06-30", 2026, 6, "2026-06", "YTD")]
 
     # 2-3. July (identical) and August (reordered): the whole mapping is pre-filled from
@@ -247,7 +251,7 @@ def test_ten_files_through_silver(env):
         run = _silver_run(client, [name])
         assert all(methods[0] == "saved" for methods in _methods(run).values()) and run["status"] == "draft"
         _approve(client, run)
-    assert _q(config, "SELECT count(*) FROM {s}.silver_detail WHERE source_system = 'pc0101'")[0][0] == 40
+    assert _q(config, "SELECT count(*) FROM {s}.silver_transaction WHERE source_system = 'pc0101'")[0][0] == 40
 
     # 4. Renamed + extra columns land in their own bronze table; Silver unifies them.
     tables = _bronze(client, "04_ARR_pc0101_2026_Sep_newcols.xlsx",
@@ -265,8 +269,9 @@ def test_ten_files_through_silver(env):
     # "Carrier" is approved for other profit centers in the DRT mapping: a saved vote.
     assert "saved" in methods["carrier"] and _rows_of(run)["carrier"]["silver_column"] == "insurance_company_name"
     assert {"writing_agency", "notes"} <= {c for c, m in methods.items() if not m}
-    refused = client.post(f"/api/silver/runs/{run['id']}/approve", json={"reviewed_by": "Test Reviewer"})
-    assert refused.status_code == 409  # undecided columns block approval
+    # Undecided columns do not block approval (they load nothing): only two columns on one
+    # Silver column do. The reviewer decides them here.
+    assert not client.get(f"/api/silver/runs/{run['id']}").json()["blockers"]
     run = _decide(client, run, {"writing_agency": "producer_agency_name", "notes": None})
     edited = _rows_of(run)
     assert edited["writing_agency"]["selection"] == "manual" and edited["premium_amt"]["selection"] == "recommended"
@@ -274,7 +279,7 @@ def test_ten_files_through_silver(env):
     snapshot = _q(config, "SELECT mapping FROM {c}.silver_run WHERE id = %s", state["id"])[0][0]
     audit = {row["bronze_column_name"]: row for row in snapshot}
     assert "fuzzy" in audit["premium_amt"]["methods"] and audit["notes"]["selection"] == "manual"
-    assert _q(config, "SELECT count(*) FROM {s}.silver_detail WHERE source_table LIKE '%%.ext_pc0101_arr_v2' "
+    assert _q(config, "SELECT count(*) FROM {s}.silver_transaction WHERE source_table LIKE '%%.ext_pc0101_arr_v2' "
                       "AND insurance_company_name IS NOT NULL")[0][0] == 5
     # An ignored column is not saved: it is asked about again next time.
     mapping = client.get("/api/silver/mapping").json()
@@ -291,7 +296,7 @@ def test_ten_files_through_silver(env):
     run = _decide(client, run, {"carrier_name": "insurance_company_name", "agency": "producer_agency_name",
                                 "policy": "policy_number", "source_sheet": None})
     _approve(client, run)
-    assert _q(config, "SELECT count(*) FROM {s}.silver_detail WHERE source_system = 'pc0202' "
+    assert _q(config, "SELECT count(*) FROM {s}.silver_transaction WHERE source_system = 'pc0202' "
                       "AND policy_number IS NOT NULL")[0][0] == 24
 
     # 6. The four profit-center cases against the LOTL.
@@ -300,23 +305,24 @@ def test_ten_files_through_silver(env):
     statuses = next(iter(state["result"]["quality"].values()))["profit_center"]
     assert statuses == {"kept": 2, "filled_number": 1, "corrected": 1, "filled_name": 1, "no_match": 1}
     values = [r[0] for r in _q(config, "SELECT profit_center_number || '|' || coalesce(profit_center_name, '') "
-                                       "FROM {s}.silver_detail WHERE source_system = 'pc0303'")]
+                                       "FROM {s}.silver_transaction WHERE source_system = 'pc0303'")]
     assert "0094|Dayton Office" in values and "0303|Columbus Office" in values
 
     # 7-8. Date and money formats.
     for name, dates in (("07_Dates_pc0404_2026.xlsx", ("2026-01", "2026-01")), ("08_Money_pc0505_2026.xlsx", None)):
         _bronze(client, name, dates=dates)
         _approve(client, _silver_run(client, [name]))
-    assert _q(config, "SELECT count(*) FROM {s}.silver_detail WHERE source_system = 'pc0404' "
+    assert _q(config, "SELECT count(*) FROM {s}.silver_transaction WHERE source_system = 'pc0404' "
                       "AND accounting_effective_date IS NULL")[0][0] == 2
-    premiums = sorted(float(v[0]) for v in _q(config, "SELECT premium FROM {s}.silver_detail "
+    premiums = sorted(float(v[0]) for v in _q(config, "SELECT premium FROM {s}.silver_transaction "
                                                       "WHERE source_system = 'pc0505' AND premium IS NOT NULL"))
     assert -250.0 in premiums and 1200.5 in premiums and len(premiums) == 7  # "abc" -> NULL
-    producers = [r[0] for r in _q(config, "SELECT producer_agency_name FROM {s}.silver_detail WHERE source_system = 'pc0505'")]
+    producers = [r[0] for r in _q(config, "SELECT producer_agency_name FROM {s}.silver_transaction WHERE source_system = 'pc0505'")]
     assert None in producers and all(p is None or p == p.strip() for p in producers)
 
-    # 9. Revised Jan-Jun: bronze replaces file 1; Silver removes its rows on the next run.
-    _bronze(client, "09_ARR_pc0101_2026_JanJun_revised.xlsx")
+    # 9. Revised Jan-Jun: the reviewer names the file it revises; bronze replaces file 1,
+    #    and Silver removes its rows on the next run.
+    _bronze(client, "09_ARR_pc0101_2026_JanJun_revised.xlsx", revises="01_ARR_pc0101_2026_JanJun.xlsx")
     # A run with no loads selected still removes the replaced rows.
     cleanup_only = client.post("/api/silver/runs", json={"ingestion_ids": []}).json()
     assert [item["file_name"] for item in cleanup_only["cleanup"]] == ["01_ARR_pc0101_2026_JanJun.xlsx"]
@@ -327,7 +333,7 @@ def test_ten_files_through_silver(env):
     _approve(client, second)
     stale = client.post(f"/api/silver/runs/{first['id']}/approve", json={"reviewed_by": "Test Reviewer"})
     assert stale.status_code == 409 and stale.json()["error"]["code"] == "plan_changed"
-    assert _q(config, "SELECT count(*) FROM {s}.silver_detail WHERE source_system = 'pc0101'")[0][0] == 24 + 5 + 5 + 5
+    assert _q(config, "SELECT count(*) FROM {s}.silver_transaction WHERE source_system = 'pc0101'")[0][0] == 24 + 5 + 5 + 5
 
     # 10. A dirty report: the fact table loads, the side lookup table is left unprocessed.
     tables = _bronze(client, "10_Report_pc0606_2026_JanJul.xlsx")
@@ -339,10 +345,10 @@ def test_ten_files_through_silver(env):
     fact = [l["ingestion_id"] for l in loads if l["table_name"] == "ext_pc0606_report"]
     run = client.post("/api/silver/runs", json={"ingestion_ids": fact}).json()
     _approve(client, run)
-    assert _q(config, "SELECT count(*) FROM {s}.silver_detail WHERE source_system = 'pc0606'")[0][0] == 21
+    assert _q(config, "SELECT count(*) FROM {s}.silver_transaction WHERE source_system = 'pc0606'")[0][0] == 21
 
     # The aggregate agrees with the detail, and the audit table records every run.
-    detail = dict(_q(config, "SELECT source_system, sum(premium) FROM {s}.silver_detail GROUP BY 1"))
+    detail = dict(_q(config, "SELECT source_system, sum(premium) FROM {s}.silver_transaction GROUP BY 1"))
     aggregate = dict(_q(config, "SELECT source_system, sum(premium) FROM {s}.silver_aggregate GROUP BY 1"))
     assert detail == aggregate
     grain = _q(config, "SELECT DISTINCT record_grain, reporting_period_type FROM {s}.silver_aggregate "
@@ -388,7 +394,7 @@ def test_audit_scenarios_11_to_14(env):
         # Unreadable accounting dates: PED decides and spans years, so the reviewer enters March.
         _bronze(client, "13_MoneyDates_pc0909_2026.xlsx", dates=("2026-03", "2026-03"))
         _approve(client, _silver_run(client, ["13_MoneyDates_pc0909_2026.xlsx"]))
-        premiums = sorted((r[0] for r in _q(config, "SELECT premium FROM {s}.silver_detail WHERE source_system = 'pc0909'")),
+        premiums = sorted((r[0] for r in _q(config, "SELECT premium FROM {s}.silver_transaction WHERE source_system = 'pc0909'")),
                           key=lambda v: (v is None, v))
         from decimal import Decimal
 

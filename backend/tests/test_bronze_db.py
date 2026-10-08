@@ -228,31 +228,38 @@ def test_validate_stage_and_load(env):
     july = _stage(client, session)["control_id"]
     _ingest(client, expect_actions=["append"])
 
-    # 3. June again: a month already in Bronze. The reviewer sees both sides, replaces June.
+    # 3. June again, in a file of another name: a month already in Bronze. Flagged for the
+    #    reviewer, and the control table rejects it; nothing reaches Bronze.
     session, output = _validate(client, "PC0001_ARR June revised_08202026.xlsx", _workbook(_rows([6], start=200)))
-    assert output["action"] == "DECIDE" and output["compare"]["earlier"][0]["rows"] == 4
-    session, output = _change(client, session, output, choice="replace_month")
-    assert (output["action"], output["replace_month"], output["verdict"]) == ("APPEND", "2026-06", "ready")
+    assert (output["action"], output["verdict"]) == ("REJECTED", "flagged")
+    assert output["compare"]["earlier"][0]["rows"] == 4
     june = _stage(client, session)["control_id"]
-    plan = client.post("/api/bronze/plans", json={}).json()
-    item = plan["items"][0]
-    assert item["replace_month"] == "2026-06" and [ref["id"] for ref in item["month_replaces"]] == [loaded["ingestion_id"]]
-    assert item["requires_confirmation"]
-    _ingest(client, expect_actions=["append"])
-    by_load = dict(_query(config, "SELECT _reporting_month || '|' || _ingestion_id, count(*) FROM {b}.ext_pc0001_arr "
-                                  "GROUP BY 1"))
-    assert f"2026-06|{loaded['ingestion_id']}" not in by_load  # the first file's June is gone
-    assert by_load[f"2026-05|{loaded['ingestion_id']}"] == 4  # its other months stay
-    assert _query(config, "SELECT rows_loaded, silver_status FROM {c}.ingestion WHERE id = %s",
-                  loaded["ingestion_id"]) == [(20, None)]
-    assert _control(config, 74)["is_active"] == "Y" and _control(config, june)["file_replaced"].startswith("PC0001_ARR Jan-Jun")
+    row = _control(config, june)
+    assert (row["processing_action"], row["is_active"], row["bronze_load_flag"]) == ("REJECTED", "N", "N")
+    assert row["rejection_reason"].startswith("Jun 2026 is already loaded from PC0001_ARR Jan-Jun")
+    assert client.post("/api/bronze/plans", json={}).status_code == 409  # nothing staged to load
+
+    # 3b. August, on a sheet of another name and with a column more: appended into the
+    #     profit center's table (not the sheet's own ext_pc0001_data), which evolves.
+    august_rows = _rows([8], start=250)
+    for row in august_rows:
+        row["Notes"] = "late"
+    session, output = _validate(client, "PC0001 August 2026_09052026.xlsx",
+                                _workbook(august_rows, HEADERS + ["Notes"], sheet="August 2026"))
+    assert (output["period_type"], output["action"], output["verdict"]) == ("MONTHLY", "APPEND", "ready")
+    assert output["schema"]["kind"] == "evolved" and output["schema"]["added"] == ["notes"]
+    august = _stage(client, session)["control_id"]
+    plan = _ingest(client, expect_actions=["evolve"])
+    assert plan["items"][0]["table_name"] == "ext_pc0001_arr"
+    assert "notes" in _columns(config, "ext_pc0001_arr") and not _columns(config, "ext_pc0001_data")
+    assert _query(config, "SELECT count(*) FROM {b}.ext_pc0001_arr WHERE _reporting_month = '2026-08'")[0][0] == 4
 
     # 4. Jan-Aug year to date: replaces every file of the year it covers.
     session, output = _validate(client, "PC0001_ARR Jan-Aug_09102026.xlsx", _workbook(_rows(range(1, 9), start=300)))
     assert output["action"] == "INSERT" and output["confirm"]
     ytd = _stage(client, session)["control_id"]
     _ingest(client, expect_actions=["replace"])
-    assert [_control(config, cid)["is_active"] for cid in (74, july, june)] == ["N", "N", "N"]
+    assert [_control(config, cid)["is_active"] for cid in (74, july, august)] == ["N", "N", "N"]
     assert _control(config, ytd)["bronze_load_flag"] == "Y"
     assert _query(config, "SELECT count(*) FROM {b}.ext_pc0001_arr")[0][0] == 32
     assert _query(config, "SELECT count(*) FROM {c}.ingestion WHERE status = 'superseded'")[0][0] == 3

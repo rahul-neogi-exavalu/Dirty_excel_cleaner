@@ -65,7 +65,7 @@ AHI_POC/
     │   ├── seed_reference.py   # Loads reference tables from assets/
     │   └── make_silver_test_files.py
     ├── config/
-    │   ├── silver_columns.csv          # 69 silver_detail columns
+    │   ├── silver_columns.csv          # 69 silver_transaction columns
     │   └── silver_aggregate_columns.csv # 75 silver_aggregate columns
     └── src/
         ├── ahi_clean/          # Core cleaning pipeline (see ARCHITECTURE.md §1)
@@ -181,7 +181,7 @@ Loads cleaned tables into Postgres `bronze` schema. Human approves every plan.
 - **Actions**: CREATE, APPEND, REORDER, EVOLVE, NEW_TABLE, REPLACE, SKIP
 
 ### 4. Silver Layer (Bronze → Silver)
-Maps bronze columns to unified `silver_detail` (69 cols) + `silver_aggregate` (75 cols).
+Maps bronze columns to unified `silver_transaction` (69 cols) + `silver_aggregate` (75 cols).
 - **5 voting methods**: Saved mapping, Exact, Fuzzy (rapidfuzz), Semantic (word2vec), AI (Azure OpenAI/Gemini)
 - **Reviewer picks** from candidates; approval saves mapping for next time
 - **Cleansing**: text trim, date parse (multi-format), decimal parse ($, parentheses), derived fields

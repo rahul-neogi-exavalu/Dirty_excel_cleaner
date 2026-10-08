@@ -1,4 +1,4 @@
-"""One bronze table's rows -> silver_detail rows, under an approved mapping.
+"""One bronze table's rows -> silver_transaction rows, under an approved mapping.
 
 Used twice with the same code: for the dry-run quality report the reviewer sees before
 approving, and for the load itself -- so what was reviewed is what is written.
@@ -54,6 +54,8 @@ class LoadInfo:
     reporting_start_date: date | None = None
     reporting_end_date: date | None = None
     reporting_period_type: str | None = None
+    # The file received date (an aggregate row's file_date).
+    file_received_date: date | None = None
 
 
 @dataclass

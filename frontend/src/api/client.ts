@@ -11,11 +11,13 @@ import type {
   BronzeTable,
   ColumnProfile,
   ControlRow,
+  DateRole,
   EligibleLoad,
   CleanupLoad,
   IngestPlan,
   DrtMapping,
   SilverCatalog,
+  SilverJoinHow,
   SilverRun,
   SilverAggregateRow,
   JobResults,
@@ -260,6 +262,14 @@ export const api = {
       reporting_end_date?: string | null;
       choice?: ValidationChoice | null;
       use_control_dates?: boolean;
+      /** The date column that decides the dates (populated on every row); null: the priority's. */
+      date_role?: DateRole | null;
+      /** With choice revise: the exact name of the loaded file it replaces. */
+      replaces_file?: string | null;
+      /** With choice companion: the file it came with (an output key, or a loaded file's control id). */
+      companion_of?: string | null;
+      /** What the table holds, over the detection; null: back to the detection. */
+      grain?: "aggregate" | "transaction" | null;
     },
   ) =>
     request<Validation>(`/api/validations/${id}/outputs/${encodeURIComponent(key)}`, {
@@ -291,6 +301,16 @@ export const api = {
   /** From the Silver side: which bronze column loads a DRT column (null: none does). */
   assignSilverTarget: (id: string, change: { table_name: string; silver_column: string; bronze_column: string | null }) =>
     request<SilverRun>(`/api/silver/runs/${id}/targets`, { method: "PATCH", body: JSON.stringify(change) }),
+  /** Join two tables of files that came together (how null: undo the join). */
+  joinSilverTables: (
+    id: string,
+    change: { left_table: string; right_table: string; how: SilverJoinHow | null; keys: { left: string; right: string }[]; ignore_case: boolean },
+  ) => request<SilverRun>(`/api/silver/runs/${id}/join`, { method: "PATCH", body: JSON.stringify(change) }),
+  /** An aggregated table's measure spread across columns, and its roll-up columns. */
+  spreadSilverTable: (
+    id: string,
+    change: { table_name: string; columns: string[]; measure: string | null; dimension: string | null; label?: string | null; rollups?: string[] },
+  ) => request<SilverRun>(`/api/silver/runs/${id}/spread`, { method: "PATCH", body: JSON.stringify(change) }),
   ignoreUnmapped: (id: string, table_name?: string) =>
     request<SilverRun>(`/api/silver/runs/${id}/ignore-unmapped`, {
       method: "POST",

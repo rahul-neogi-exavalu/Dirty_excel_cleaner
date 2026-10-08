@@ -8,6 +8,11 @@ Every method looks at every column, whatever the others said:
 * semantic -- a close meaning (word2vec cosine)
 * ai       -- an LLM's reading of the name (Azure OpenAI or Gemini), one call per table;
               it may also say "nothing fits"
+* overlap  -- (join keys only) the values themselves: most of a column's values are found
+              in the other table's column
+
+The same votes suggest the keys two tables are joined on (``suggest_keys``): the other
+table's columns stand in for the Silver columns.
 
 Each method casts at most one vote per column (the AI may add a second choice, listed but
 not counted). Votes for the same Silver column are pooled into a *candidate*; candidates
@@ -26,7 +31,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Callable
 
 from . import normalize
-from .catalog import SilverColumn, targets as drt_targets
+from .catalog import MAPPED, SilverColumn, targets as drt_targets
 
 try:
     from rapidfuzz import fuzz, process
@@ -39,7 +44,8 @@ EXACT = "exact"
 FUZZY = "fuzzy"
 SEMANTIC = "semantic"
 AI = "ai"
-METHODS = (SAVED, EXACT, FUZZY, SEMANTIC, AI)
+OVERLAP = "overlap"
+METHODS = (SAVED, EXACT, FUZZY, SEMANTIC, AI, OVERLAP)
 
 # How the current choice was made.
 RECOMMENDED = "recommended"  # pre-selected from the votes
@@ -47,7 +53,7 @@ MANUAL = "manual"  # set by the reviewer
 NONE = "none"  # nothing chosen yet
 
 # How far each method's score is trusted when two candidates have as many votes.
-WEIGHT = {SAVED: 1.0, EXACT: 1.0, AI: 0.9, SEMANTIC: 0.85, FUZZY: 0.8}
+WEIGHT = {SAVED: 1.0, EXACT: 1.0, OVERLAP: 0.95, AI: 0.9, SEMANTIC: 0.85, FUZZY: 0.8}
 
 
 @dataclass
@@ -339,7 +345,7 @@ def _candidates(votes: list[Vote]) -> list[Candidate]:
     return sorted(by_name, key=lambda c: (c.rank(), c.silver_column is not None), reverse=True)
 
 
-LABELS = {SAVED: "Saved", EXACT: "Exact", FUZZY: "Fuzzy", SEMANTIC: "Semantic", AI: "AI"}
+LABELS = {SAVED: "Saved", EXACT: "Exact", FUZZY: "Fuzzy", SEMANTIC: "Semantic", AI: "AI", OVERLAP: "Shared values"}
 
 
 def _label(candidate: Candidate) -> str:
@@ -361,6 +367,8 @@ def suggest(
     semantic_margin: float = 0.05,
     one_to_many: set[str] | None = None,
     progress: Progress | None = None,
+    drt_only: bool = True,
+    labels: dict[str, str] | None = None,
 ) -> tuple[list[Suggestion], list[str]]:
     """One suggestion per bronze column, with every method's vote, plus notes on methods
     that could not run.
@@ -372,9 +380,12 @@ def suggest(
     for the others several saved targets are competing votes. None: every list loads.
     ``progress``: told how far each method has got (see ``Progress``).
     Only the catalog's DRT columns are targets: system columns, and Silver columns that are
-    not DRT columns, are never offered.
+    not DRT columns, are never offered. ``drt_only=False``: every column of ``catalog`` is
+    a target (the aggregate table's mappable columns, for a profit center's aggregates).
+    ``labels``: the name a column is judged by, when its own is not its name -- a joined
+    table's ``ext_pc0101_brokers.region`` is judged as ``region``.
     """
-    catalog = drt_targets(catalog)
+    catalog = drt_targets(catalog) if drt_only else list(catalog)
     samples = samples or {}
     notes: list[str] = []
     by_name = {column.name: column for column in catalog}
@@ -382,32 +393,39 @@ def suggest(
     stale: dict[str, str] = {}
     report = progress or _quiet
     total = len(columns)
+    # The name-based methods judge each label once; its votes go to every column it names.
+    label_of = {column: (labels or {}).get(column, column) for column in columns}
+    named = list(dict.fromkeys(label_of.values()))
+    by_label: dict[str, list[Vote]] = {label: [] for label in named}
+    label_samples = {label_of[column]: samples.get(column, []) for column in columns}
 
     report(SAVED, 0, total)
     _saved_votes(columns, saved, known, by_name, votes, stale)
     report(SAVED, total, total)
     report(EXACT, 0, total)
-    _exact_votes(columns, catalog, votes)
+    _exact_votes(named, catalog, by_label)
     report(EXACT, total, total)
     if process is None:
         notes.append("Fuzzy matching unavailable (install rapidfuzz).")
     else:
         report(FUZZY, 0, total)
-        _fuzzy_votes(columns, catalog, votes, fuzzy_min, fuzzy_margin, report)
+        _fuzzy_votes(named, catalog, by_label, fuzzy_min, fuzzy_margin, report)
         report(FUZZY, total, total)
     if similarity is None:
         notes.append("Semantic matching skipped: no word2vec vectors configured (AHI_WORD2VEC_PATH).")
     else:
         report(SEMANTIC, 0, total)
-        _semantic_votes(columns, catalog, votes, similarity, semantic_min, semantic_margin, report)
+        _semantic_votes(named, catalog, by_label, similarity, semantic_min, semantic_margin, report)
         report(SEMANTIC, total, total)
     if llm is None:
         notes.append("AI matching skipped: not configured (AZURE_OPENAI_* or GEMINI_API_KEY, AHI_AI_ENABLED).")
     else:
         report(AI, 0, total)
-        if columns:
-            _ai_votes(columns, catalog, by_name, votes, samples, llm, notes)
+        if named:
+            _ai_votes(named, catalog, by_name, by_label, label_samples, llm, notes)
         report(AI, total, total)
+    for column in columns:
+        votes[column].extend(Vote(**asdict(vote)) for vote in by_label[label_of[column]])
 
     candidates = {column: _candidates(votes[column]) for column in columns}
 
@@ -599,3 +617,114 @@ def suggestion_from_dict(data: dict) -> Suggestion:
         ignored=bool(data.get("ignored")), selection=data.get("selection", NONE), reason=data.get("reason", ""),
         candidates=candidates, samples=list(data.get("samples", [])), also=list(data.get("also", [])),
     )
+
+
+# --- join keys ------------------------------------------------------------------------
+
+# A column's values found in another's: this share of them makes an overlap vote.
+OVERLAP_MIN = 0.5
+# Distinct values compared per column (enough to tell, cheap to compute).
+OVERLAP_SAMPLE = 2000
+
+
+def key_value(value, ignore_case: bool = True) -> str | None:
+    """A key as joined: spaces trimmed and collapsed, and (``ignore_case``) case folded."""
+    if value is None:
+        return None
+    text = " ".join(str(value).split())
+    if not text:
+        return None
+    return text.casefold() if ignore_case else text
+
+
+@dataclass
+class KeyPair:
+    """A suggested join key: this table's column, the other's, and why."""
+
+    left: str
+    right: str
+    votes: list[Vote]
+    overlap: float | None = None  # share of the left column's values found in the right
+    unique: float | None = None  # share of the right column's values that are distinct
+
+    @property
+    def methods(self) -> list[str]:
+        found = {vote.method for vote in self.votes if not vote.second_choice}
+        return [method for method in METHODS if method in found]
+
+    def as_dict(self) -> dict:
+        return {"left": self.left, "right": self.right, "methods": self.methods, "overlap": self.overlap,
+                "unique": self.unique, "votes": [asdict(vote) for vote in self.votes]}
+
+
+def _distinct(values) -> list[str]:
+    return list(dict.fromkeys(key for key in (key_value(value) for value in values) if key))[:OVERLAP_SAMPLE]
+
+
+def suggest_keys(
+    left: dict[str, list],
+    right: dict[str, list],
+    right_headers: dict[str, str] | None = None,
+    saved: list[tuple[str, str]] = (),
+    similarity: Similarity | None = None,
+    llm: LlmMatcher | None = None,
+    fuzzy_min: float = 85,
+    semantic_min: float = 0.72,
+) -> tuple[list[KeyPair], list[str]]:
+    """The columns two tables are likely joined on, best first: each of ``left``'s
+    columns (name -> its values) voted onto one of ``right``'s by the mapping's methods
+    -- a saved join, the same name, a close spelling or meaning, the AI -- and by the
+    values: a ``Producer_name`` whose names are mostly ``Account_Name``'s is the key
+    however differently the two are called. Each right column is suggested once."""
+    notes: list[str] = []
+    headers = right_headers or {}
+    targets = [SilverColumn(name, headers.get(name, ""), "string", False, "", MAPPED) for name in right]
+    by_name = {column.name: column for column in targets}
+    columns = list(left)
+    votes: dict[str, list[Vote]] = {column: [] for column in columns}
+    for one, other in saved:
+        if one in votes and other in by_name:
+            votes[one].append(Vote(SAVED, other, 1.0, "Joined on these before", own=True))
+    _exact_votes(columns, targets, votes)
+    if process is not None:
+        _fuzzy_votes(columns, targets, votes, fuzzy_min, 5)
+    if similarity is not None:
+        _semantic_votes(columns, targets, votes, similarity, semantic_min, 0.05)
+    if llm is not None and columns:
+        samples = {column: [str(value) for value in left[column] if value not in (None, "")][:3] for column in columns}
+        _ai_votes(columns, targets, by_name, votes, samples, llm, notes)
+    # The values: what share of this column's values the other column holds.
+    right_sets = {name: set(_distinct(values)) for name, values in right.items()}
+    unique = {}
+    for name, values in right.items():
+        present = [key for key in (key_value(value) for value in values) if key]
+        unique[name] = round(len(set(present)) / len(present), 3) if present else None
+    overlaps: dict[tuple[str, str], float] = {}
+    for column in columns:
+        mine = _distinct(left[column])
+        if not mine:
+            continue
+        best = None
+        for name, theirs in right_sets.items():
+            share = round(sum(1 for value in mine if value in theirs) / len(mine), 3)
+            overlaps[(column, name)] = share
+            if share >= OVERLAP_MIN and (best is None or share > best[1]):
+                best = (name, share)
+        if best:
+            votes[column].append(Vote(OVERLAP, best[0], best[1], f"{best[1]:.0%} of its values are in {best[0]}"))
+    found = []
+    for column in columns:
+        for candidate in _candidates(votes[column]):
+            if candidate.silver_column and candidate.support:
+                found.append((candidate.rank(), column, candidate))
+                break
+    found.sort(key=lambda item: item[0], reverse=True)
+    pairs, used = [], set()
+    for _, column, candidate in found:
+        if candidate.silver_column in used:
+            continue
+        used.add(candidate.silver_column)
+        pairs.append(KeyPair(column, candidate.silver_column, candidate.votes, overlaps.get((column, candidate.silver_column)),
+                             unique.get(candidate.silver_column)))
+    return pairs, notes
+

@@ -1,6 +1,6 @@
 """The Silver detail columns, from a CSV that mirrors the business's silver_schema.
 
-Every column of the ``silver_detail`` table is listed, in table order, with its type
+Every column of the ``silver_transaction`` table is listed, in table order, with its type
 exactly as the schema states it (``string``, ``int``, ``bigint``, ``boolean``, ``date``,
 ``timestamp``, ``decimal(18,2)``...). ``role`` says who fills it:
 

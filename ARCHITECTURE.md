@@ -1047,8 +1047,8 @@ for the dry run each mapping edit recomputes, and read again on a miss.
 **One transaction per run**, serialized by an advisory lock:
 
 1. Save the approved mapping into `drt_column_mapping`.
-2. Delete the Silver rows of bronze loads that have since been superseded (from `silver_detail` and their cleansed table), and mark them `removed`.
-3. For each selected load: delete any earlier attempt, transform, `COPY` into the source-specific **Silver Cleansed** table (`<cleansed schema>.<bronze table>`), check the count of that load's rows against bronze, then insert them from there into **Final Silver** (`silver_detail`).
+2. Delete the Silver rows of bronze loads that have since been superseded (from `silver_transaction` and their cleansed table), and mark them `removed`.
+3. For each selected load: delete any earlier attempt, transform, `COPY` into the source-specific **Silver Cleansed** table (`<cleansed schema>.<bronze table>`), check the count of that load's rows against bronze, then insert them from there into **Final Silver** (`silver_transaction`).
 4. Rebuild `silver_aggregate` for the affected source systems.
 5. Write `silver_run`, and mark the review succeeded in the same commit.
 
@@ -1056,7 +1056,7 @@ A failure rolls all of it back; the failure is then recorded on its own (`silver
 `silver_run` row with the attempted mapping), and the loads stay eligible.
 
 **Exact tables.**
-- **`silver_detail`:** exactly the 69 columns of `backend/config/silver_columns.csv`, the business's `silver_schema`, in order and typed as stated. `timestamp` becomes `timestamptz`; `ahi_policy_transaction_id` is an identity. It has no internal lineage: a bronze load's rows are found by `(source_table, source_file, ingestion_timestamp)`, the last being the load's `processing_date`, indexed together.
+- **`silver_transaction`:** exactly the 69 columns of `backend/config/silver_columns.csv`, the business's `silver_schema`, in order and typed as stated. `timestamp` becomes `timestamptz`; `ahi_policy_transaction_id` is an identity. It has no internal lineage: a bronze load's rows are found by `(source_table, source_file, ingestion_timestamp)`, the last being the load's `processing_date`, indexed together.
 - **`silver_aggregate`:** exactly the 75 columns of `silver_aggregate_columns.csv`. It is rebuilt per source system at profit center × accounting month (`record_grain = PROFIT_CENTER_MONTH`):
   - derived: sums of premium, fees, gross and producer commission, and revenue; the policy count; the reporting period; `file_date` from the audit table; the source period; hashes;
   - left NULL: dimensions below the profit center, ratios, and customer counts.
@@ -1094,7 +1094,7 @@ or guessed. A name with a number but no LOTL entry is `no_match`. A number witho
 | Period detection needs dates or month names | A file with neither is blocked until the reviewer enters its period. |
 | Bronze is stored as text | Every bronze column is `text`. The cleaner has already typed what it could read (dates, numbers, percent signs removed), with its own rules; Silver then applies the document's. |
 | Unapproved Silver reviews expire | A review untouched for `AHI_SILVER_DRAFT_TTL_HOURS` (72) is discarded; start a new run. |
-| The DRT reporting columns are not derived | `silver_detail.drt_reporting_*` and `ajg_apd` stay NULL until their rules are agreed (`ajg_apd` can be mapped). |
+| The DRT reporting columns are not derived | `silver_transaction.drt_reporting_*` and `ajg_apd` stay NULL until their rules are agreed (`ajg_apd` can be mapped). |
 | word2vec knows general English | Google News vectors match "carrier" to "insurer" but not house abbreviations. Those names get no word2vec vote; the AI and the reviewer read them. |
 | The AI is called for every column | One call per bronze table, also when every column is already saved, so its vote is always shown. Votes from the AI and word2vec are suggestions; nothing is loaded without approval. |
 | Reference data is loaded once | division_mapping, the LOTL and the DRT mapping are filled from `assets/` only while empty; new workbooks need `tools/seed_reference.py --replace`. Reloading the DRT mapping (`--replace-drt`) discards approved mappings. |

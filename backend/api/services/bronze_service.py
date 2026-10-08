@@ -85,6 +85,13 @@ class StagedFile:
     # Ingestions the control decision replaces (whole), and those it replaces a month of.
     replaces_ids: tuple[str, ...] = ()
     month_replace_ids: tuple[str, ...] = ()
+    # The profit center's own aggregates (an _agg table), not transactions.
+    is_aggregated: bool = False
+    # Ingestions this file continues (the months it is appended after, the file it
+    # replaces): their table is where it goes. And the ingestion of the file a companion
+    # came with: never replaced by it.
+    home_ids: tuple[str, ...] = ()
+    keep_ids: tuple[str, ...] = ()
 
     @property
     def key(self) -> str:
@@ -249,7 +256,7 @@ def upgrade_tables(conn) -> list[str]:
 _STAGED_FIELDS = ("control_id", "file_name", "source_system", "pc_id", "division_name", "file_received_date",
                   "drt_reporting_start_date", "drt_reporting_end_date", "reporting_period_type", "date_detail",
                   "processing_action", "file_replaced", "replace_month", "file_sha256", "sheet_names",
-                  "staging_table", "job_id", "output_id", "staged_at", "validation")
+                  "staging_table", "job_id", "output_id", "staged_at", "validation", "companion_of", "is_aggregated")
 
 
 def _staged(conn, control_ids: list[int] | None) -> list[StagedFile]:
@@ -265,9 +272,11 @@ def _staged(conn, control_ids: list[int] | None) -> list[StagedFile]:
     rows = conn.execute(sql.SQL("SELECT {} FROM {} WHERE {} ORDER BY control_id").format(
         sql.SQL(", ").join(sql.Identifier(name) for name in _STAGED_FIELDS), _control(), where), params).fetchall()
     files = [dict(zip(_STAGED_FIELDS, row)) for row in rows]
-    # The ingestions behind the control rows a decision replaces.
+    # The ingestions behind the control rows a decision replaces, continues or came with.
     wanted = {cid for row in files for cid in ((row["validation"] or {}).get("replaces", [])
-                                                + (row["validation"] or {}).get("overlaps", []))}
+                                                + (row["validation"] or {}).get("overlaps", [])
+                                                + (row["validation"] or {}).get("appends_to", [])
+                                                + ([row["companion_of"]] if row["companion_of"] else []))}
     ingestion = dict(conn.execute(sql.SQL("SELECT control_id, ingestion_id FROM {} WHERE control_id = ANY(%s) "
                                           "AND ingestion_id IS NOT NULL").format(_control()),
                                   [list(wanted)]).fetchall()) if wanted else {}
@@ -276,6 +285,7 @@ def _staged(conn, control_ids: list[int] | None) -> list[StagedFile]:
         details = row.pop("validation") or {}
         replaces = tuple(ingestion[cid] for cid in details.get("replaces", []) if cid in ingestion)
         overlaps = tuple(ingestion[cid] for cid in details.get("overlaps", []) if cid in ingestion)
+        appends = tuple(ingestion[cid] for cid in details.get("appends_to", []) if cid in ingestion)
         staged.append(StagedFile(
             control_id=row["control_id"], file_name=row["file_name"], source_system=row["source_system"],
             pc_id=row["pc_id"], division_name=row["division_name"], file_received_date=row["file_received_date"],
@@ -290,6 +300,9 @@ def _staged(conn, control_ids: list[int] | None) -> list[StagedFile]:
             output_name=details.get("output_name"), fitness=details.get("fitness"),
             replaces_ids=replaces if row["processing_action"] == rules.INSERT else (),
             month_replace_ids=overlaps if row["replace_month"] else (),
+            is_aggregated=row["is_aggregated"] == "Y",
+            home_ids=(replaces if row["processing_action"] == rules.INSERT else ()) + appends,
+            keep_ids=(ingestion[row["companion_of"]],) if row["companion_of"] in ingestion else (),
         ))
     return staged
 
@@ -356,6 +369,9 @@ def _planned(plan: Plan, conn=None) -> list[planner.PlanItem]:
             replaces_ids=file.replaces_ids,
             replace_month=file.replace_month,
             month_replace_ids=file.month_replace_ids,
+            aggregated=file.is_aggregated,
+            home_ids=file.home_ids,
+            keep_ids=file.keep_ids,
         ))
     return planner.plan(candidates, tables, history)
 
@@ -749,9 +765,10 @@ def _audit(conn, control, plan: Plan, item: planner.PlanItem, file: StagedFile, 
             "INSERT INTO {}.ingestion (id, plan_id, table_name, file_name, file_sha256, source_system, "
             "source_sheets, period_start, period_end, action, schema_diff, rows_loaded, status, reviewed_by, "
             "job_id, output_id, pc_id, file_received_date, division_name, processing_date, source_headers, "
-            "source_regions, control_id, reporting_start_date, reporting_end_date, reporting_period_type) "
+            "source_regions, control_id, reporting_start_date, reporting_end_date, reporting_period_type, "
+            "is_aggregated) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-            "%s, %s, %s, %s)"
+            "%s, %s, %s, %s, %s)"
         ).format(control),
         [ingestion_id, plan.id, item.table_name, file.file_name, file.file_sha256, item.source_system,
          list(file.sheet_names), file.period.start, file.period.end, item.action,
@@ -759,7 +776,7 @@ def _audit(conn, control, plan: Plan, item: planner.PlanItem, file: StagedFile, 
          file.output_id, file.pc_id, file.file_received_date, file.division_name, processing_date,
          Jsonb({column["name"]: column["header"] for column in file.columns if column.get("header")}),
          list(file.regions), file.control_id, file.reporting_start_date, file.reporting_end_date,
-         file.reporting_period_type],
+         file.reporting_period_type, "Y" if file.is_aggregated else "N"],
     )
 
 

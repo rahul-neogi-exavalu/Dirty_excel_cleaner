@@ -14,7 +14,7 @@ Human-in-the-loop, like Ingest:
    saves the approved mappings into ``drt_column_mapping`` (only then, and never an
    Ignore), removes rows of superseded bronze loads, writes each load's cleansed rows
    into its source-specific Silver Cleansed table (``<cleansed schema>.<bronze table>``),
-   loads them from there into Final Silver (``silver_detail``), rebuilds
+   loads them from there into Final Silver (``silver_transaction``), rebuilds
    ``silver_aggregate`` and marks each load done.
 
 A review lives in ``<control>.silver_draft`` from creation to the end of its load, so
@@ -22,7 +22,7 @@ every API process sees the same one and it survives a restart. Bronze rows are n
 with it: they are read again (and kept briefly in memory) when the quality report is
 recomputed.
 
-``silver_detail`` and ``silver_aggregate`` have exactly the business's columns (see
+``silver_transaction`` and ``silver_aggregate`` have exactly the business's columns (see
 ``backend/config``). A bronze load's rows are identified in Silver by
 (source_table, source_file, ingestion_timestamp = the load's processing_date), and in its
 cleansed table by ``_ingestion_id``.
@@ -43,8 +43,10 @@ from decimal import Decimal
 
 import polars as pl
 
-from ahi_bronze import file_meta, naming
+from ahi_bronze import file_meta, grain, naming
 from ahi_silver import catalog as catalog_module
+from ahi_silver import aggregate as aggregates
+from ahi_silver import join as joins
 from ahi_silver import matching, normalize, profit_center, transform
 from ahi_silver.catalog import SilverColumn, targets as drt_targets
 from ahi_silver.matching import Suggestion
@@ -62,7 +64,7 @@ from .column_matching import saved_votes as _saved
 log = logging.getLogger("ahi.silver")
 
 DRAFT, RUNNING, SUCCEEDED, FAILED = "draft", "running", "succeeded", "failed"
-DETAIL = "silver_detail"
+TRANSACTION = "silver_transaction"
 AGGREGATE = "silver_aggregate"
 DRT_TABLE = reference_service.DRT_TABLE
 DRAFTS = "silver_draft"
@@ -115,6 +117,21 @@ class TableReview:
     pc_ids: list[str] = field(default_factory=list)
     # Bronze column -> the header as the source file wrote it ("Net Premium").
     headers: dict[str, str] = field(default_factory=dict)
+    # The profit center's own aggregates: mapped onto silver_aggregate, not the
+    # transaction table. ``spread``: columns that are one measure across a dimension
+    # (see aggregates.Spread); ``rollups``: columns totalling others, left out.
+    aggregated: bool = False
+    spread: dict | None = None
+    rollups: list[str] = field(default_factory=list)
+    # The cleaner's sheet column (each row's sheet): lineage, never mapped as a figure.
+    lineage: list[str] = field(default_factory=list)
+    # A join with the table of a file that came with this one (a broker list beside the
+    # transactions): {table, columns, ids, keys [[own, other]], how (left | inner),
+    # ignore_case, pairs [[own load, other load]], asked {left_table, right_table, how},
+    # stats}. This table keeps the lineage; the other's columns come in prefixed.
+    join: dict | None = None
+    # The table this one is joined into: it is not loaded on its own.
+    joined_into: str | None = None
 
 
 @dataclass
@@ -138,6 +155,9 @@ class Run:
     finished_at: float | None = None
     updated_at: float = field(default_factory=time.time)
     version: int = 1
+    # Tables of files that came together (a companion and the file it came with), which
+    # the reviewer may join: {left_table, right_table, pairs, keys (suggested), saved}.
+    links: list[dict] = field(default_factory=list)
 
 
 def _ident(name: str):
@@ -147,7 +167,7 @@ def _ident(name: str):
 
 
 def catalog() -> list[SilverColumn]:
-    """Every silver_detail column, in table order (mapped targets and system columns)."""
+    """Every silver_transaction column, in table order (mapped targets and system columns)."""
     try:
         return catalog_module.load(config.SILVER_COLUMNS_FILE)
     except (OSError, ValueError) as error:
@@ -168,7 +188,7 @@ def _table_exists(conn, schema: str, table: str) -> bool:
 
 
 def _source_table(table: str) -> str:
-    """silver_detail.source_table: the bronze table, schema-qualified."""
+    """silver_transaction.source_table: the bronze table, schema-qualified."""
     return f"{config.BRONZE_SCHEMA}.{table}"
 
 
@@ -184,7 +204,7 @@ def eligible() -> dict:
             "SELECT i.id, i.table_name, i.file_name, i.source_system, i.period_start, i.period_end, "
             "i.rows_loaded, i.created_at, i.silver_status, i.pc_id, i.division_name, i.file_received_date, "
             "coalesce(i.processing_date, i.created_at), i.reporting_start_date, i.reporting_end_date, "
-            "i.reporting_period_type FROM {}.ingestion i "
+            "i.reporting_period_type, i.is_aggregated FROM {}.ingestion i "
             "WHERE i.status = 'ingested' AND i.silver_status IS DISTINCT FROM 'succeeded' "
             "ORDER BY i.created_at DESC").format(_ident(config.CONTROL_SCHEMA))).fetchall()
         cleanup = _superseded(conn)
@@ -195,7 +215,8 @@ def eligible() -> dict:
              "silver_status": r[8], "pc_id": r[9] or file_meta.normalize_pc_id(r[3]), "division_name": r[10],
              "file_received_date": r[11].isoformat() if r[11] else None, "processing_date": r[12].timestamp(),
              "reporting_start_date": r[13].isoformat() if r[13] else None,
-             "reporting_end_date": r[14].isoformat() if r[14] else None, "reporting_period_type": r[15]}
+             "reporting_end_date": r[14].isoformat() if r[14] else None, "reporting_period_type": r[15],
+             "aggregated": r[16] == "Y"}
             for r in rows
         ],
         "cleanup": cleanup,
@@ -207,11 +228,12 @@ def _superseded(conn) -> list[dict]:
     from psycopg import sql
 
     rows = conn.execute(sql.SQL(
-        "SELECT id, table_name, file_name, source_system, pc_id, coalesce(processing_date, created_at) "
+        "SELECT id, table_name, file_name, source_system, pc_id, coalesce(processing_date, created_at), is_aggregated "
         "FROM {}.ingestion WHERE status = 'superseded' AND silver_status = 'succeeded'").format(
             _ident(config.CONTROL_SCHEMA))).fetchall()
     return [{"ingestion_id": r[0], "table_name": r[1], "file_name": r[2], "source_system": r[3],
-             "pc_id": r[4] or file_meta.normalize_pc_id(r[3]), "processing_date": r[5].isoformat()} for r in rows]
+             "pc_id": r[4] or file_meta.normalize_pc_id(r[3]), "processing_date": r[5].isoformat(),
+             "aggregated": r[6] == "Y"} for r in rows]
 
 
 def _lotl(conn) -> profit_center.Lotl:
@@ -247,11 +269,13 @@ def _bronze_headers(conn, table: str, ingestion_ids: list[str]) -> dict[str, str
     return headers
 
 
-def _bronze_frame(conn, table: str, columns: list[str], ingestion_ids: list[str], limit: int | None = None) -> pl.DataFrame:
-    """Bronze rows (all text) for these loads, with their lineage columns."""
+def _bronze_frame(conn, table: str, columns: list[str], ingestion_ids: list[str], limit: int | None = None,
+                  aggregated: bool = False) -> pl.DataFrame:
+    """Bronze rows (all text) for these loads, with their lineage columns (an aggregated
+    table's with each row's month too)."""
     from psycopg import sql
 
-    wanted = columns + transform.LINEAGE
+    wanted = columns + (aggregates.LINEAGE if aggregated else transform.LINEAGE)
     query = sql.SQL("SELECT {} FROM {}.{} WHERE _ingestion_id = ANY(%s)").format(
         sql.SQL(", ").join(_ident(name) for name in wanted), _ident(config.BRONZE_SCHEMA), _ident(table))
     if limit:
@@ -266,14 +290,13 @@ _frames: OrderedDict[tuple, pl.DataFrame] = OrderedDict()
 _frames_lock = threading.Lock()
 
 
-def _frame(conn, review: TableReview) -> pl.DataFrame:
-    ids = [load.ingestion_id for load in review.loads]
-    key = (review.table_name, tuple(sorted(ids)), tuple(review.columns))
+def _raw_frame(conn, table: str, columns: list[str], ids: list[str], aggregated: bool = False) -> pl.DataFrame:
+    key = (table, tuple(sorted(ids)), tuple(columns), aggregated)
     with _frames_lock:
         if key in _frames:
             _frames.move_to_end(key)
             return _frames[key]
-    frame = _bronze_frame(conn, review.table_name, review.columns, ids)
+    frame = _bronze_frame(conn, table, columns, ids, aggregated=aggregated)
     with _frames_lock:
         _frames[key] = frame
         while len(_frames) > FRAME_CACHE:
@@ -281,8 +304,42 @@ def _frame(conn, review: TableReview) -> pl.DataFrame:
     return frame
 
 
+def _frame(conn, review: TableReview) -> pl.DataFrame:
+    """The review's bronze rows; for a joined table, joined with the other table's rows
+    of the files that came with them (``review.join["stats"]`` says what the join did)."""
+    ids = [load.ingestion_id for load in review.loads]
+    frame = _raw_frame(conn, review.table_name, review.columns, ids, review.aggregated)
+    if not review.join:
+        return frame
+    other = review.join
+    lookup = _raw_frame(conn, other["table"], other["columns"], list(other["ids"]))
+    joined, stats = joins.join_frames(
+        frame, lookup, right_table=other["table"], keys=[tuple(pair) for pair in other["keys"]], how=other["how"],
+        ignore_case=other.get("ignore_case", True), pairs=[tuple(pair) for pair in other["pairs"]],
+        lineage=transform.LINEAGE)
+    other["stats"] = stats
+    return joined
+
+
+def _labels(review: TableReview) -> dict[str, str]:
+    """A joined table's columns, as the mapping judges them: by their own names."""
+    if not review.join:
+        return {}
+    return {joins.prefixed(review.join["table"], name): name for name in review.join["columns"]}
+
+
+def _columns(review: TableReview) -> list[str]:
+    """The columns the review maps: its own, then a joined table's, prefixed."""
+    if not review.join:
+        return list(review.columns)
+    return list(review.columns) + [joins.prefixed(review.join["table"], name) for name in review.join["columns"]]
+
+
 def _forget_frames(run: Run) -> None:
-    keys = {(r.table_name, tuple(sorted(load.ingestion_id for load in r.loads)), tuple(r.columns)) for r in run.tables}
+    keys = {(r.table_name, tuple(sorted(load.ingestion_id for load in r.loads)), tuple(r.columns), r.aggregated)
+            for r in run.tables}
+    keys |= {(r.join["table"], tuple(sorted(r.join["ids"])), tuple(r.join["columns"]), False)
+             for r in run.tables if r.join}
     with _frames_lock:
         for key in keys:
             _frames.pop(key, None)
@@ -332,9 +389,13 @@ def _state(run: Run) -> dict:
         "tables": [
             {"table_name": r.table_name, "source_system": r.source_system, "pc_id": r.pc_id, "pc_ids": r.pc_ids,
              "loads": [_load_state(load) for load in r.loads], "columns": r.columns, "headers": r.headers,
-             "suggestions": [matching.suggestion_to_dict(s) for s in r.suggestions], "quality": r.quality}
+             "suggestions": [matching.suggestion_to_dict(s) for s in r.suggestions], "quality": r.quality,
+             "aggregated": r.aggregated, "spread": r.spread, "rollups": r.rollups, "lineage": r.lineage,
+             "join": r.join,
+             "joined_into": r.joined_into}
             for r in run.tables
         ],
+        "links": run.links,
         "notes": run.notes,
         "cleanup": run.cleanup,
         "lotl_rows": run.lotl_rows,
@@ -359,6 +420,8 @@ def _from_row(row) -> tuple[Run, datetime | None]:
             loads=[_load_from(load) for load in t.get("loads", [])], columns=list(t.get("columns", [])),
             suggestions=[matching.suggestion_from_dict(s) for s in t.get("suggestions", [])],
             quality=t.get("quality") or {}, pc_ids=list(t.get("pc_ids") or []), headers=dict(t.get("headers") or {}),
+            aggregated=bool(t.get("aggregated")), spread=t.get("spread"), rollups=list(t.get("rollups") or []),
+            join=t.get("join"), joined_into=t.get("joined_into"), lineage=list(t.get("lineage") or []),
         )
         for t in state.get("tables", [])
     ]
@@ -368,7 +431,7 @@ def _from_row(row) -> tuple[Run, datetime | None]:
         message=message or "", error=error, reviewed_by=reviewed_by, approved_by=approved_by, result=result or {},
         loaded=dict(state.get("loaded") or {}), created_at=_stamp(created_at) or time.time(),
         started_at=_stamp(started_at), finished_at=_stamp(finished_at), updated_at=_stamp(updated_at) or time.time(),
-        version=version,
+        version=version, links=list(state.get("links") or []),
     )
     return run, expires_at
 
@@ -493,10 +556,14 @@ def create_run(ingestion_ids: list[str]) -> Run:
     # Read everything first, then let go of the connection: matching may call the AI or
     # load word2vec vectors, and neither should hold one of the pool's few connections.
     with db.connection() as conn:
+        # A file that came with another is joined with it: the other comes along.
+        ids, pairs, added = _with_partners(conn, ids)
+        if added:
+            notes.append(f"Added {', '.join(added)}: it came with a selected file, and the two are joined.")
         rows = conn.execute(sql.SQL(
             "SELECT id, table_name, file_name, source_system, period_start, period_end, rows_loaded, status, "
             "silver_status, job_id, file_sha256, pc_id, coalesce(processing_date, created_at), file_received_date, "
-            "division_name, reporting_start_date, reporting_end_date, reporting_period_type "
+            "division_name, reporting_start_date, reporting_end_date, reporting_period_type, is_aggregated "
             "FROM {}.ingestion WHERE id = ANY(%s)").format(_ident(config.CONTROL_SCHEMA)), [ids]).fetchall()
         found = {r[0]: r for r in rows}
         if any(i not in found for i in ids):
@@ -522,11 +589,24 @@ def create_run(ingestion_ids: list[str]) -> Run:
                             file_received_date=m[13], division_name=m[14], reporting_start_date=m[15],
                             reporting_end_date=m[16], reporting_period_type=m[17]) for m in members],
                 columns=_bronze_columns(conn, table), suggestions=[],
+                aggregated=any(m[18] == "Y" for m in members),
             )
             review.headers = _bronze_headers(conn, table, [m[0] for m in members])
             frame = _frame(conn, review)
-            own, known, one_to_many = _saved(approved, seen or ([pc] if pc else []), review.columns, review.headers)
+            if review.aggregated:
+                own, known, one_to_many = _aggregate_saved(conn, pc, table), {}, None
+                review.lineage = [c["name"] for c in _registry(conn, table) if c.get("provenance")]
+            else:
+                own, known, one_to_many = _saved(approved, seen or ([pc] if pc else []), review.columns, review.headers)
             gathered.append((review, frame, own, known, one_to_many))
+        links = _links(conn, pairs, {i: found[i][1] for i in ids}, {r.table_name: r for r, *_ in gathered})
+        # A join approved before for these two tables is made again; the reviewer can change it.
+        reviews = {r.table_name: r for r, *_ in gathered}
+        for link in links:
+            if link.get("saved"):
+                _make_join(reviews[link["left_table"]], reviews[link["right_table"]], link, **link["saved"])
+        gathered = [(review, _frame(conn, review) if review.join else frame, *rest)
+                    for review, frame, *rest in gathered]
         lotl = _lotl(conn)
         cleanup = _superseded(conn)
     if not ids and not cleanup:
@@ -536,23 +616,245 @@ def create_run(ingestion_ids: list[str]) -> Run:
     similarity, llm, matcher_notes = _matchers(_precedents(approved, first_pc))
     notes.extend(matcher_notes)
     tables = []
+    raw = {review.table_name: frame for review, frame, *_ in gathered}
+    for link in links:
+        link["keys"] = _suggest_link(link, raw, {r.table_name: r for r, *_ in gathered}, similarity, llm, notes)
     for review, frame, own, known, one_to_many in gathered:
-        suggestions, step_notes = matching.suggest(
-            review.columns, columns_catalog, own, known, _samples(frame.head(SAMPLE_ROWS), review.columns),
-            similarity=similarity, llm=llm, fuzzy_min=config.MATCH_FUZZY_MIN,
-            semantic_min=config.MATCH_SEMANTIC_MIN, one_to_many=one_to_many,
-        )
+        if review.joined_into:
+            tables.append(review)  # mapped with the table it is joined into
+            continue
+        if review.aggregated:
+            step_notes = _suggest_aggregate(review, frame, own, similarity, llm)
+            notes.append(f"{review.table_name}: the profit center's own aggregates; mapped onto {AGGREGATE}, "
+                         f"not {TRANSACTION}.")
+        else:
+            columns = _columns(review)
+            if review.join:
+                own, known, one_to_many = _saved(approved, review.pc_ids or ([review.pc_id] if review.pc_id else []),
+                                                 columns, review.headers)
+            suggestions, step_notes = matching.suggest(
+                columns, columns_catalog, own, known, _samples(frame.head(SAMPLE_ROWS), columns),
+                similarity=similarity, llm=llm, fuzzy_min=config.MATCH_FUZZY_MIN,
+                semantic_min=config.MATCH_SEMANTIC_MIN, one_to_many=one_to_many, labels=_labels(review),
+            )
+            review.suggestions = suggestions
         notes.extend(note for note in step_notes if note not in notes)
-        review.suggestions = suggestions
         _quality(review, columns_catalog, lotl, frame)
         tables.append(review)
 
-    run = Run(id=str(uuid.uuid4()), tables=tables, notes=notes, cleanup=cleanup, lotl_rows=lotl.rows)
+    run = Run(id=str(uuid.uuid4()), tables=tables, notes=notes, cleanup=cleanup, lotl_rows=lotl.rows, links=links)
     if lotl.empty:
         run.notes.append("LOTL not loaded: profit centers are kept as they are and flagged lotl_unavailable.")
     with db.connection() as conn:
         _insert_run(conn, run)
     return run
+
+
+# --- files that came together: joined in Silver ---------------------------------------
+
+
+def _with_partners(conn, ids: list[str]) -> tuple[list[str], list[tuple[str, str]], list[str]]:
+    """The selected loads with the loads that came with them (a companion and the file it
+    came with), when those are still to load into Silver; and every (data load,
+    companion load) pair among them."""
+    from psycopg import sql
+
+    if not ids:
+        return ids, [], []
+    control = _ident(config.CONTROL_SCHEMA)
+    rows = conn.execute(sql.SQL(
+        "SELECT i.id, c.control_id, c.companion_of FROM {c}.ingestion i JOIN {c}.control_table c "
+        "ON c.control_id = i.control_id WHERE i.id = ANY(%s)").format(c=control), [ids]).fetchall()
+    if not rows:
+        return ids, [], []
+    controls = {row[1] for row in rows}
+    primaries = {row[2] for row in rows if row[2]}
+    linked = conn.execute(sql.SQL(
+        "SELECT c.control_id, c.ingestion_id, c.companion_of FROM {}.control_table c WHERE c.ingestion_id IS NOT NULL "
+        "AND (c.control_id = ANY(%s) OR c.companion_of = ANY(%s) OR c.control_id = ANY(%s))").format(control),
+        [list(primaries), list(controls), list(controls)]).fetchall()
+    by_control = {row[0]: row[1] for row in linked}
+    pairs = {(by_control[row[2]], row[1]) for row in linked if row[2] in by_control}
+    wanted = {load for pair in pairs for load in pair} - set(ids)
+    added_ids = [row[0] for row in conn.execute(sql.SQL(
+        "SELECT id FROM {}.ingestion WHERE id = ANY(%s) AND status = 'ingested' "
+        "AND silver_status IS DISTINCT FROM 'succeeded'").format(control), [list(wanted)]).fetchall()] if wanted else []
+    names = [row[0] for row in conn.execute(sql.SQL("SELECT file_name FROM {}.ingestion WHERE id = ANY(%s)").format(
+        control), [added_ids]).fetchall()] if added_ids else []
+    everything = list(ids) + added_ids
+    return everything, sorted(pair for pair in pairs if pair[0] in everything and pair[1] in everything), names
+
+
+def _links(conn, pairs: list[tuple[str, str]], table_of: dict[str, str], reviews: dict[str, TableReview]) -> list[dict]:
+    """The tables of files that came together, with the join approved for them before."""
+    grouped: dict[tuple[str, str], list] = {}
+    for primary, companion in pairs:
+        left, right = table_of.get(primary), table_of.get(companion)
+        if left and right and left != right and not reviews[left].aggregated and not reviews[right].aggregated:
+            grouped.setdefault((left, right), []).append([primary, companion])
+    links = []
+    for (left, right), found in grouped.items():
+        link = {"left_table": left, "right_table": right, "pairs": found, "keys": [], "saved": None}
+        link["saved"] = _saved_join(conn, reviews[left], reviews[right])
+        links.append(link)
+    return links
+
+
+def _saved_join(conn, left: TableReview, right: TableReview) -> dict | None:
+    """The join approved before for these two tables (keys by the headers the files
+    wrote), when every key column is still there."""
+    from psycopg import sql
+
+    if not left.pc_id or not _table_exists(conn, config.CONTROL_SCHEMA, "silver_join"):
+        return None
+    row = conn.execute(sql.SQL("SELECT how, keys, ignore_case FROM {}.silver_join WHERE profit_center = %s "
+                               "AND left_table = %s AND right_table = %s").format(_ident(config.CONTROL_SCHEMA)),
+                       [left.pc_id, left.table_name, right.table_name]).fetchone()
+    if not row:
+        return None
+    by_header_left = {_header_key(left.headers.get(c) or c): c for c in left.columns}
+    by_header_right = {_header_key(right.headers.get(c) or c): c for c in right.columns}
+    keys = [(by_header_left.get(_header_key(key["left"])), by_header_right.get(_header_key(key["right"])))
+            for key in row[1]]
+    if not keys or any(None in key for key in keys):
+        return None
+    return {"how": row[0], "keys": keys, "ignore_case": row[2]}
+
+
+def _suggest_link(link: dict, frames: dict[str, pl.DataFrame], reviews: dict[str, TableReview], similarity, llm,
+                  notes: list[str]) -> list[dict]:
+    """Suggested keys for a link, by the mapping's votes and by the values."""
+    left, right = reviews[link["left_table"]], reviews[link["right_table"]]
+    own, other = frames[left.table_name], frames[right.table_name]
+    sample = 5000  # rows of each table the values are compared on
+    saved = [tuple(key) for key in (link.get("saved") or {}).get("keys", [])]
+    pairs, step_notes = matching.suggest_keys(
+        {c: own[c].head(sample).to_list() for c in left.columns},
+        {c: other[c].head(sample).to_list() for c in right.columns},
+        right_headers={c: right.headers.get(c, "") for c in right.columns}, saved=saved,
+        similarity=similarity, llm=llm, fuzzy_min=config.MATCH_FUZZY_MIN, semantic_min=config.MATCH_SEMANTIC_MIN)
+    notes.extend(note for note in step_notes if note not in notes)
+    return [pair.as_dict() for pair in pairs[:8]]
+
+
+def _make_join(left: TableReview, right: TableReview, link: dict, how: str, keys, ignore_case: bool = True) -> None:
+    """Join two tables of files that came together. A right join keeps every row of the
+    right table: it is held as the left join of the two the other way round, so each row
+    keeps a load of its own table behind it (its lineage, its cleansed table)."""
+    for review in (left, right):
+        review.join, review.joined_into = None, None
+    pairs = [list(pair) for pair in link["pairs"]]
+    if how == joins.RIGHT:
+        keeper, other = right, left
+        own_keys = [[b, a] for a, b in keys]
+        pairs = [[b, a] for a, b in pairs]
+    else:
+        keeper, other = left, right
+        own_keys = [[a, b] for a, b in keys]
+    keeper.join = {
+        "table": other.table_name, "columns": list(other.columns), "ids": [pair[1] for pair in pairs],
+        "keys": own_keys, "how": joins.INNER if how == joins.INNER else joins.LEFT,
+        "ignore_case": bool(ignore_case), "pairs": pairs,
+        "asked": {"left_table": left.table_name, "right_table": right.table_name, "how": how,
+                  "keys": [[a, b] for a, b in keys]},
+        "stats": {},
+    }
+    other.joined_into = keeper.table_name
+    keeper.headers.update({joins.prefixed(other.table_name, c): other.headers.get(c) or c for c in other.columns})
+
+
+def update_join(run_id: str, left_table: str, right_table: str, how: str | None, keys: list[tuple[str, str]],
+                ignore_case: bool = True) -> Run:
+    """Join two tables of files that came together (``how``: left, right or inner, on
+    ``keys``: (left column, right column) pairs), or undo the join (``how`` None). The
+    mapping is suggested again over both tables' columns; choices the reviewer made for
+    the data table's own columns stay."""
+    if how is not None and how not in joins.HOWS:
+        raise ApiError(422, "invalid_join", f"'{how}' is not a join: left, right or inner.", field="how")
+    if how is not None and not keys:
+        raise ApiError(422, "join_keys_required", "Choose at least one pair of key columns.", field="keys")
+    with db.connection() as conn:
+        run = _read_run(conn, run_id)
+        if run.status != DRAFT:
+            raise conflict("This run has already been approved.")
+        link = next((item for item in run.links if {item["left_table"], item["right_table"]} == {left_table, right_table}),
+                    None)
+        if link is None:
+            raise ApiError(422, "not_together", f"{left_table} and {right_table} are not tables of files that came "
+                           "together.", "Only a companion and the file it came with are joined.", field="right_table")
+        reviews = {r.table_name: r for r in run.tables}
+        left, right = reviews[left_table], reviews[right_table]
+        if link["left_table"] != left_table:  # the reviewer may join them either way round
+            link = {**link, "left_table": left_table, "right_table": right_table,
+                    "pairs": [[b, a] for a, b in link["pairs"]]}
+        for one, other in keys:
+            if one not in left.columns or other not in right.columns:
+                raise ApiError(422, "unknown_key", f"{one} = {other} is not a column of each table.", field="keys")
+        version = run.version
+        keeper_before = next((r for r in (left, right) if r.join), None)
+        if how:
+            _make_join(left, right, link, how, keys, ignore_case)
+        else:
+            for review in (left, right):
+                review.join, review.joined_into = None, None
+        keeper = next((r for r in (left, right) if r.join), None)
+        if keeper is not None:
+            frame = _frame(conn, keeper)
+        approved = _mapping_rows(conn)
+        lotl = _lotl(conn)
+        undone = [r for r in (left, right) if not r.join and not r.joined_into and not r.suggestions]
+        frames = {r.table_name: _frame(conn, r) for r in undone}
+        if keeper_before is not None and keeper is None:
+            # Undone: the data table maps its own columns again.
+            keeper_before.suggestions = [s for s in keeper_before.suggestions if s.bronze_column in keeper_before.columns]
+    similarity, llm, _ = _matchers(_precedents(approved, left.pc_id))
+    if keeper is not None:
+        columns = _columns(keeper)
+        own, known, one_to_many = _saved(approved, keeper.pc_ids or ([keeper.pc_id] if keeper.pc_id else []), columns,
+                                         keeper.headers)
+        fresh, _ = matching.suggest(columns, catalog(), own, known, _samples(frame.head(SAMPLE_ROWS), columns),
+                                    similarity=similarity, llm=llm, fuzzy_min=config.MATCH_FUZZY_MIN,
+                                    semantic_min=config.MATCH_SEMANTIC_MIN, one_to_many=one_to_many,
+                                    labels=_labels(keeper))
+        decided = {s.bronze_column: s for s in keeper.suggestions if s.selection == matching.MANUAL or s.ignored}
+        keeper.suggestions = [decided.get(s.bronze_column, s) for s in fresh]
+    for review in undone:
+        own, known, one_to_many = _saved(approved, review.pc_ids or ([review.pc_id] if review.pc_id else []),
+                                         review.columns, review.headers)
+        review.suggestions, _ = matching.suggest(
+            review.columns, catalog(), own, known, _samples(frames[review.table_name].head(SAMPLE_ROWS), review.columns),
+            similarity=similarity, llm=llm, fuzzy_min=config.MATCH_FUZZY_MIN, semantic_min=config.MATCH_SEMANTIC_MIN,
+            one_to_many=one_to_many)
+    with db.connection() as conn:
+        current = _read_run(conn, run_id, lock=True)
+        if current.version != version or current.status != DRAFT:
+            raise conflict("This review changed while the join was being made.", "Make the join again.")
+        for review in (left, right):
+            if not review.joined_into:
+                _quality(review, catalog(), lotl, _frame(conn, review))
+        _write_run(conn, run)
+    return run
+
+
+def _save_join(conn, run: Run, review: TableReview) -> None:
+    """The approved join, offered again the next time these two tables come in (keys by
+    the headers the files wrote)."""
+    from psycopg import sql
+    from psycopg.types.json import Jsonb
+
+    asked = review.join["asked"]
+    reviews = {r.table_name: r for r in run.tables}
+    left, right = reviews[asked["left_table"]], reviews[asked["right_table"]]
+    if not left.pc_id:
+        return
+    keys = [{"left": left.headers.get(a) or a, "right": right.headers.get(b) or b} for a, b in asked["keys"]]
+    conn.execute(sql.SQL(
+        "INSERT INTO {}.silver_join (profit_center, left_table, right_table, how, keys, ignore_case, approved_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (profit_center, left_table, right_table) DO UPDATE SET "
+        "how = EXCLUDED.how, keys = EXCLUDED.keys, ignore_case = EXCLUDED.ignore_case, "
+        "approved_by = EXCLUDED.approved_by, approved_at = now()").format(_ident(config.CONTROL_SCHEMA)),
+        [left.pc_id, left.table_name, right.table_name, asked["how"], Jsonb(keys), review.join["ignore_case"],
+         run.reviewed_by])
 
 
 def _mapping(review: TableReview) -> list[tuple[str, str]]:
@@ -567,15 +869,116 @@ def _context(review: TableReview, processed_at: datetime | None = None) -> trans
         processed_at=processed_at,
         loads={load.ingestion_id: transform.LoadInfo(load.file_name, load.processing_date, load.period_start,
                                                       load.period_end, load.pc_id, load.reporting_start_date,
-                                                      load.reporting_end_date, load.reporting_period_type)
+                                                      load.reporting_end_date, load.reporting_period_type,
+                                                      load.file_received_date)
                for load in review.loads},
     )
 
 
 def _quality(review: TableReview, columns_catalog, lotl, frame: pl.DataFrame) -> None:
     """The dry run the reviewer sees: the load's own transform, on the loads' bronze rows."""
-    _, quality = transform.transform(frame, _mapping(review), columns_catalog, review.pc_id, lotl, _context(review))
+    if review.aggregated:
+        _, quality = aggregates.transform(frame, _mapping(review), aggregates.Spread.from_dict(review.spread),
+                                         aggregate_catalog(), review.pc_id, lotl, _context(review), review.headers)
+    else:
+        _, quality = transform.transform(frame, _mapping(review), columns_catalog, review.pc_id, lotl, _context(review))
     review.quality = quality
+
+
+# --- a profit center's own aggregates ------------------------------------------------
+
+
+def _aggregate_targets() -> list[SilverColumn]:
+    return aggregates.targets(aggregate_catalog())
+
+
+def _aggregate_saved(conn, pc: str | None, table: str) -> dict:
+    """The approved mapping of this aggregated table: {bronze column: aggregate column},
+    and under ``None`` the spread (columns, measure, dimension), if any."""
+    from psycopg import sql
+
+    if not pc or not _table_exists(conn, config.CONTROL_SCHEMA, "silver_aggregate_mapping"):
+        return {}
+    rows = conn.execute(sql.SQL(
+        "SELECT bronze_column, silver_column, spread_measure, spread_dimension FROM {}.silver_aggregate_mapping "
+        "WHERE profit_center = %s AND bronze_table = %s").format(_ident(config.CONTROL_SCHEMA)), [pc, table]).fetchall()
+    saved: dict = {column: silver for column, silver, measure, _ in rows if silver and not measure}
+    spread = [(column, measure, dimension) for column, _, measure, dimension in rows if measure]
+    if spread:
+        saved[None] = {"columns": [row[0] for row in spread], "measure": spread[0][1], "dimension": spread[0][2]}
+    return saved
+
+
+def _named_measure(review: TableReview) -> str | None:
+    """A measure the files name -- a "Premium Summary" is premium -- as the spread's first
+    guess. Only a guess: the reviewer confirms it."""
+    names = " ".join(normalize.phrase(load.file_name or "") for load in review.loads)
+    for column in _aggregate_targets():
+        if aggregates.is_measure(column) and f" {normalize.phrase(column.name)} " in f" {names} ":
+            return column.name
+    return None
+
+
+def _suggest_aggregate(review: TableReview, frame: pl.DataFrame, saved: dict, similarity, llm) -> list[str]:
+    """Suggestions for an aggregated table: roll-up columns left out, columns that spread
+    one measure across a dimension set apart, every other column voted onto an aggregate
+    column by the same methods as transactions."""
+    found = grain.detect(frame, review.columns, keyed=False, dated=False,
+                         group="_source_sheet" if "_source_sheet" in frame.columns else None)
+    review.rollups = [found.total_column] if found.total_column else []
+    spread = saved.get(None)
+    parts = [name for name in (spread["columns"] if spread else found.parts) if name in review.columns]
+    review.spread = aggregates.Spread(parts, (spread or {}).get("measure") or _named_measure(review),
+                                     (spread or {}).get("dimension")).as_dict() if parts else None
+    rest = [name for name in review.columns
+            if name not in parts and name not in review.rollups and name not in review.lineage]
+    own = {column: silver for column, silver in saved.items() if column is not None}
+    suggestions, notes = matching.suggest(
+        rest, _aggregate_targets(), own, {}, _samples(frame.head(SAMPLE_ROWS), rest), similarity=similarity, llm=llm,
+        fuzzy_min=config.MATCH_FUZZY_MIN, semantic_min=config.MATCH_SEMANTIC_MIN, drt_only=False,
+    )
+    review.suggestions = suggestions
+    return notes
+
+
+def update_spread(run_id: str, table: str, columns: list[str], measure: str | None, dimension: str | None,
+                  label: str | None = None, rollups: list[str] | None = None) -> Run:
+    """The columns of an aggregated table that are one measure across a dimension (their
+    headers its values), that measure, and the column the headers fill; and which columns
+    are roll-ups left out. Columns moved out of the spread come back to be mapped."""
+    targets = {column.name: column for column in _aggregate_targets()}
+    if measure is not None and (measure not in targets or not aggregates.is_measure(targets[measure])):
+        raise ApiError(422, "unknown_measure", f"'{measure}' is not a measure of {AGGREGATE}.", field="measure")
+    if dimension is not None and (dimension not in targets or aggregates.is_measure(targets[dimension])):
+        raise ApiError(422, "unknown_dimension", f"'{dimension}' is not a dimension of {AGGREGATE}.", field="dimension")
+    with db.connection() as conn:
+        run = _read_run(conn, run_id, lock=True)
+        if run.status != DRAFT:
+            raise conflict("This run has already been approved.")
+        review = next((t for t in run.tables if t.table_name == table), None)
+        if review is None:
+            raise not_found("That table in the run")
+        if not review.aggregated:
+            raise conflict(f"{table} holds transactions: only an aggregated table spreads a measure.")
+        unknown = [name for name in [*columns, *(rollups or [])] if name not in review.columns]
+        if unknown:
+            raise ApiError(422, "unknown_bronze_column", f"{table} has no column {unknown[0]}.", field="columns")
+        if rollups is not None:
+            review.rollups = list(dict.fromkeys(rollups))
+        parts = [name for name in dict.fromkeys(columns) if name not in review.rollups]
+        if len(parts) == 1:
+            raise ApiError(422, "spread_too_small", "A measure spread across a dimension takes two columns or more.",
+                           "Map a single column to its measure instead.", field="columns")
+        review.spread = aggregates.Spread(parts, measure, dimension, (label or "").strip() or "category").as_dict() \
+            if parts else None
+        # Each column is either spread, a roll-up, or mapped on its own (lineage never is).
+        kept = {s.bronze_column: s for s in review.suggestions}
+        review.suggestions = [kept.get(name) or matching.Suggestion(name, candidates=[], samples=[])
+                              for name in review.columns
+                              if name not in parts and name not in review.rollups and name not in review.lineage]
+        _quality(review, catalog(), _lotl(conn), _frame(conn, review))
+        _write_run(conn, run)
+    return run
 
 
 def get_run(run_id: str) -> Run:
@@ -592,7 +995,26 @@ def problems(run: Run) -> list[str]:
     issues = []
     for review in run.tables:
         issues.extend(matching.problems(review.table_name, review.suggestions))
+        spread = aggregates.Spread.from_dict(review.spread) if review.aggregated else None
+        if spread and spread.columns and not spread.measure:
+            issues.append(f"{review.table_name}: choose the measure {', '.join(spread.columns)} hold.")
+        repeats = ((review.join or {}).get("stats") or {}).get("duplicates") or []
+        if repeats:
+            shown = ", ".join(f"{item['key']} ({item['rows']} rows)" for item in repeats[:3])
+            issues.append(f"{review.table_name}: the key repeats in {review.join['table']} ({shown}): each repeat "
+                          "would count its rows twice. Add a key column so each row matches one.")
+    tables = {r.table_name: r for r in run.tables}
+    for link in run.links:
+        left, right = tables.get(link["left_table"]), tables.get(link["right_table"])
+        if left and right and not (left.join or right.join):
+            issues.append(f"{right.table_name} came with {left.table_name}: join the two (a companion is not loaded "
+                          "on its own).")
     return issues
+
+
+def _targets_of(review: TableReview, columns_catalog: list[SilverColumn]) -> set[str]:
+    """What a bronze column of this table can be mapped onto."""
+    return {c.name for c in (_aggregate_targets() if review.aggregated else drt_targets(columns_catalog))}
 
 
 def update_mapping(run_id: str, table: str, column: str, silver_column: str | None, ignored: bool,
@@ -601,12 +1023,7 @@ def update_mapping(run_id: str, table: str, column: str, silver_column: str | No
     also were sent (all of the first two when not given). ``also``: the extra Silver
     columns the bronze column loads into, as a whole list."""
     columns_catalog = catalog()
-    targets = {c.name for c in drt_targets(columns_catalog)}
     fields = {"silver_column", "ignored"} if fields is None else fields
-    for name in [silver_column, *(also or [])]:
-        if name is not None and name not in targets:
-            raise ApiError(422, "unknown_silver_column", f"'{name}' is not a DRT column a bronze column can map to.",
-                           field="silver_column")
     with db.connection() as conn:
         run = _read_run(conn, run_id, lock=True)
         if run.status != DRAFT:
@@ -615,6 +1032,12 @@ def update_mapping(run_id: str, table: str, column: str, silver_column: str | No
         suggestion = next((s for s in (review.suggestions if review else []) if s.bronze_column == column), None)
         if suggestion is None:
             raise not_found("That column in the run")
+        targets = _targets_of(review, columns_catalog)
+        for name in [silver_column, *(also or [])]:
+            if name is not None and name not in targets:
+                kind = f"an {AGGREGATE} column" if review.aggregated else "a DRT column"
+                raise ApiError(422, "unknown_silver_column", f"'{name}' is not {kind} a bronze column can map to.",
+                               field="silver_column")
         if fields & {"silver_column", "ignored"}:
             matching.choose(suggestion, silver_column, ignored)
         if "also" in fields and also is not None:
@@ -628,9 +1051,6 @@ def assign_target(run_id: str, table: str, silver_column: str, bronze_column: st
     """The reviewer's choice from the Silver side: ``bronze_column`` loads ``silver_column``
     (None: no bronze column does). See ``matching.assign``."""
     columns_catalog = catalog()
-    if silver_column not in {c.name for c in drt_targets(columns_catalog)}:
-        raise ApiError(422, "unknown_silver_column", f"'{silver_column}' is not a DRT column a bronze column can map to.",
-                       field="silver_column")
     with db.connection() as conn:
         run = _read_run(conn, run_id, lock=True)
         if run.status != DRAFT:
@@ -638,6 +1058,9 @@ def assign_target(run_id: str, table: str, silver_column: str, bronze_column: st
         review = next((t for t in run.tables if t.table_name == table), None)
         if review is None:
             raise not_found("That table in the run")
+        if silver_column not in _targets_of(review, columns_catalog):
+            raise ApiError(422, "unknown_silver_column", f"'{silver_column}' is not a column a bronze column of "
+                           f"{table} can map to.", field="silver_column")
         if bronze_column is not None and bronze_column not in {s.bronze_column for s in review.suggestions}:
             raise ApiError(422, "unknown_bronze_column", f"{table} has no column '{bronze_column}'.", field="bronze_column")
         matching.assign(review.suggestions, silver_column, bronze_column)
@@ -688,8 +1111,10 @@ def _still_valid(conn, run: Run, columns_catalog: list[SilverColumn]) -> None:
     """
     from psycopg import sql
 
-    names = {c.name for c in drt_targets(columns_catalog)}
     for review in run.tables:
+        if review.joined_into:
+            continue
+        names = _targets_of(review, columns_catalog)
         for s in review.suggestions:
             for target in s.targets:
                 if target not in names:
@@ -697,6 +1122,9 @@ def _still_valid(conn, run: Run, columns_catalog: list[SilverColumn]) -> None:
                                    "The Silver column list changed. Start a new Silver run.")
         if _bronze_columns(conn, review.table_name) != review.columns:
             raise ApiError(409, "plan_changed", f"{review.table_name} changed since the review.",
+                           "Start a new Silver run.")
+        if review.join and _bronze_columns(conn, review.join["table"]) != review.join["columns"]:
+            raise ApiError(409, "plan_changed", f"{review.join['table']} changed since the review.",
                            "Start a new Silver run.")
     ids = [load.ingestion_id for review in run.tables for load in review.loads]
     if ids:
@@ -766,9 +1194,10 @@ def _run(run: Run) -> None:
 
 def _history_rows(run: Run) -> list[dict]:
     """One job history row per bronze load the run moved into Silver."""
-    target = f"{config.SILVER_SCHEMA}.{DETAIL}"
     return [
-        {"output_name": review.table_name, "output_file": target, "row_count": run.loaded.get(load.ingestion_id),
+        {"output_name": review.table_name,
+         "output_file": f"{config.SILVER_SCHEMA}.{AGGREGATE if review.aggregated else TRANSACTION}",
+         "row_count": run.loaded.get(load.ingestion_id),
          "source_file": load.file_name, "source_sha256": load.file_sha256, "source_job_id": load.job_id}
         for review in run.tables for load in review.loads
     ]
@@ -816,28 +1245,29 @@ def _ensure_tables(conn, columns_catalog: list[SilverColumn], aggregate_columns:
 
     schema = _ident(config.SILVER_SCHEMA)
     conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
-    _ensure_table(conn, config.SILVER_SCHEMA, DETAIL, columns_catalog, transform.IDENTITY)
+    _ensure_table(conn, config.SILVER_SCHEMA, TRANSACTION, columns_catalog, transform.IDENTITY)
     # A bronze load's rows: what replacing or reloading it deletes.
-    conn.execute(sql.SQL("CREATE INDEX IF NOT EXISTS silver_detail_load ON {}.{} "
-                         "(source_table, source_file, ingestion_timestamp)").format(schema, _ident(DETAIL)))
+    conn.execute(sql.SQL("CREATE INDEX IF NOT EXISTS silver_transaction_load ON {}.{} "
+                         "(source_table, source_file, ingestion_timestamp)").format(schema, _ident(TRANSACTION)))
     _ensure_table(conn, config.SILVER_SCHEMA, AGGREGATE, aggregate_columns, "ahi_aggregate_id")
     conn.execute(sql.SQL("CREATE INDEX IF NOT EXISTS silver_aggregate_source ON {}.{} (source_system)")
                  .format(schema, _ident(AGGREGATE)))
 
 
-def _cleansed_columns(columns_catalog: list[SilverColumn]) -> list[SilverColumn]:
+def _cleansed_columns(columns_catalog: list[SilverColumn], identity: str = transform.IDENTITY) -> list[SilverColumn]:
     """The Silver columns a cleansed table holds: all of them but the generated key."""
-    return [column for column in columns_catalog if column.name != transform.IDENTITY]
+    return [column for column in columns_catalog if column.name != identity]
 
 
-def _ensure_cleansed(conn, table: str, columns_catalog: list[SilverColumn]) -> None:
+def _ensure_cleansed(conn, table: str, columns_catalog: list[SilverColumn], identity: str = transform.IDENTITY) -> None:
     """The bronze table's source-specific Silver Cleansed table: the same name, in the
-    cleansed schema, with the Silver columns and the load each row came from."""
+    cleansed schema, with the Silver columns (the aggregate table's, for an aggregated
+    table) and the load each row came from."""
     from psycopg import sql
 
     schema = _ident(config.CLEANSED_SCHEMA)
     conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
-    _ensure_table(conn, config.CLEANSED_SCHEMA, table, _cleansed_columns(columns_catalog), "", CLEANSED_EXTRA)
+    _ensure_table(conn, config.CLEANSED_SCHEMA, table, _cleansed_columns(columns_catalog, identity), "", CLEANSED_EXTRA)
     conn.execute(sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {}.{} (_ingestion_id)").format(
         _ident(naming.identifier(f"{table}_load")), schema, _ident(table)))
     conn.execute(sql.SQL(
@@ -856,12 +1286,15 @@ def _delete_cleansed(conn, table: str, ingestion_ids: list[str]) -> int:
         _ident(config.CLEANSED_SCHEMA), _ident(table)), [ingestion_ids]).rowcount
 
 
-def _delete_load(conn, source_table: str, file_name: str, processing_date) -> int:
+def _delete_load(conn, source_table: str, file_name: str, processing_date, target: str = TRANSACTION) -> int:
+    """A bronze load's rows in Silver's transaction table (or aggregate table)."""
     from psycopg import sql
 
+    if not _table_exists(conn, config.SILVER_SCHEMA, target):
+        return 0
     return conn.execute(sql.SQL(
         "DELETE FROM {}.{} WHERE source_table = %s AND source_file = %s AND ingestion_timestamp = %s").format(
-            _ident(config.SILVER_SCHEMA), _ident(DETAIL)), [source_table, file_name, processing_date]).rowcount
+            _ident(config.SILVER_SCHEMA), _ident(target)), [source_table, file_name, processing_date]).rowcount
 
 
 def _current_rows(rows: list[tuple], header: str) -> list[tuple]:
@@ -891,6 +1324,11 @@ def _save_mapping(conn, run: Run, columns_catalog: list[SilverColumn]) -> int:
     labels = reference_service.drt_labels(conn, columns_catalog)
     saved = 0
     for review in run.tables:
+        if review.joined_into:
+            continue  # mapped, and saved, with the table it is joined into
+        if review.aggregated:
+            saved += _save_aggregate_mapping(conn, run, review)
+            continue
         for pc in review.pc_ids or ([review.pc_id] if review.pc_id else []):
             mine = [row for row in _mapping_rows(conn) if _same_pc(row[0], pc) and row[3]]
             for s in review.suggestions:
@@ -918,6 +1356,63 @@ def _save_mapping(conn, run: Run, columns_catalog: list[SilverColumn]) -> int:
     return saved
 
 
+def _save_aggregate_mapping(conn, run: Run, review: TableReview) -> int:
+    """An aggregated table's approved mapping, offered again next time: each column's
+    aggregate column, and the spread."""
+    from psycopg import sql
+
+    pc = review.pc_id
+    if not pc:
+        return 0
+    table = sql.SQL("{}.silver_aggregate_mapping").format(_ident(config.CONTROL_SCHEMA))
+    conn.execute(sql.SQL("DELETE FROM {} WHERE profit_center = %s AND bronze_table = %s").format(table),
+                 [pc, review.table_name])
+    rows = [(s.bronze_column, s.silver_column, None, None) for s in review.suggestions if s.silver_column]
+    spread = aggregates.Spread.from_dict(review.spread)
+    if spread and spread.measure:
+        rows += [(name, None, spread.measure, spread.dimension) for name in spread.columns]
+    for column, silver, measure, dimension in rows:
+        conn.execute(sql.SQL("INSERT INTO {} (profit_center, bronze_table, bronze_column, silver_column, spread_measure, "
+                             "spread_dimension, approved_by) VALUES (%s, %s, %s, %s, %s, %s, %s)").format(table),
+                     [pc, review.table_name, column, silver, measure, dimension, run.reviewed_by])
+    return len(rows)
+
+
+def _load_aggregate(conn, run: Run, review: TableReview, lotl, processed_at) -> int:
+    """An aggregated table's selected loads: bronze -> its cleansed table (aggregate
+    columns) -> silver_aggregate, as the profit center reported them."""
+    from psycopg import sql
+
+    columns = aggregate_catalog()
+    ids = [load.ingestion_id for load in review.loads]
+    source_table = _source_table(review.table_name)
+    _ensure_cleansed(conn, review.table_name, columns, aggregates.IDENTITY)
+    cleansed = sql.SQL("{}.{}").format(_ident(config.CLEANSED_SCHEMA), _ident(review.table_name))
+    _delete_cleansed(conn, review.table_name, ids)
+    for load in review.loads:
+        _delete_load(conn, source_table, load.file_name, load.processing_date, AGGREGATE)
+    frame = _bronze_frame(conn, review.table_name, review.columns, ids, aggregated=True)
+    rows, report = aggregates.transform(frame, _mapping(review), aggregates.Spread.from_dict(review.spread), columns,
+                                       review.pc_id, lotl, _context(review, processed_at), review.headers, extras=True)
+    target = [c.name for c in _cleansed_columns(columns, aggregates.IDENTITY)]
+    with conn.cursor() as cursor, cursor.copy(sql.SQL("COPY {} ({}) FROM STDIN").format(cleansed, sql.SQL(", ").join(
+            _ident(n) for n in target + aggregates.EXTRAS + ["_silver_run_id", "_cleansed_at"]))) as copy:
+        for row in rows.select(target + aggregates.EXTRAS).iter_rows():
+            copy.write_row(row + (run.id, processed_at))
+    names = sql.SQL(", ").join(_ident(n) for n in target)
+    inserted = conn.execute(sql.SQL("INSERT INTO {}.{} ({}) SELECT {} FROM {} WHERE _ingestion_id = ANY(%s)").format(
+        _ident(config.SILVER_SCHEMA), _ident(AGGREGATE), names, names, cleansed), [ids]).rowcount
+    if inserted != rows.height:
+        raise ApiError(500, "row_mismatch", f"{review.table_name}: aggregate row counts do not match.",
+                       "Nothing was loaded. Retry, and report it if it happens again.")
+    counts = Counter(rows["_ingestion_id"].to_list())
+    for load in review.loads:
+        run.loaded[load.ingestion_id] = counts.get(load.ingestion_id, 0)
+    job_history.note(run.id, f"{review.table_name}: {inserted} aggregate rows into {config.SILVER_SCHEMA}.{AGGREGATE} "
+                             f"({report['rollup_rows']} roll-up rows left out)")
+    return inserted
+
+
 def _execute(conn, run: Run) -> None:
     from psycopg import sql
     from psycopg.types.json import Jsonb
@@ -940,7 +1435,8 @@ def _execute(conn, run: Run) -> None:
     if cleanup:
         for item in cleanup:
             removed += _delete_load(conn, _source_table(item["table_name"]), item["file_name"],
-                                    datetime.fromisoformat(item["processing_date"]))
+                                    datetime.fromisoformat(item["processing_date"]),
+                                    AGGREGATE if item.get("aggregated") else TRANSACTION)
             _delete_cleansed(conn, item["table_name"], [item["ingestion_id"]])
         conn.execute(sql.SQL("UPDATE {}.ingestion SET silver_status = 'removed' WHERE id = ANY(%s)").format(control),
                      [[item["ingestion_id"] for item in cleanup]])
@@ -950,7 +1446,7 @@ def _execute(conn, run: Run) -> None:
     processed_at = datetime.now(timezone.utc)
     target = [c.name for c in _cleansed_columns(columns_catalog)]
     names = sql.SQL(", ").join(_ident(n) for n in target)
-    detail = sql.SQL("{}.{}").format(_ident(config.SILVER_SCHEMA), _ident(DETAIL))
+    detail = sql.SQL("{}.{}").format(_ident(config.SILVER_SCHEMA), _ident(TRANSACTION))
     loaded, quality = 0, {}
     total = sum(len(review.loads) for review in run.tables) or 1
     done = 0
@@ -958,15 +1454,28 @@ def _execute(conn, run: Run) -> None:
         ids = [load.ingestion_id for load in review.loads]
         source_table = _source_table(review.table_name)
         _progress(run, done / total, f"Cleansing {review.table_name}")
+        if review.joined_into:
+            continue  # its rows came in with the table it is joined into
+        if review.aggregated:
+            loaded += _load_aggregate(conn, run, review, lotl, processed_at)
+            conn.execute(sql.SQL("UPDATE {}.ingestion SET silver_status = 'succeeded', silver_run_id = %s, "
+                                 "silver_loaded_at = now() WHERE id = ANY(%s)").format(control), [run.id, ids])
+            done += len(ids)
+            continue
         _ensure_cleansed(conn, review.table_name, columns_catalog)
         cleansed = sql.SQL("{}.{}").format(_ident(config.CLEANSED_SCHEMA), _ident(review.table_name))
         # Idempotent: a load retried after a failure never doubles.
         _delete_cleansed(conn, review.table_name, ids)
         for load in review.loads:
             _delete_load(conn, source_table, load.file_name, load.processing_date)
-        frame = _bronze_frame(conn, review.table_name, review.columns, ids)
+        frame = _frame(conn, review)
+        if review.join and review.join["stats"].get("repeated_keys"):
+            raise conflict(f"{review.table_name}: the join key repeats in {review.join['table']}.",
+                           "Add a key column so each row matches one, then approve again.")
         silver, report = transform.transform(frame, _mapping(review), columns_catalog, review.pc_id, lotl,
                                              _context(review, processed_at), extras=True)
+        if review.join:
+            report["join"] = {**review.join["asked"], **review.join["stats"]}
         quality[review.table_name] = report
         copy_sql = sql.SQL("COPY {} ({}) FROM STDIN").format(cleansed, sql.SQL(", ").join(
             _ident(n) for n in target + transform.EXTRAS + ["_silver_run_id", "_cleansed_at"]))
@@ -979,7 +1488,7 @@ def _execute(conn, run: Run) -> None:
         if any(counts.get(i, 0) != expected.get(i, 0) for i in ids):
             raise ApiError(500, "row_mismatch", f"{review.table_name}: cleansed row counts do not match bronze.",
                            "Nothing was loaded. Retry, and report it if it happens again.")
-        _progress(run, done / total, f"Loading {review.table_name} into {DETAIL}")
+        _progress(run, done / total, f"Loading {review.table_name} into {TRANSACTION}")
         inserted = conn.execute(sql.SQL("INSERT INTO {} ({}) SELECT {} FROM {} WHERE _ingestion_id = ANY(%s)").format(
             detail, names, names, cleansed), [ids]).rowcount
         if inserted != frame.height:
@@ -988,15 +1497,23 @@ def _execute(conn, run: Run) -> None:
         for load in review.loads:
             run.loaded[load.ingestion_id] = counts.get(load.ingestion_id, 0)
         job_history.note(run.id, f"{review.table_name}: {inserted} rows into {config.CLEANSED_SCHEMA}.{review.table_name} "
-                                 f"and {config.SILVER_SCHEMA}.{DETAIL}")
+                                 f"and {config.SILVER_SCHEMA}.{TRANSACTION}")
         loaded += inserted
+        if review.join:
+            # The companion's loads came in through the join.
+            ids = ids + list(review.join["ids"])
+            _save_join(conn, run, review)
+            job_history.note(run.id, f"{review.table_name}: joined with {review.join['table']} "
+                                     f"({review.join['stats'].get('matched', 0)} of {frame.height} rows matched)")
         conn.execute(sql.SQL("UPDATE {}.ingestion SET silver_status = 'succeeded', silver_run_id = %s, "
                              "silver_loaded_at = now() WHERE id = ANY(%s)").format(control), [run.id, ids])
         done += len(ids)
 
     # 4. The aggregate, rebuilt for every source system this run touched.
-    sources = sorted({review.source_system for review in run.tables if review.source_system}
-                     | {item["source_system"] for item in cleanup if item.get("source_system")})
+    # (A profit center's own aggregates are kept as reported: only the roll-up is rebuilt.)
+    sources = sorted({review.source_system for review in run.tables if review.source_system and not review.aggregated}
+                     | {item["source_system"] for item in cleanup if item.get("source_system")
+                        and not item.get("aggregated")})
     _rebuild_aggregate(conn, sources)
 
     # 5. The audit: what was approved, how it was chosen, and every method's vote.
@@ -1038,7 +1555,9 @@ def _rebuild_aggregate(conn, sources: list[str]) -> None:
     if not sources:
         return
     schema = _ident(config.SILVER_SCHEMA)
-    conn.execute(sql.SQL("DELETE FROM {}.{} WHERE source_system = ANY(%s)").format(schema, _ident(AGGREGATE)), [sources])
+    # Only the rows rolled up from the transaction table: a profit center's own aggregates stay.
+    conn.execute(sql.SQL("DELETE FROM {}.{} WHERE source_system = ANY(%s) AND agg_data_source = %s").format(
+        schema, _ident(AGGREGATE)), [sources, TRANSACTION])
     conn.execute(sql.SQL(
         "INSERT INTO {s}.{agg} (record_grain, report_type, agg_data_source, source_system, source_table, "
         "profit_center_number, profit_center_name, aggregation_category, aggregation_dimension_1_name, "
@@ -1072,8 +1591,8 @@ def _rebuild_aggregate(conn, sources: list[str]) -> None:
         "AND coalesce(i.processing_date, i.created_at) = d.ingestion_timestamp "
         "WHERE d.source_system = ANY(%s) "
         "GROUP BY d.source_system, d.profit_center_number, date_trunc('month', d.accounting_effective_date)::date) g"
-    ).format(s=schema, agg=_ident(AGGREGATE), detail=_ident(DETAIL), c=_ident(config.CONTROL_SCHEMA)),
-        [RECORD_GRAIN, REPORT_TYPE, DETAIL, f"{config.SILVER_SCHEMA}.{DETAIL}", sources])
+    ).format(s=schema, agg=_ident(AGGREGATE), detail=_ident(TRANSACTION), c=_ident(config.CONTROL_SCHEMA)),
+        [RECORD_GRAIN, REPORT_TYPE, TRANSACTION, f"{config.SILVER_SCHEMA}.{TRANSACTION}", sources])
 
 
 def _record_failure(run: Run) -> None:

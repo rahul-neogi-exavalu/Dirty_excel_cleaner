@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
+from ahi_silver import aggregate as aggregates
 from ahi_silver import matching
 from ahi_silver.catalog import targets as drt_targets
 
@@ -54,6 +55,36 @@ class SavedMappingEdit(SavedMappingRow):
     new_silver_column_name: str | None = None
 
 
+class SpreadEdit(BaseModel):
+    """An aggregated table's columns that are one measure across a dimension (their
+    headers its values): the measure, and the aggregate column the headers fill (None:
+    the next aggregation_dimension slot, named ``label``). ``rollups``: columns totalling
+    others, left out (sent alone, kept as they are)."""
+
+    table_name: str
+    columns: list[str] = []
+    measure: str | None = None
+    dimension: str | None = None
+    label: str | None = None
+    rollups: list[str] | None = None
+
+
+class JoinKey(BaseModel):
+    left: str
+    right: str
+
+
+class JoinEdit(BaseModel):
+    """Join two tables of files that came together: ``how`` left, right or inner (None:
+    undo the join), on ``keys`` (left column = right column; several make one key)."""
+
+    left_table: str
+    right_table: str
+    how: str | None = None
+    keys: list[JoinKey] = []
+    ignore_case: bool = True
+
+
 class RunApprove(BaseModel):
     # Ignored: the signed-in user is the reviewer. Kept so older clients still validate.
     reviewed_by: str | None = None
@@ -61,6 +92,7 @@ class RunApprove(BaseModel):
 
 def run_out(run: Run) -> dict:
     targets = drt_targets(silver_service.catalog())
+    aggregate_targets = aggregates.targets(silver_service.aggregate_catalog())
     return {
         "id": run.id,
         "status": run.status,
@@ -76,6 +108,12 @@ def run_out(run: Run) -> dict:
         "created_at": run.created_at,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
+        # What an aggregated table's columns can be mapped onto, measures apart.
+        "aggregate_targets": [{"name": column.name, "measure": aggregates.is_measure(column)}
+                              for column in aggregate_targets],
+        # Tables of files that came together, which the reviewer joins: the suggested keys.
+        "links": [{key: value for key, value in link.items() if key != "saved"} | {"saved": bool(link.get("saved"))}
+                  for link in run.links],
         "tables": [
             {
                 "table_name": review.table_name,
@@ -84,6 +122,18 @@ def run_out(run: Run) -> dict:
                 "pc_ids": review.pc_ids,
                 "loads": [vars(load) for load in review.loads],
                 "quality": review.quality,
+                # The profit center's own aggregates: to silver_aggregate, with the columns
+                # spread across a dimension and the roll-ups left out.
+                "aggregated": review.aggregated,
+                "spread": review.spread,
+                "rollups": review.rollups,
+                # The cleaner's sheet column: lineage, never mapped.
+                "lineage": review.lineage,
+                # A join with the table of a file that came with this one, and its effect;
+                # or the table this one is joined into (it is not loaded on its own).
+                "join": review.join,
+                "joined_into": review.joined_into,
+                "columns": silver_service._columns(review),
                 "mapping": [
                     {
                         "bronze_column": s.bronze_column,
@@ -129,7 +179,8 @@ def run_out(run: Run) -> dict:
                             for bronze, c in pick.candidates
                         ],
                     }
-                    for pick in matching.by_silver(review.suggestions, targets)
+                    for pick in matching.by_silver(review.suggestions,
+                                                   aggregate_targets if review.aggregated else targets)
                 ],
             }
             for review in run.tables
@@ -145,8 +196,8 @@ def _vote(vote) -> dict:
 def silver_catalog() -> dict:
     return {
         "file": config.SILVER_COLUMNS_FILE.name,
-        # Every silver_detail column. ``target``: a DRT column, which a bronze column can map
-        # to; the dropdowns offer only these.
+        # Every silver_transaction column. ``target``: a DRT column, which a bronze column can
+        # map to; the dropdowns offer only these.
         "columns": [{**vars(column), "target": column.is_target} for column in silver_service.catalog()],
         "aggregate_columns": [column.name for column in silver_service.aggregate_catalog()],
         "semantic": bool(config.WORD2VEC_PATH),
@@ -190,6 +241,24 @@ async def assign_target(run_id: str, request: TargetEdit) -> dict:
 
 class IgnoreUnmapped(BaseModel):
     table_name: str | None = None
+
+
+@router.patch("/runs/{run_id}/join")
+async def edit_join(run_id: str, request: JoinEdit) -> dict:
+    """Join two tables of files that came together, or undo the join."""
+    run = await run_in_threadpool(
+        silver_service.update_join, run_id, request.left_table, request.right_table, request.how,
+        [(key.left, key.right) for key in request.keys], request.ignore_case)
+    return run_out(run)
+
+
+@router.patch("/runs/{run_id}/spread")
+async def edit_spread(run_id: str, request: SpreadEdit) -> dict:
+    """An aggregated table's measure spread across columns, and its roll-up columns."""
+    run = await run_in_threadpool(
+        silver_service.update_spread, run_id, request.table_name, request.columns, request.measure,
+        request.dimension, request.label, request.rollups)
+    return run_out(run)
 
 
 @router.post("/runs/{run_id}/ignore-unmapped")

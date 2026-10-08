@@ -72,10 +72,12 @@ def test_an_older_mapping_is_cleaned_once(env):
                                    f'FROM "{silver}".drt_column_mapping').fetchall(), key=str)
         labels = conn.execute(f'SELECT count(*) FROM "{config.CONTROL_SCHEMA}".drt_label').fetchone()[0]
         schemas = {row[0] for row in conn.execute("SELECT schema_name FROM information_schema.schemata")}
+    # The app-made ignore goes. Since the business's 48 DRT columns (008), "Is MGA" and
+    # "Producer Office Zipcode" are its own labels: they stay, and isMga's twin is one row.
     assert rows == sorted([
         ("PC0515", "Wr Prem", "Premium", "premium"),
-        ("PC0515", "producerofficezipcode", None, "producer_office_zipcode"),
-        ("PC0515", "isMga", None, "is_mga"),
+        ("PC0515", "producerofficezipcode", "Producer Office Zipcode", "producer_office_zipcode"),
+        ("PC0515", "isMga", "Is MGA", "is_mga"),
     ], key=str)
-    assert labels == 21  # the workbook's distinct DRT labels
+    assert labels == 48  # every DRT column of the Silver catalog
     assert config.CLEANSED_SCHEMA in schemas

@@ -18,6 +18,8 @@ PREFIX = "ext"
 GENERIC = "data"
 # A staging table is its bronze table's name with this suffix.
 STAGING_SUFFIX = "_stg"
+# A table of the profit center's own aggregates (not transactions) ends with this.
+AGGREGATE_SUFFIX = "_agg"
 # Postgres truncates identifiers longer than this.
 MAX_IDENTIFIER = 63
 
@@ -60,12 +62,14 @@ def clean_source_system(value: str | None) -> str:
 
 
 def table_name(source_system: str, sheet_names: list[str], file_stem: str = "",
-               years: set[int] | None = None, legacy: bool = False) -> str:
+               years: set[int] | None = None, legacy: bool = False, aggregated: bool = False) -> str:
     """The bronze table for one cleaned output.
 
     * every sheet carries a period, or several sheets were appended -> ``ext_src_data``
     * otherwise the sheet name, minus the source-system code if it repeats it
       (a CSV's only "sheet" is its file name) -> ``ext_src_arr``
+    * the profit center's own aggregates, not transactions -> the same, with ``_agg``
+      (``ext_src_data_agg``); its staging table is ``ext_src_data_agg_stg``
 
     ``years``: the years the file covers, so a year in a sheet name counts as a period
     only when it is one of them ("Plan 2000" stays a name in a 2026 file). ``legacy``:
@@ -77,20 +81,27 @@ def table_name(source_system: str, sheet_names: list[str], file_stem: str = "",
         part = GENERIC
     else:
         part = "_".join(_without_source(slug(names[0]).split("_"), source)) or GENERIC
-    return (legacy_identifier if legacy else identifier)(f"{PREFIX}_{source}_{part}")
+    fit = legacy_identifier if legacy else identifier
+    if aggregated:
+        return with_suffix(fit(f"{PREFIX}_{source}_{part}"), AGGREGATE_SUFFIX)
+    return fit(f"{PREFIX}_{source}_{part}")
+
+
+def with_suffix(name: str, suffix: str) -> str:
+    """``name`` + ``suffix`` within the identifier limit: the name is shortened (with a
+    digest, so long names stay apart), never the suffix."""
+    if len(name) + len(suffix) <= MAX_IDENTIFIER:
+        return f"{name}{suffix}"
+    digest = hashlib.sha256(name.encode()).hexdigest()[:8]
+    keep = MAX_IDENTIFIER - len(suffix) - len(digest) - 1
+    return f"{name[:keep].rstrip('_')}_{digest}{suffix}"
 
 
 def staging_table(bronze_table: str, held: set[str] = frozenset()) -> str:
     """Where a validated output waits for Ingest: the bronze table it is bound for, with
     ``_stg`` (``ext_pc0515_sheet1`` -> ``ext_pc0515_sheet1_stg``). ``held``: staging tables
     other files still wait in; while one of them holds the name, ``_stg_2``, ``_stg_3`` ..."""
-    name = f"{bronze_table}{STAGING_SUFFIX}"
-    if len(name) > MAX_IDENTIFIER:
-        # Shorten the table part, not the suffix, keeping long names apart by a digest.
-        digest = hashlib.sha256(bronze_table.encode()).hexdigest()[:8]
-        keep = MAX_IDENTIFIER - len(STAGING_SUFFIX) - len(digest) - 1
-        name = f"{bronze_table[:keep].rstrip('_')}_{digest}{STAGING_SUFFIX}"
-    return next_free(name, held)
+    return next_free(with_suffix(bronze_table, STAGING_SUFFIX), held)
 
 
 def _without_source(tokens: list[str], source: str) -> list[str]:

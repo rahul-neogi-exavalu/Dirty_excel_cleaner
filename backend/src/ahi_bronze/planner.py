@@ -20,6 +20,12 @@ The rules are the AHI File -> Bronze scenario document's:
   loads it supersedes (in whichever table they are), and a monthly file whose month is
   already loaded may replace that month only (``replace_month``): the earlier loads keep
   their other months.
+* A file continuing the profit center's earlier files (a month appended after its
+  year-to-date file, a revision) goes to the table those files are in, whatever its sheet
+  is called: the profit center's data stays in one table, and its schema is compared
+  with that table's (evolving it where columns were added or left out).
+* A companion (a list that came with a data file) never replaces the file it came with.
+* The profit center's own aggregates go to ``_agg`` tables, never mixed with transactions.
 
 Files are planned oldest period first (Jan-Jun before Jan-Jul) against a running
 picture of the bronze layer, so several files in one batch with the same schema land in
@@ -74,6 +80,12 @@ class Candidate:
     replaces_ids: tuple[str, ...] = ()
     replace_month: str | None = None
     month_replace_ids: tuple[str, ...] = ()
+    # The profit center's own aggregates: an ``_agg`` table.
+    aggregated: bool = False
+    # Ingestions this file continues (their table is its home), and ingestions it must
+    # never replace (the file a companion came with).
+    home_ids: tuple[str, ...] = ()
+    keep_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -203,11 +215,22 @@ def _suggested(c: Candidate, state: dict[str, _Table]) -> str:
     """The convention's table name; a long-named table made before identifiers were
     hashed with SHA-256 keeps its older (SHA-1) name."""
     source = naming.clean_source_system(c.source_system) or ""
-    name = naming.table_name(source, c.sheet_names, years=_years(c))
+    name = naming.table_name(source, c.sheet_names, years=_years(c), aggregated=c.aggregated)
     if name in state:
         return name
-    legacy = naming.table_name(source, c.sheet_names, years=_years(c), legacy=True)
+    legacy = naming.table_name(source, c.sheet_names, years=_years(c), legacy=True, aggregated=c.aggregated)
     return legacy if legacy in state else name
+
+
+def _home(c: Candidate, state: dict[str, _Table]) -> tuple[str, str] | None:
+    """The table holding the latest of the loads this file continues, and that load's
+    file: where the profit center's earlier months are."""
+    found = [(load[2].end if load[2] else "", name, load[1]) for name, table in state.items()
+             for load in table.loads if load[0] in c.home_ids]
+    if not found:
+        return None
+    _, name, file_name = max(found)
+    return name, file_name
 
 
 def _covered_in_batch(ordered: list[Candidate], state: dict[str, _Table]) -> dict[str, str]:
@@ -230,13 +253,16 @@ def _covered_in_batch(ordered: list[Candidate], state: dict[str, _Table]) -> dic
 def _plan_one(c: Candidate, state: dict[str, _Table], by_hash: dict[str, list[Ingested]],
               seen: dict[tuple, str], covered_by: str | None = None) -> PlanItem:
     source = naming.clean_source_system(c.source_system) or None
-    suggested = _suggested(c, state)
+    home = _home(c, state)
+    suggested = home[0] if home else _suggested(c, state)
     target = naming.identifier(c.table_override) if c.table_override else suggested
     item = PlanItem(
         key=c.key, file_name=c.file_name, source_system=source, sheet_names=list(c.sheet_names),
         rows=c.rows, period=c.period, suggested_table=suggested, table_name=target,
         action=CREATE, allowed_actions=[CREATE, SKIP], columns_after=list(c.columns),
     )
+    if home and not c.table_override and home[0] != _suggested(c, state):
+        item.reasons.append(f"Continues {home[1]} in {home[0]}: the profit center's earlier months are there.")
     if not source:
         item.blockers.append("Enter the source system.")
     if c.period is None:
@@ -372,7 +398,8 @@ def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Tab
     provenance = table.provenance | ({c.provenance} if c.provenance else set())
     comparison = compare(table.columns, incoming, ignore=provenance)
     item.comparison = comparison.as_dict()
-    overlapping = [load for load in table.loads if c.period and load[2] and load[2].overlaps(c.period)]
+    overlapping = [load for load in table.loads if c.period and load[2] and load[2].overlaps(c.period)
+                   and load[0] not in c.keep_ids]
     if c.replace_month:
         # The reviewer chose to replace this month in the loads holding it: they stay.
         overlapping = [load for load in overlapping if load[0] not in c.month_replace_ids]
@@ -475,6 +502,8 @@ def _new_table(item: PlanItem, c: Candidate, state: dict[str, _Table], why: str)
     for name, table in sorted(state.items()):
         if name == base or not prefix or not name.startswith(prefix) or not table.columns:
             continue
+        if name.endswith(naming.AGGREGATE_SUFFIX) != c.aggregated:
+            continue  # aggregates and transactions never share a table
         mapping = _column_map(c, table)
         provenance = table.provenance | ({c.provenance} if c.provenance else set())
         fits = compare(table.columns, [mapping.get(n, n) for n in c.columns], ignore=provenance)

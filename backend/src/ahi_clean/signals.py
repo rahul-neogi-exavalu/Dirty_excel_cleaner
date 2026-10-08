@@ -9,7 +9,16 @@ from __future__ import annotations
 
 from collections import Counter
 
-from .typing_utils import EMPTY, infer_type, is_blank
+from .typing_utils import EMPTY, FLOAT, INT, infer_type, is_blank
+
+# Whole numbers and decimals are one kind of value: a column of amounts holds both (0
+# beside 4036571.14), and telling them apart would split one table at every zero.
+_FAMILY = {INT: "number", FLOAT: "number"}
+
+
+def same_kind(one: str, other: str) -> bool:
+    """Whether two inferred types are the same kind of value."""
+    return _FAMILY.get(one, one) == _FAMILY.get(other, other)
 
 
 def populated(cells) -> list:
@@ -138,7 +147,7 @@ def profile_similarity(left: tuple[str, ...], right: tuple[str, ...]) -> float:
     ]
     if not pairs:
         return 0.0
-    return sum(1 for one, other in pairs if one == other) / len(pairs)
+    return sum(1 for one, other in pairs if same_kind(one, other)) / len(pairs)
 
 
 def textness(cells) -> float:

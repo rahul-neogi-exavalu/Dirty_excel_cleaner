@@ -208,15 +208,15 @@ Step 5 of the UI follows `enhancements/AHI-Bronze-Silver-Scenario-Doc.docx`. It 
 > architecture, the voting matcher, cleansing, and every business requirement mapped to the
 > code and test that satisfies it.
 
-**Stages:** Bronze → **Silver Cleansed** → **Final Silver**, as the document describes. Each bronze table has a source-specific cleansed table of the same name in `AHI_CLEANSED_SCHEMA` (e.g. `ahi_bronze_cleansed.ext_pc0101_arr`): its rows mapped onto the Silver columns and typed, with the load they came from, how the profit center was settled and which values could not be read. Final Silver (`silver_detail`) is loaded from it in the same transaction.
+**Stages:** Bronze → **Silver Cleansed** → **Final Silver**, as the document describes. Each bronze table has a source-specific cleansed table of the same name in `AHI_CLEANSED_SCHEMA` (e.g. `ahi_bronze_cleansed.ext_pc0101_arr`): its rows mapped onto the Silver columns and typed, with the load they came from, how the profit center was settled and which values could not be read. Final Silver (`silver_transaction`) is loaded from it in the same transaction.
 
 **Tables in `AHI_SILVER_SCHEMA`:**
 
 | Table | Holds |
 |---|---|
-| `drt_column_mapping` | The business's DRT column mapping (`profit_center, pc_column, drt_column`) plus `silver_column_name`, the silver_detail column it means. It is seeded from `assets/drt_column_mapping.xlsx` and grows with every approved mapping. `pc_column` is the header as the file wrote it. `drt_column` is the business's DRT column for the row's Silver column (one of the 48 in `<control>.drt_label`). One source column may have two rows (two Silver columns). Ignores are never saved: an ignored column is asked about again next time. |
-| `silver_detail` | **Exactly** the 69 columns of the business's `silver_schema` (`backend/config/silver_columns.csv`), typed as it states. A bronze load's rows are identified by `source_table`, `source_file` and `ingestion_timestamp` (the load's `processing_date`). |
-| `silver_aggregate` | **Exactly** the 75 columns of `silver_aggregate_schema` (`backend/config/silver_aggregate_columns.csv`). It is rebuilt from `silver_detail` per source system at profit center × accounting month grain: sums of premium, fees, commissions and revenue, plus the policy count. Columns the detail cannot supply stay NULL. |
+| `drt_column_mapping` | The business's DRT column mapping (`profit_center, pc_column, drt_column`) plus `silver_column_name`, the silver_transaction column it means. It is seeded from `assets/drt_column_mapping.xlsx` and grows with every approved mapping. `pc_column` is the header as the file wrote it. `drt_column` is the business's DRT column for the row's Silver column (one of the 48 in `<control>.drt_label`). One source column may have two rows (two Silver columns). Ignores are never saved: an ignored column is asked about again next time. |
+| `silver_transaction` | **Exactly** the 69 columns of the business's `silver_schema` (`backend/config/silver_columns.csv`), typed as it states. A bronze load's rows are identified by `source_table`, `source_file` and `ingestion_timestamp` (the load's `processing_date`). |
+| `silver_aggregate` | **Exactly** the 75 columns of `silver_aggregate_schema` (`backend/config/silver_aggregate_columns.csv`). It holds two kinds of rows, told apart by `agg_data_source`: the roll-up of `silver_transaction` (`silver_transaction`), and the profit center's own aggregates, loaded as reported from an `_agg` bronze table (`bronze_aggregate`, `record_grain` `AS_REPORTED`). Rebuilding the roll-up never touches the second kind. The roll-up is rebuilt from `silver_transaction` per source system at profit center × accounting month grain: sums of premium, fees, commissions and revenue, plus the policy count. Columns the detail cannot supply stay NULL. |
 
 **Reference data** (`assets/`, loaded into empty tables on first use; reload with `python backend/tools/seed_reference.py --replace`):
 
@@ -283,7 +283,7 @@ Step 5 of the UI follows `enhancements/AHI-Bronze-Silver-Scenario-Doc.docx`. It 
 python backend/tools/seed_reference.py --add-lotl enhancements/test-files/lotl_seed.csv
 ```
 
-**Loading:** one transaction. It saves the mapping into `drt_column_mapping`, deletes the Silver rows of bronze loads that were replaced (`status='superseded'`, found by table, file and processing date, and by load in their cleansed table), `COPY`s the new rows into the cleansed table, checks the counts per load, inserts them from there into `silver_detail`, rebuilds the aggregate, and sets `ingest.ingestion.silver_status`. A failed run is rolled back and then recorded: `silver_status = 'failed'` on its loads (they stay eligible) and a `silver_run` row with the mapping it tried. `ingest.silver_run` keeps every run with its reviewer and the mapping they approved, including, per row, whether it was the recommendation or a manual choice, and every method's vote.
+**Loading:** one transaction. It saves the mapping into `drt_column_mapping`, deletes the Silver rows of bronze loads that were replaced (`status='superseded'`, found by table, file and processing date, and by load in their cleansed table), `COPY`s the new rows into the cleansed table, checks the counts per load, inserts them from there into `silver_transaction`, rebuilds the aggregate, and sets `ingest.ingestion.silver_status`. A failed run is rolled back and then recorded: `silver_status = 'failed'` on its loads (they stay eligible) and a `silver_run` row with the mapping it tried. `ingest.silver_run` keeps every run with its reviewer and the mapping they approved, including, per row, whether it was the recommendation or a manual choice, and every method's vote.
 
 - **Removal-only runs:** a run with no loads selected is allowed. It only removes the rows of loads replaced in Bronze.
 - **Stale approvals are refused** with `409 plan_changed`. Approval (and the load, under its lock) checks that the loads are still eligible (not replaced in Bronze, not loaded by another run), that the bronze tables' columns are unchanged, and that every mapped Silver column still exists.
@@ -631,7 +631,7 @@ backend/
   tools/ablation.py      disables each signal in turn to show what is load-bearing
   src/ahi_bronze/        File → Bronze rules, pure: naming, periods, schema cases, planner
   src/ahi_silver/        Bronze → Silver rules, pure: voting matcher, AI prompt, cleansing, profit center, hashes
-  config/silver_columns.csv  the 69 silver_detail columns (the business's silver_schema)
+  config/silver_columns.csv  the 69 silver_transaction columns (the business's silver_schema)
   config/silver_aggregate_columns.csv  the 75 silver_aggregate columns
   models/                word2vec vectors (git-ignored)
   tools/make_silver_test_files.py  writes the 10 scenario workbooks

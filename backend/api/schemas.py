@@ -278,10 +278,23 @@ class ValidationOutputUpdate(BaseModel):
     # YYYY-MM (whole months); both null: back to what the data says.
     reporting_start_date: str | None = None
     reporting_end_date: str | None = None
-    # reject | replace (an older year-to-date file) | replace_month (a month already loaded) | null
+    # reject | replace (an older year-to-date file) | replace_month (a month already loaded) |
+    # revise (a file of the same dates, named in replaces_file) | companion (a file that came
+    # with one named in companion_of, kept beside it and joined in Silver) | null
     choice: str | None = None
     # Use the dates the control table lists for this file.
     use_control_dates: bool | None = None
+    # AED | TED | PED: the date column (populated on every row) that decides the reporting
+    # dates and is the file's date_detail; null: back to the priority's.
+    date_role: str | None = None
+    # With choice 'revise': the exact name of the loaded file this one replaces.
+    replaces_file: str | None = None
+    # With choice 'companion': the file it came with -- an output key of this validation, or
+    # the control_id of a loaded file.
+    companion_of: str | None = None
+    # aggregate | transaction: what the table holds, overriding what its shape says; null:
+    # back to the detection.
+    grain: str | None = None
 
 
 class ValidationStage(BaseModel):

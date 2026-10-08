@@ -219,3 +219,40 @@ def test_totals_that_did_not_add_up_are_flagged():
     total = ["Grand Total", None, None, None, 999999.99, None, None, None]
     result = one([HEADER] + records(6) + [total])
     assert "did not add up" in flags_of(result, "premium")
+
+
+def _spaced_report():
+    """A summary laid out for print: a title, the header two blank rows above the records,
+    a blank row after every record, blank spacer columns, and whole numbers beside
+    decimals in the same amount columns (0 next to 4036.57)."""
+    rows = [["Premium Summary by Partner"], ["January 2026"], [], [],
+            ["Partner", "Casualty", None, "Property", None, "Workers Comp", None, "TOTALS"], [], []]
+    for name, casualty, prop, workers in [("Acme Mutual", 9928.42, 5593.17, 443.81), ("Beacon Re", 0, 4036.57, 0),
+                                          ("Crest Casualty", 6538.9, 0, 925.17), ("Delta Fire", 180.61, 0, 6144.33),
+                                          ("Ember Assurance", 5412.53, 3264.44, 801.84)]:
+        rows.append([name, casualty, None, prop, None, workers, None, round(casualty + prop + workers, 2)])
+        rows.append([])
+    return [row + [None] * (8 - len(row)) for row in rows]
+
+
+def test_a_report_spaced_for_print_is_one_table_under_its_header():
+    result = one(_spaced_report())
+    assert result.frame.columns == ["partner", "casualty", "property", "workers_comp", "totals"]
+    assert result.frame.height == 5
+    assert result.frame["partner"].to_list()[1] == "Beacon Re"
+
+
+def test_whole_numbers_and_decimals_are_one_kind_of_value():
+    from ahi_clean import signals
+
+    assert signals.profile_similarity(("text", "int", "float"), ("text", "float", "int")) == 1.0
+    assert signals.profile_similarity(("text", "int"), ("text", "date")) == 0.5
+
+
+def test_a_lone_text_row_heads_only_the_columns_it_sits_over():
+    # Labels over other columns than the rows below fill are a banner, not their header.
+    header = ["Partner", "Casualty", None, None]
+    rows = [["Acme", 10.5, 3.25, 7]] * 3
+    assert not geometry._join_decision([header], rows, 4)[0]
+    assert geometry._join_decision([["Partner", "Casualty", "Property", "Total"]], rows, 4)[0]
+

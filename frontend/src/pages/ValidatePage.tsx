@@ -14,10 +14,12 @@ import {
   DatabaseZap,
   FileSpreadsheet,
   Info,
+  Link2,
   Loader2,
   RefreshCw,
   Rows3,
   ShieldAlert,
+  Sigma,
   Table2,
   TriangleAlert,
   Upload,
@@ -63,9 +65,11 @@ const METHOD_LABEL: Record<string, string> = {
 
 const ROLE_LABEL: Record<DateRole, string> = {
   AED: "Accounting effective date",
-  PED: "Policy effective date",
   TED: "Transaction effective date",
+  PED: "Policy effective date",
 };
+// The business's priority: the first populated on every row decides the reporting dates.
+const DATE_ROLES: DateRole[] = ["AED", "TED", "PED"];
 
 const KEY = "exavalu.validation";
 const toError = (error: unknown) => (error instanceof ApiError ? error : new ApiError(0, { code: "unknown", message: String(error) }));
@@ -576,7 +580,7 @@ function ValidationView({
             )}
           </dl>
           <p className="mt-1 text-caption text-ink-500">
-            Ready tables go to staging; flagged and rejected ones are recorded as REJECTED. One sheet rejected rejects its whole file.
+            Ready tables go to staging; flagged and rejected ones are recorded as REJECTED. A sheet without the required columns is left out on its own; any other rejected sheet rejects its whole file.
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -645,10 +649,13 @@ function ValidationView({
             </Alert>
           )}
           <FileDetails file={file} busy={busy || Boolean(output.staged)} onChange={(change) => onFile(file.job_id, change)} />
-          <RequiredColumns output={output} busy={busy || Boolean(output.staged)} onChange={(mapping) => onOutput(output.key, { mapping })} />
+          <Grain output={output} busy={busy || Boolean(output.staged)} onChange={(grain) => onOutput(output.key, { grain })} />
+          {!output.aggregated && (
+            <RequiredColumns output={output} busy={busy || Boolean(output.staged)} onChange={(mapping) => onOutput(output.key, { mapping })} />
+          )}
           <div className={clsx("grid gap-6", bodyWidth >= SPLIT_DATES_AT ? "grid-cols-[minmax(0,2fr)_minmax(0,1fr)]" : "grid-cols-[minmax(0,1fr)]")}>
             <ReportingDates output={output} busy={busy || Boolean(output.staged)} onChange={(change) => onOutput(output.key, change)} />
-            <AgainstBronze output={output} busy={busy || Boolean(output.staged)} onChoose={(choice) => onOutput(output.key, { choice })} />
+            <AgainstBronze output={output} busy={busy || Boolean(output.staged)} onChange={(change) => onOutput(output.key, change)} />
           </div>
         </div>
 
@@ -1001,32 +1008,39 @@ function ReportingDates({ output, busy, onChange }: { output: ValidationOutput; 
     if (!nextStart && !nextEnd) return;
     onChange({ reporting_start_date: nextStart || nextEnd, reporting_end_date: nextEnd || nextStart });
   };
-  const roles: DateRole[] = ["AED", "PED", "TED"];
-  const editable = !output.date_detail || output.flag || output.entered || output.use_control_dates;
+  const editable = !output.date_detail || output.flag || output.entered || output.use_control_dates || output.date_role;
+  // The column deciding the dates: picked by the reviewer, or the priority's own.
+  const deciding = output.origin === "picked" || DATE_ROLES.includes(output.origin as DateRole) ? output.date_detail : null;
   return (
     <section aria-labelledby={`dates-${output.key}`}>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <h3 id={`dates-${output.key}`} className="flex items-center gap-2 text-card text-ink-900"><CalendarRange className="h-4 w-4 text-ink-500" aria-hidden />Reporting dates</h3>
-        <span className="text-caption text-ink-500">AED, then PED, then TED: the first populated on every row decides</span>
+        <span className="text-caption text-ink-500">AED, then TED, then PED: the first populated on every row decides. Any other populated on every row can be used instead.</span>
       </div>
       <div className="overflow-hidden rounded-lg border border-ink-200">
         <div className="relative overflow-x-auto scroll-thin">
-          <table className="w-full min-w-[500px] border-collapse text-table">
-            <caption className="sr-only">How populated each date column is</caption>
+          <table className="w-full min-w-[640px] border-collapse text-table">
+            <caption className="sr-only">How populated each date column is, the months it spans, and which one decides the reporting dates</caption>
             <thead className="bg-ink-50">
               <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
                 <th scope="col" className="px-3 py-2">Date</th>
                 <th scope="col" className="px-2.5 py-2">File column</th>
                 <th scope="col" className="px-2.5 py-2 text-right">Populated</th>
                 <th scope="col" className="px-2.5 py-2 text-right">Unreadable</th>
-                <th scope="col" className="px-3 py-2">Months</th>
+                <th scope="col" className="px-2.5 py-2">Months</th>
+                <th scope="col" className="px-2.5 py-2">Period</th>
+                <th scope="col" className="px-3 py-2 text-center">Use</th>
               </tr>
             </thead>
             <tbody>
-              {roles.map((role) => {
+              {DATE_ROLES.map((role) => {
                 const stat = output.dates[role];
-                const chosen = output.date_detail === role;
+                const range = output.date_roles?.[role];
+                const chosen = deciding === role;
                 const header = stat.column ? output.columns.find((column) => column.name === stat.column || column.original === stat.column)?.header ?? stat.column : null;
+                const why = !stat.column ? "Not mapped to a file column" : !stat.complete
+                  ? `Populated on ${formatNumber(stat.populated)} of ${formatNumber(stat.rows)} rows: only a date column populated on every row can decide`
+                  : chosen ? "Decides the reporting dates" : `Use ${role}'s months as the reporting dates`;
                 return (
                   <tr key={role} className={clsx("border-b border-ink-100 last:border-0", chosen && "bg-emerald-50/60")}>
                     <td className="px-3 py-1.5">
@@ -1034,7 +1048,7 @@ function ReportingDates({ output, busy, onChange }: { output: ValidationOutput; 
                         <Badge tone={chosen ? "success" : "neutral"} className="!px-1.5 !py-0 !text-[10px]">{role}</Badge>
                         <span className="text-ink-800">{ROLE_LABEL[role]}</span>
                       </span>
-                      {chosen && <span className="block text-caption font-medium text-emerald-700">Decides the reporting dates</span>}
+                      {chosen && <span className="block text-caption font-medium text-emerald-700">{output.origin === "picked" ? "Picked by you" : "Decides the reporting dates"}</span>}
                     </td>
                     <td className="max-w-[140px] truncate px-2.5 py-1.5 text-ink-700" title={header ?? undefined}>{header ?? <span className="text-ink-300">not found</span>}</td>
                     <td className={clsx("num px-2.5 py-1.5 text-right", stat.complete ? "text-emerald-700" : stat.column ? "text-amber-700" : "text-ink-300")}>
@@ -1046,7 +1060,19 @@ function ReportingDates({ output, busy, onChange }: { output: ValidationOutput; 
                       ) : "—"}
                     </td>
                     <td className="num px-2.5 py-1.5 text-right text-ink-700">{stat.column ? formatNumber(stat.invalid) : "—"}</td>
-                    <td className="num whitespace-nowrap px-3 py-1.5 text-ink-700">{stat.first ? monthSpan(stat.first, stat.last) : "—"}</td>
+                    <td className="num whitespace-nowrap px-2.5 py-1.5 text-ink-700">{stat.first ? monthSpan(stat.first, stat.last) : "—"}</td>
+                    <td className="whitespace-nowrap px-2.5 py-1.5">
+                      {range ? (
+                        range.period_type ? <Badge tone="success" className="!py-0">{range.period_type === "YTD" ? "Year to date" : "Monthly"}</Badge>
+                          : <span title={range.flag ?? undefined}><Badge tone="warning" className="!py-0">Neither</Badge></span>
+                      ) : <span className="text-ink-300">—</span>}
+                    </td>
+                    <td className="px-3 py-1.5 text-center">
+                      <input type="radio" name={`date-role-${output.key}`} checked={chosen} title={why} aria-label={`${ROLE_LABEL[role]}: ${why}`}
+                        disabled={busy || !stat.complete || Boolean(output.staged)}
+                        onChange={() => onChange({ date_role: role })}
+                        className="h-4 w-4 cursor-pointer accent-emerald-600 disabled:cursor-not-allowed disabled:opacity-40" />
+                    </td>
                   </tr>
                 );
               })}
@@ -1073,8 +1099,7 @@ function ReportingDates({ output, busy, onChange }: { output: ValidationOutput; 
       </div>
       <p className="mt-2 text-caption text-ink-500">
         {output.reporting_start_date
-          ? `${dayLabel(output.reporting_start_date)} – ${dayLabel(output.reporting_end_date)} · ${
-            output.origin === "entered" ? "entered by you" : output.origin === "control" ? "from the control table" : `from ${output.origin} (${ROLE_LABEL[output.origin as DateRole]})`}. Whole months.`
+          ? `${dayLabel(output.reporting_start_date)} – ${dayLabel(output.reporting_end_date)} · ${datesOrigin(output)}. Whole months.`
           : "No date column is populated on every row: enter the months this file reports."}
       </p>
       {output.flag && <Alert tone="warning" className="mt-3" title="Neither year-to-date nor monthly">{output.flag}</Alert>}
@@ -1084,9 +1109,9 @@ function ReportingDates({ output, busy, onChange }: { output: ValidationOutput; 
             Use the control table's {monthLabel(output.listed.start)} – {monthLabel(output.listed.end)}
           </Button>
         )}
-        {(output.entered || output.use_control_dates) && (
+        {(output.entered || output.use_control_dates || output.date_role) && (
           <Button size="sm" variant="ghost" icon={<RefreshCw />} disabled={busy}
-            onClick={() => onChange(output.use_control_dates ? { use_control_dates: false } : { reporting_start_date: null, reporting_end_date: null })}>
+            onClick={() => onChange(output.date_role ? { date_role: null } : output.use_control_dates ? { use_control_dates: false } : { reporting_start_date: null, reporting_end_date: null })}>
             Back to the data's dates
           </Button>
         )}
@@ -1095,10 +1120,24 @@ function ReportingDates({ output, busy, onChange }: { output: ValidationOutput; 
   );
 }
 
+/** Where the reporting dates came from, and the date column (date_detail) they are the range of. */
+function datesOrigin(output: ValidationOutput): string {
+  const detail = output.date_detail;
+  if (output.origin === "sheets") return "from the month each sheet names";
+  if (output.origin === "file_name") return "from the file name";
+  if (output.origin === "companion") return `the reporting dates of ${output.companion?.label ?? "the file it came with"}`;
+  const range = detail ? `${detail}'s range` : "matches no date column, so date_detail stays blank";
+  if (output.origin === "picked" && detail) return `from ${detail} (${ROLE_LABEL[detail]}), picked by you`;
+  if (output.origin === "entered") return `entered by you · ${range}`;
+  if (output.origin === "control") return `from the control table · ${range}`;
+  return detail ? `from ${detail} (${ROLE_LABEL[detail]})` : "";
+}
+
 /* ---- against bronze ------------------------------------------------------- */
 
-function AgainstBronze({ output, busy, onChoose }: { output: ValidationOutput; busy: boolean; onChoose: (choice: ValidationChoice | null) => void }) {
+function AgainstBronze({ output, busy, onChange }: { output: ValidationOutput; busy: boolean; onChange: (change: OutputChange) => void }) {
   const action = output.action;
+  const onChoose = (choice: ValidationChoice | null) => onChange({ choice });
   return (
     <section aria-labelledby={`bronze-${output.key}`}>
       <h3 id={`bronze-${output.key}`} className="mb-3 flex items-center gap-2 text-card text-ink-900"><DatabaseZap className="h-4 w-4 text-ink-500" aria-hidden />Against Bronze</h3>
@@ -1115,13 +1154,16 @@ function AgainstBronze({ output, busy, onChoose }: { output: ValidationOutput; b
 
         {output.compare && <Comparison compare={output.compare} />}
 
+        {output.schema && <SchemaChangeView schema={output.schema} />}
+        {output.companions.length > 0 && (
+          <p className="mt-2 flex items-center gap-1.5 text-caption text-ink-600">
+            <Link2 className="h-3.5 w-3.5 text-ink-500" aria-hidden />
+            Came with <span className="font-medium text-ink-800">{output.companions.join(", ")}</span>: the required columns are checked across {output.pair}.
+          </p>
+        )}
+
         {(output.options.length > 0 || output.choice) && !output.staged && (
           <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="What happens to this file">
-            {output.options.includes("replace_month") && (
-              <Button size="sm" variant={output.choice === "replace_month" ? "primary" : "secondary"} disabled={busy} onClick={() => onChoose("replace_month")}>
-                Replace {monthLabel(output.compare ? `${output.compare.month}-01` : output.reporting_start_date)}
-              </Button>
-            )}
             {output.options.includes("replace") && (
               <Button size="sm" variant={output.choice === "replace" ? "primary" : "secondary"} disabled={busy} onClick={() => onChoose("replace")}>
                 Replace the newer file
@@ -1131,6 +1173,12 @@ function AgainstBronze({ output, busy, onChoose }: { output: ValidationOutput; b
               <Button size="sm" variant="ghost" disabled={busy} onClick={() => onChoose(null)}>Undo</Button>
             )}
           </div>
+        )}
+        {(output.options.includes("revise") || output.choice === "revise") && !output.staged && (
+          <RevisionOf output={output} busy={busy} onRevise={(name) => onChange({ choice: "revise", replaces_file: name })} />
+        )}
+        {(output.options.includes("companion") || output.choice === "companion") && !output.staged && output.partners.length + (output.companion ? 1 : 0) > 0 && (
+          <CompanionOf output={output} busy={busy} onPick={(ref) => onChange({ choice: "companion", companion_of: ref })} />
         )}
         {!output.staged && (
           <div className="mt-4 border-t border-ink-100 pt-3">
@@ -1143,6 +1191,178 @@ function AgainstBronze({ output, busy, onChoose }: { output: ValidationOutput; b
         )}
       </div>
     </section>
+  );
+}
+
+/** A file that came with another of the same profit center (a broker list beside the transactions). */
+function CompanionOf({ output, busy, onPick }: { output: ValidationOutput; busy: boolean; onPick: (ref: string) => void }) {
+  const choices = output.companion && !output.partners.some((item) => item.ref === output.companion?.ref)
+    ? [output.companion, ...output.partners] : output.partners;
+  return (
+    <fieldset className="mt-4 rounded-lg border border-ink-200 bg-ink-50/60 p-3">
+      <legend className="px-1 text-caption font-semibold text-ink-700">Companion of</legend>
+      <p className="mb-2 text-caption text-ink-500">
+        A file of this profit center received with it. The two are checked together for the required columns, it takes
+        that file's reporting dates, and Silver joins them on the keys you confirm there.
+      </p>
+      <div className="space-y-1.5">
+        {choices.map((partner) => {
+          const on = output.choice === "companion" && output.companion_of === partner.ref;
+          return (
+            <label key={partner.ref} className={clsx("flex cursor-pointer items-center gap-2.5 rounded-md border bg-white px-3 py-2",
+              on ? "border-brand-400 ring-2 ring-brand-100" : "border-ink-200 hover:border-ink-300")}>
+              <input type="radio" name={`companion-${output.key}`} checked={on} disabled={busy} onChange={() => onPick(partner.ref)}
+                aria-label={`Companion of ${partner.label}`} className="h-4 w-4 accent-brand-600" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-body font-medium text-ink-900" title={partner.label}>{partner.label}</span>
+                <span className="block text-caption text-ink-500">
+                  {partner.loaded ? "Already in Bronze" : "In this batch"}
+                  {partner.start ? ` · ${monthSpan(partner.start, partner.end ?? partner.start)}` : ""}
+                </span>
+              </span>
+            </label>
+          );
+        })}
+      </div>
+    </fieldset>
+  );
+}
+
+const SCHEMA_KIND: Record<string, { label: string; tone: Tone; note: string }> = {
+  identical: { label: "Same columns", tone: "success", note: "Appends as it is." },
+  reordered: { label: "Same columns, other order", tone: "info", note: "Reordered to the table's order before loading." },
+  evolved: { label: "Columns added or missing", tone: "warning", note: "The table evolves at Ingest (you confirm it there)." },
+  different: { label: "Different columns", tone: "danger", note: "Too different to share a table: Ingest offers a table of its own." },
+};
+
+/** This table's columns against the file it continues in Bronze. */
+function SchemaChangeView({ schema }: { schema: NonNullable<ValidationOutput["schema"]> }) {
+  const kind = SCHEMA_KIND[schema.kind] ?? SCHEMA_KIND.different;
+  return (
+    <div className="mt-3 rounded-lg border border-ink-200 bg-ink-50/60 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-caption font-semibold text-ink-700">Columns against {schema.against}</span>
+        <Badge tone={kind.tone}>{kind.label}</Badge>
+        {schema.reordered && schema.kind === "evolved" && <Badge tone="neutral">Reordered too</Badge>}
+      </div>
+      <p className="mt-1 text-caption text-ink-500">{kind.note}</p>
+      {schema.added.length > 0 && (
+        <p className="mt-2 flex flex-wrap items-center gap-1.5 text-caption text-ink-600">
+          <span className="font-medium text-emerald-700">New here:</span>
+          {schema.added.map((name) => <span key={name} className="rounded border border-emerald-200 bg-emerald-50 px-1.5 font-mono text-[11.5px] text-emerald-800">{name}</span>)}
+        </p>
+      )}
+      {schema.missing.length > 0 && (
+        <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-caption text-ink-600">
+          <span className="font-medium text-amber-700">Not in this file:</span>
+          {schema.missing.map((name) => <span key={name} className="rounded border border-amber-200 bg-amber-50 px-1.5 font-mono text-[11.5px] text-amber-800">{name}</span>)}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * What the table holds: transactions, or figures the profit center already aggregated (a summary).
+ * Told by its shape -- totals, mostly amounts, no transaction key or dates -- and the reviewer's to
+ * correct. Aggregates are not held to the transaction columns, are dated by their sheets or the file
+ * name, and go to silver_aggregate.
+ */
+function Grain({ output, busy, onChange }: { output: ValidationOutput; busy: boolean; onChange: (grain: "aggregate" | "transaction" | null) => void }) {
+  const grain = output.grain;
+  const detected = grain.aggregated;
+  const overridden = grain.override !== null;
+  if (!output.aggregated) {
+    return (
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-caption text-ink-500">
+        <Rows3 className="h-3.5 w-3.5" aria-hidden />
+        Transactions{overridden ? " (your call)" : ""}: checked against the business's required columns, loaded into silver_transaction.
+        {!output.staged && (
+          <button type="button" disabled={busy} onClick={() => onChange(overridden ? null : "aggregate")}
+            className="rounded font-medium text-brand-700 underline decoration-dotted underline-offset-2 hover:text-brand-800 disabled:opacity-50">
+            {overridden ? "Back to what the shape says" : "These are aggregated figures"}
+          </button>
+        )}
+      </p>
+    );
+  }
+  return (
+    <section aria-labelledby={`grain-${output.key}`} className="rounded-lg border border-amber-200 bg-amber-50/50 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 id={`grain-${output.key}`} className="flex items-center gap-2 text-card text-ink-900">
+            <Sigma className="h-4 w-4 text-amber-700" aria-hidden />Aggregated figures{overridden ? " (your call)" : ""}
+          </h3>
+          <p className="mt-1 text-caption text-ink-600">
+            The profit center sent figures it already aggregated, not transactions. The control table flags it, it loads into an
+            <span className="font-mono"> _agg</span> bronze table, and from there into silver_aggregate as reported. The transaction columns do not apply.
+          </p>
+        </div>
+        {!output.staged && (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => onChange(overridden ? null : "transaction")}>
+            {overridden ? "Back to what the shape says" : "These are transactions"}
+          </Button>
+        )}
+      </div>
+      <ul className="mt-3 grid gap-1.5 sm:grid-cols-2">
+        {grain.signals.map((signal) => (
+          <li key={signal.id} className="flex items-start gap-2 text-caption">
+            {signal.ok ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" aria-hidden /> : <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-400" aria-hidden />}
+            <span><span className="font-medium text-ink-800">{signal.label}.</span> <span className="text-ink-600">{signal.detail}</span></span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-3 text-caption text-ink-500">
+        {grain.dimensions.length > 0 && <>Grouped by <span className="font-mono text-ink-700">{grain.dimensions.join(", ")}</span>. </>}
+        {grain.measures.length > 0 && <>Amounts: <span className="font-mono text-ink-700">{grain.measures.join(", ")}</span>. </>}
+        {!detected && "Its shape alone would say transactions."}
+      </p>
+    </section>
+  );
+}
+
+/** A revision replaces the loaded file the reviewer names, exactly as the control table has it. */
+function RevisionOf({ output, busy, onRevise }: { output: ValidationOutput; busy: boolean; onRevise: (name: string) => void }) {
+  const [name, setName] = useState(output.replaces_file ?? "");
+  useEffect(() => setName(output.replaces_file ?? ""), [output.replaces_file]);
+  const listId = `revisable-${output.key}`;
+  const applied = output.choice === "revise" && output.replaces_file === name.trim();
+  return (
+    <form className="mt-4 rounded-lg border border-ink-200 bg-ink-50/60 p-3"
+      onSubmit={(event) => { event.preventDefault(); if (name.trim()) onRevise(name.trim()); }}>
+      <label htmlFor={`revise-${output.key}`} className="block text-caption font-semibold text-ink-700">Revision of</label>
+      <p className="mb-2 text-caption text-ink-500">
+        The exact name of the loaded file this one replaces. It is looked up in the control table among this profit
+        center's loaded files sharing a month with these dates.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input id={`revise-${output.key}`} list={listId} value={name} disabled={busy} spellCheck={false} autoComplete="off"
+          onChange={(event) => setName(event.target.value)} placeholder={output.revisable[0]?.file_name ?? "File name"}
+          className={clsx(input, "min-w-0 flex-1 font-mono text-[12.5px]", applied ? "border-emerald-400" : "border-ink-200")} />
+        <datalist id={listId}>
+          {output.revisable.map((item) => (
+            <option key={item.control_id} value={item.file_name}>
+              {monthSpan(item.start, item.end)}{item.rows !== null ? ` · ${formatNumber(item.rows)} rows` : ""}
+            </option>
+          ))}
+        </datalist>
+        <Button size="sm" type="submit" variant={applied ? "secondary" : "primary"} disabled={busy || !name.trim() || applied}>
+          {applied ? "Replaces it" : "Replace this file"}
+        </Button>
+      </div>
+      {output.revisable.length > 0 && (
+        <ul className="mt-2 flex flex-wrap gap-1.5" aria-label="Loaded files of these dates">
+          {output.revisable.map((item) => (
+            <li key={item.control_id}>
+              <button type="button" disabled={busy} onClick={() => setName(item.file_name)}
+                className="rounded-md border border-ink-200 bg-white px-2 py-0.5 font-mono text-[11.5px] text-ink-700 hover:border-brand-300 hover:text-ink-900 disabled:opacity-50">
+                {item.file_name} <span className="font-sans text-ink-400">· {monthSpan(item.start, item.end)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </form>
   );
 }
 
@@ -1163,8 +1383,8 @@ function Comparison({ compare }: { compare: NonNullable<ValidationOutput["compar
               <th scope="col" className="px-3 py-2 text-right">Rows</th>
               <th scope="col" className="px-3 py-2 text-right">Columns</th>
               <th scope="col" className="px-3 py-2 text-right">AED</th>
-              <th scope="col" className="px-3 py-2 text-right">PED</th>
               <th scope="col" className="px-3 py-2 text-right">TED</th>
+              <th scope="col" className="px-3 py-2 text-right">PED</th>
             </tr>
           </thead>
           <tbody>
@@ -1177,8 +1397,8 @@ function Comparison({ compare }: { compare: NonNullable<ValidationOutput["compar
                 <td className="num px-3 py-2 text-right">{row.rows === null || row.rows === undefined ? "—" : formatNumber(row.rows)}</td>
                 <td className="num px-3 py-2 text-right">{row.columns ?? "—"}</td>
                 <td className="num px-3 py-2 text-right">{percent(row.AED)}</td>
-                <td className="num px-3 py-2 text-right">{percent(row.PED)}</td>
                 <td className="num px-3 py-2 text-right">{percent(row.TED)}</td>
+                <td className="num px-3 py-2 text-right">{percent(row.PED)}</td>
               </tr>
             ))}
           </tbody>

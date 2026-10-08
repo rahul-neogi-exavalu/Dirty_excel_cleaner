@@ -433,8 +433,51 @@ export type ProcessingAction = "INSERT" | "APPEND" | "REJECTED";
 /** What Validate decided; DECIDE: the reviewer has to choose first. */
 export type ValidationAction = ProcessingAction | "DECIDE";
 export type Verdict = "ready" | "needs_input" | "flagged" | "rejected";
-/** The reviewer's choices: reject, replace (an older year-to-date file), replace_month (a month already loaded). */
-export type ValidationChoice = "reject" | "replace" | "replace_month";
+/**
+ * The reviewer's choices: reject; replace (an older year-to-date file); revise (a file of the same
+ * dates, named in replaces_file); companion (a file that came with another, named in companion_of).
+ * replace_month is what earlier stagings recorded (a month already loaded is now rejected).
+ */
+export type ValidationChoice = "reject" | "replace" | "replace_month" | "revise" | "companion";
+
+/** A file this one may be a companion of: in the same batch (ref: its output key) or loaded (ref: control:<id>). */
+export interface ValidationPartner {
+  ref: string;
+  file_name: string;
+  sheet_name: string | null;
+  loaded: boolean;
+  start: string | null;
+  end: string | null;
+  /** The file (and its sheet, when it has several tables). */
+  label: string;
+}
+
+/** What a table holds, told by its shape: transactions, or figures the profit center already aggregated. */
+export interface ValidationGrain {
+  aggregated: boolean;
+  signals: FitnessCheck[];
+  /** A column totalling others (TOTALS), and the columns it totals. */
+  total_column: string | null;
+  parts: string[];
+  /** Rows totalling the other rows of their sheet. */
+  total_rows: number;
+  measures: string[];
+  dimensions: string[];
+  /** The reviewer's word, over the detection. */
+  override: "aggregate" | "transaction" | null;
+}
+
+/** This table's columns against the file it continues in Bronze. */
+export interface SchemaChange {
+  against: string;
+  control_id: number;
+  kind: "identical" | "reordered" | "evolved" | "different";
+  /** In this file, not in the earlier one: the table gains them. */
+  added: string[];
+  /** In the earlier file, not in this one: left empty for this file. */
+  missing: string[];
+  reordered: boolean;
+}
 
 export interface ValidationFile {
   job_id: string;
@@ -472,6 +515,14 @@ export interface RequiredColumn {
   vote: { methods: MatchMethod[]; method: MatchMethod | "reviewer" | null; score: number | null; reason: string } | null;
   options: { column: string; methods: MatchMethod[]; score: number }[];
   reviewer: boolean;
+}
+
+export interface DateRange {
+  start: string;
+  end: string;
+  period_type: ReportingPeriodType | null;
+  /** Why the range is neither year-to-date nor monthly. */
+  flag: string | null;
 }
 
 export interface DateStat {
@@ -522,8 +573,17 @@ export interface ValidationOutput {
   checks: FitnessCheck[];
   fitness: number;
   dates: Record<DateRole, DateStat>;
+  /** The date column the reporting dates are the range of: the control table's date_detail. */
   date_detail: DateRole | null;
-  origin: DateRole | "entered" | "control" | null;
+  /**
+   * A date column (AED / TED / PED); picked: the reviewer's pick; entered / control: dates set by hand;
+   * sheets / file_name: an aggregated file's months; companion: the dates of the file it came with.
+   */
+  origin: DateRole | "picked" | "entered" | "control" | "sheets" | "file_name" | "companion" | null;
+  /** The date column the reviewer picked to decide the dates, if they did. */
+  date_role: DateRole | null;
+  /** Each date column populated on every row (so it may decide): its whole months, and YTD / monthly / neither. */
+  date_roles: Partial<Record<DateRole, DateRange>>;
   flag: string | null;
   period_type: ReportingPeriodType | null;
   reporting_start_date: string | null;
@@ -536,6 +596,27 @@ export interface ValidationOutput {
   options: ValidationChoice[];
   confirm: boolean;
   file_replaced: string | null;
+  /** The loaded file this revision replaces, as named (choice revise). */
+  replaces_file: string | null;
+  /** The loaded files of this profit center sharing a month with these dates: what a revision may name. */
+  revisable: { control_id: number; file_name: string; start: string; end: string; period_type: ReportingPeriodType | null; rows: number | null }[];
+  /** The profit center's own aggregates (to silver_aggregate), not transactions. */
+  aggregated: boolean;
+  grain: ValidationGrain;
+  /** An aggregated file's sheets and the month each names. */
+  sheet_months: Record<string, string> | null;
+  /** The loaded files this month is appended after, in their bronze table. */
+  appends_to: { control_id: number; file_name: string; start: string; end: string }[];
+  /** Columns against the file it continues (appended after, or replacing). */
+  schema: SchemaChange | null;
+  /** The file this one is a companion of (choice companion), and the files that are its companions. */
+  companion_of: string | null;
+  companion: ValidationPartner | null;
+  companions: string[];
+  /** The files of this profit center that came with it: what it may be a companion of. */
+  partners: ValidationPartner[];
+  /** The pair checked together, e.g. "Transactional.xlsx + BrokerList.xlsx". */
+  pair: string | null;
   replace_month: string | null;
   compare: {
     month: string;
@@ -641,7 +722,7 @@ export interface ControlRow {
 /* ---- Silver ---------------------------------------------------------------- */
 
 /** A matching method; each one votes independently on every bronze column. */
-export type MatchMethod = "saved" | "exact" | "fuzzy" | "semantic" | "ai";
+export type MatchMethod = "saved" | "exact" | "fuzzy" | "semantic" | "ai" | "overlap";
 /** How the current choice was made: pre-selected from the votes, by the reviewer, or not yet. */
 export type MappingSelection = "recommended" | "manual" | "none";
 
@@ -677,7 +758,7 @@ export interface SilverColumnDef {
 
 export interface SilverCatalog {
   file: string;
-  /** Every silver_detail column, in table order. */
+  /** Every silver_transaction column, in table order. */
   columns: SilverColumnDef[];
   aggregate_columns: string[];
   semantic: boolean;
@@ -703,6 +784,8 @@ export interface EligibleLoad {
   reporting_start_date: string | null;
   reporting_end_date: string | null;
   reporting_period_type: ReportingPeriodType | null;
+  /** The profit center's own aggregates: loaded into silver_aggregate. */
+  aggregated: boolean;
 }
 
 export interface CleanupLoad {
@@ -737,7 +820,65 @@ export interface SilverQuality {
   rows: number;
   invalid_values: Record<string, number>;
   profit_center: Record<string, number>;
-  unmapped_silver_columns: string[];
+  unmapped_silver_columns?: string[];
+  /** Aggregated tables: rows loaded (after the unpivot), roll-up rows left out, each measure's total. */
+  rows_loaded?: number;
+  rollup_rows?: number;
+  measures?: Record<string, number>;
+  dimensions?: string[];
+}
+
+/** An aggregated table's columns that are one measure across a dimension: their headers are its values. */
+export interface SilverSpread {
+  columns: string[];
+  measure: string | null;
+  /** The aggregate column the headers fill; null: the next aggregation_dimension slot, named ``label``. */
+  dimension: string | null;
+  label: string;
+}
+
+export interface SilverJoinStats {
+  rows: number;
+  joined: number;
+  matched: number;
+  unmatched: number;
+  /** Key values repeated in the joined table (each would count its rows twice). */
+  duplicates: { key: string; rows: number }[];
+  repeated_keys: number;
+}
+
+export type SilverJoinHow = "left" | "right" | "inner";
+
+/** A join with the table of a file that came with this one. */
+export interface SilverJoin {
+  table: string;
+  columns: string[];
+  how: "left" | "inner";
+  ignore_case: boolean;
+  /** As the reviewer asked for it (a right join is held the other way round). */
+  asked: { left_table: string; right_table: string; how: SilverJoinHow; keys: [string, string][] };
+  stats: SilverJoinStats | Record<string, never>;
+}
+
+/** A suggested key: this table's column, the other's, and why. */
+export interface SilverKeyPair {
+  left: string;
+  right: string;
+  methods: MatchMethod[];
+  /** Share of the left column's values found in the right column. */
+  overlap: number | null;
+  /** Share of the right column's values that are distinct. */
+  unique: number | null;
+}
+
+/** Two tables of files that came together (a companion and the file it came with). */
+export interface SilverLink {
+  left_table: string;
+  right_table: string;
+  pairs: [string, string][];
+  keys: SilverKeyPair[];
+  /** A join approved before for these two tables was made again. */
+  saved: boolean;
 }
 
 /** One DRT column of a review, from the Silver side: the bronze column that loads it, or none. */
@@ -760,8 +901,20 @@ export interface SilverTableReview {
   loads: { ingestion_id: string; file_name: string; rows: number; period_start: string | null; period_end: string | null }[];
   quality: SilverQuality;
   mapping: SilverMappingRow[];
-  /** The same review from the Silver side: every DRT column, in table order. */
+  /** The same review from the Silver side: every DRT column (an aggregated table: every aggregate column). */
   targets: SilverPick[];
+  /** The profit center's own aggregates: mapped onto silver_aggregate. */
+  aggregated: boolean;
+  spread: SilverSpread | null;
+  /** Columns totalling others: roll-ups, left out. */
+  rollups: string[];
+  /** The cleaner's sheet column (each row's sheet): lineage, never mapped. */
+  lineage: string[];
+  join: SilverJoin | null;
+  /** The table this one is joined into: it is not loaded on its own. */
+  joined_into: string | null;
+  /** The columns mapped: the table's own, then a joined table's, prefixed with its name. */
+  columns: string[];
 }
 
 export interface SilverRun {
@@ -777,6 +930,9 @@ export interface SilverRun {
   blockers: string[];
   result: { rows_loaded?: number; rows_removed?: number; mappings_saved?: number };
   tables: SilverTableReview[];
+  /** What an aggregated table's columns can be mapped onto. */
+  aggregate_targets: { name: string; measure: boolean }[];
+  links: SilverLink[];
 }
 
 /** A row of the business's DRT column mapping. One source column can have two rows. */
