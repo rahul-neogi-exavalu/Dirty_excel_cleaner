@@ -256,3 +256,22 @@ def test_a_lone_text_row_heads_only_the_columns_it_sits_over():
     assert not geometry._join_decision([header], rows, 4)[0]
     assert geometry._join_decision([["Partner", "Casualty", "Property", "Total"]], rows, 4)[0]
 
+
+
+def test_a_record_of_zeros_under_the_header_is_data_not_a_second_header():
+    rows = _spaced_report()
+    rows[7] = ["Zero Mutual", 0, None, 0, None, 0, None, 0]  # the first record: all zeros
+    result = one(rows)
+    assert result.frame.columns == ["partner", "casualty", "property", "workers_comp", "totals"]
+    assert result.frame["partner"].to_list()[0] == "Zero Mutual"
+
+
+def test_a_zero_amount_is_not_a_leading_zero():
+    assert coerce.code_shape(["0", "2525600", "0", "11425000"]) is None
+    assert coerce.code_shape(["08085", "10001", "33101"]) == coerce.LEADING_ZERO
+
+
+def test_an_amount_column_of_zeros_and_decimals_is_one_type():
+    from ahi_clean import typing_utils
+
+    assert typing_utils.homogeneity([0, 4036571.14, 0, 2525600]) == 1.0

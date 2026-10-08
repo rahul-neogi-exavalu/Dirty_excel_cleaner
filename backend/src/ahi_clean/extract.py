@@ -224,6 +224,13 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
     width = max((len(row) for row in rows), default=0)
 
     found = header_mod.find_header(rows, width, styles)
+    orientation = trace.get("orientation") or {}
+    if (orientation.get("decided_by") == "shape" and orientation.get("orientation") == "normal"
+            and found.detected and found.score >= HEADER_LOW_CONFIDENCE):
+        # The shape's call is confirmed by the reading it gives: a clear row of labels
+        # over the columns. Only an upright call is confirmed this way -- a header found
+        # after a flip could be the entity names of a lookup.
+        orientation.update(confident=True, decided_by="shape_and_header")
     trace["header"] = {
         "row_index": found.row_index,
         "detected": found.detected,

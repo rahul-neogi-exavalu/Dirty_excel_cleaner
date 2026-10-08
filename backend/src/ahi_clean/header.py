@@ -21,6 +21,8 @@ SEARCH_DEPTH = 20
 HEADER_THRESHOLD = 0.55
 SECOND_ROW_THRESHOLD = 0.55
 SECOND_ROW_CONTRAST = 0.5
+# Share of a second header row's cells that must be text (labels, not figures).
+SECOND_ROW_TEXTNESS = 0.5
 EMPHASIS_BONUS = 0.15
 
 # Content signals sum to 1.0 so that a file with no formatting is still fully scored.
@@ -127,9 +129,12 @@ def find_header(rows, width: int, styles=None) -> HeaderResult:
         # which would swallow the first record of every such file. A real second
         # header row also *contrasts* with the data beneath it -- labels above numbers
         # and dates -- while a data row looks exactly like its neighbours.
+        # And it is labels: a row that is mostly numbers (a record of zeros under its
+        # name, common in summaries) is data, however much it contrasts.
         if (
             second_score >= SECOND_ROW_THRESHOLD
             and second_parts.get("contrast", 0.0) >= SECOND_ROW_CONTRAST
+            and signals.textness(rows[best_index + 1]) >= SECOND_ROW_TEXTNESS
         ):
             labels = _merge_label_rows(labels, rows[best_index + 1])
             written = _written_labels(rows[best_index], rows[best_index + 1])
