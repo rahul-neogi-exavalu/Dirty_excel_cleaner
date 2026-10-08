@@ -10,8 +10,6 @@ const LABEL_WIDTH = 88;
 const CELL_CHROME = 2 * 14 + 1;
 /** Room left over a measured width, for rounding and font hinting. */
 const SAFETY = 10;
-/** How far a column of the last, part-filled band stretches past its content. */
-const MAX_STRETCH = 96;
 /** The fewest bands a page shows, however short the screen: more where they fit. */
 const MIN_BANDS = 3;
 
@@ -73,29 +71,19 @@ interface Band<T> {
 }
 
 /**
- * Columns auto-fitted like a spreadsheet's: as many go in a band as fit at the width
- * their content needs, so every name shows whole on one line. A full band shares its
- * spare width out evenly; the last one stretches a little and leaves the rest empty.
+ * One grid for the whole list, so columns line up from band to band and page to page:
+ * the widest content sets the column width (every name whole, on one line), as many
+ * columns as fit go across, and they share the band's width equally. The last band keeps
+ * the same columns and leaves the rest empty.
  */
 function pack<T>(items: T[], needs: number[], available: number): Band<T>[] {
+  const widest = Math.max(0, ...needs);
+  const columns = Math.max(1, Math.floor(available / Math.max(widest, 1)));
+  const width = available / columns;
   const bands: Band<T>[] = [];
-  let start = 0;
-  while (start < items.length) {
-    let end = start;
-    let sum = 0;
-    // At least one column, even one wider than the band.
-    while (end < items.length && (end === start || sum + needs[end] <= available)) sum += needs[end++];
-    const full = end < items.length;
-    const count = end - start;
-    const spare = Math.max(0, available - sum);
-    const stretch = full ? spare / count : Math.min(spare / count, MAX_STRETCH);
-    bands.push({
-      items: items.slice(start, end),
-      widths: needs.slice(start, end).map((need) => need + stretch),
-      filler: full ? 0 : spare - stretch * count,
-      first: start,
-    });
-    start = end;
+  for (let start = 0; start < items.length; start += columns) {
+    const band = items.slice(start, start + columns);
+    bands.push({ items: band, widths: band.map(() => width), filler: (columns - band.length) * width, first: start });
   }
   return bands;
 }
@@ -120,9 +108,10 @@ interface BandProps<T> {
 /**
  * Mappings the way the business lays them out in a sheet: bands of columns, each with the
  * top row's value above the bottom row's (the Silver column above the bronze column that
- * fills it). Columns are auto-fitted to their content, a band holds as many as fit, and
- * a page holds at least three bands (more where the screen allows): nothing wraps and
- * nothing is cut short, and every band is the same height.
+ * fills it). One column width, set by the widest content, runs through every band, so the
+ * grid lines up; a band holds as many columns as fit, and a page at least three bands
+ * (more where the screen allows). Nothing wraps, nothing is cut short, every band is the
+ * same height.
  */
 export function PagedBands<T>({ items, width, noun = "column", reset, ...props }: BandProps<T>) {
   const [ref, containerWidth] = useWidth();
