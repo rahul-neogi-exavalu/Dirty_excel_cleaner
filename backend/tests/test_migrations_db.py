@@ -35,7 +35,7 @@ def env():
     saved = {name: getattr(config, name) for name in names}
     config.DB_HOST, config.DB_PORT = parts.get("host", "localhost"), int(parts.get("port", 5432))
     config.DB_NAME, config.DB_USER = parts.get("dbname", "postgres"), parts.get("user", "postgres")
-    config.DB_PASSWORD, config.DB_SSLMODE = parts.get("password", ""), "disable"
+    config.DB_PASSWORD, config.DB_SSLMODE = parts.get("password", ""), parts.get("sslmode", "disable")
     config.BRONZE_SCHEMA, config.CONTROL_SCHEMA = f"bronze_m{suffix}", f"ingest_m{suffix}"
     config.SILVER_SCHEMA, config.CLEANSED_SCHEMA = f"silver_m{suffix}", f"cleansed_m{suffix}"
     config.LOTL_TABLE = ""

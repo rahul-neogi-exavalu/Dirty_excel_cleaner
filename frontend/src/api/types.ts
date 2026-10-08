@@ -397,7 +397,8 @@ export interface BronzeIngestion {
   period_end: string | null;
   action: IngestAction;
   rows_loaded: number;
-  status: "ingested" | "superseded" | "skipped";
+  /** removed: its bronze table no longer exists (tools/db_housekeeping.py). */
+  status: "ingested" | "superseded" | "skipped" | "removed";
   reviewed_by: string | null;
   created_at: number;
   superseded_by: string | null;

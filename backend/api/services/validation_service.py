@@ -932,11 +932,26 @@ def _stage_one(conn, session: Session, output: OutputCheck, user_name: str) -> d
             control, sql.SQL(", ").join(sql.Identifier(name) for name in names),
             sql.SQL(", ").join(sql.Placeholder() for _ in names)), [values[name] for name in names]).fetchone()[0]
 
-    table = f"stg_{control_id}"
+    table = _staging_name(conn, file, record, result, control_id)
     _write_staging(conn, table, record, kept, result)
     conn.execute(sql.SQL("UPDATE {} SET staging_table = %s WHERE control_id = %s").format(control), [table, control_id])
     return {"control_id": control_id, "staging_table": table, "processing_action": action,
             "seeded": bool(result["control"] and result["control"]["seeded"])}
+
+
+def _staging_name(conn, file: FileCheck, record: OutputRecord, result: dict, control_id: int) -> str:
+    """The bronze table this output is bound for (as Ingest will suggest it), with ``_stg``;
+    never a staging table another control row still waits to load from."""
+    from psycopg import sql
+
+    start, end = result["reporting_start_date"], result["reporting_end_date"]
+    years = set(range(start.year, end.year + 1)) if start and end else None
+    bronze = naming.table_name(file_meta.source_system_for(file.pc_id) or "", list(record.sheet_names), years=years)
+    held = {row[0] for row in conn.execute(sql.SQL(
+        "SELECT staging_table FROM {}.{} WHERE control_id <> %s AND bronze_load_flag = 'N' "
+        "AND staging_table IS NOT NULL AND processing_action IN ('INSERT', 'APPEND')").format(
+            sql.Identifier(config.CONTROL_SCHEMA), sql.Identifier("control_table")), [control_id])}
+    return naming.staging_table(bronze, held)
 
 
 def _save_mapping(conn, file: FileCheck, output: OutputCheck, by_original: dict, user_name: str) -> None:

@@ -51,6 +51,9 @@ const POLL_MS = 700;
 
 const toError = (error: unknown) => (error instanceof ApiError ? error : new ApiError(0, { code: "unknown", message: String(error) }));
 
+// An ingestion row's status, as the load history shows it.
+const LOAD_STATUS: Record<string, string> = { ingested: "Live", superseded: "Superseded", skipped: "Skipped", removed: "Removed" };
+
 export function IngestPage() {
   const [status, setStatus] = useState<BronzeStatus | null>(null);
   const [statusError, setStatusError] = useState<ApiError | null>(null);
@@ -801,7 +804,7 @@ function TablesView() {
                             <td className="px-3 py-1.5">{ACTION[load.action]?.label ?? load.action}</td>
                             <td className="num px-3 py-1.5 text-right">{formatNumber(load.rows_loaded)}</td>
                             <td className="px-3 py-1.5">
-                              <Badge tone={load.status === "ingested" ? "success" : "neutral"}>{load.status === "ingested" ? "Live" : load.status === "superseded" ? "Superseded" : "Skipped"}</Badge>
+                              <Badge tone={load.status === "ingested" ? "success" : "neutral"}>{LOAD_STATUS[load.status] ?? load.status}</Badge>
                             </td>
                             <td className="px-3 py-1.5">{load.reviewed_by ?? "—"}</td>
                             <td className="num px-3 py-1.5">{formatTimestamp(load.created_at)}</td>

@@ -63,6 +63,23 @@ def test_long_names_fit_postgres_identifiers_without_colliding():
     assert len(a) <= 63 and len(b) <= 63 and a != b
 
 
+def test_a_staging_table_is_its_bronze_table_with_stg():
+    assert naming.staging_table("ext_pc0515_sheet1") == "ext_pc0515_sheet1_stg"
+    # Another file bound for the same table still waits in the first name.
+    assert naming.staging_table("ext_pc0515_sheet1", {"ext_pc0515_sheet1_stg"}) == "ext_pc0515_sheet1_stg_2"
+    assert naming.staging_table("ext_pc0515_sheet1", {"ext_pc0515_sheet1_stg", "ext_pc0515_sheet1_stg_2"}) \
+        == "ext_pc0515_sheet1_stg_3"
+    assert naming.staging_table("ext_pc0515_data", {"ext_pc0515_sheet1_stg"}) == "ext_pc0515_data_stg"
+
+
+def test_a_long_staging_name_keeps_its_suffix_and_stays_apart():
+    a = naming.staging_table(naming.identifier("ext_pc0515_" + "a" * 80))
+    b = naming.staging_table(naming.identifier("ext_pc0515_" + "a" * 79 + "b"))
+    near = naming.staging_table("ext_pc0515_" + "c" * 50)  # fits as a table, not with the suffix
+    assert all(len(name) <= 63 and name.endswith("_stg") for name in (a, b, near))
+    assert a != b
+
+
 def test_column_names_are_unique_identifiers():
     assert naming.column_names(["premium", "premium", "Total $", ""]) == ["premium", "premium_2", "total", "column_4"]
 

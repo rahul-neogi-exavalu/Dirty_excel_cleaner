@@ -43,7 +43,7 @@ def env(tmp_path_factory):
     config.WORK_DIR, config.UPLOAD_DIR, config.JOB_DIR = work, work / "uploads", work / "jobs"
     config.DB_HOST, config.DB_PORT = parts.get("host", "localhost"), int(parts.get("port", 5432))
     config.DB_NAME, config.DB_USER = parts.get("dbname", "postgres"), parts.get("user", "postgres")
-    config.DB_PASSWORD, config.DB_SSLMODE = parts.get("password", ""), "disable"
+    config.DB_PASSWORD, config.DB_SSLMODE = parts.get("password", ""), parts.get("sslmode", "disable")
     config.BRONZE_SCHEMA, config.CONTROL_SCHEMA = f"bronze_s{suffix}", f"ingest_s{suffix}"
     config.SILVER_SCHEMA, config.LOTL_TABLE = f"silver_s{suffix}", f"ingest_s{suffix}.lotl"
     config.CLEANSED_SCHEMA = f"cleansed_s{suffix}"

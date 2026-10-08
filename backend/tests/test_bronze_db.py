@@ -53,7 +53,7 @@ def env(tmp_path_factory):
     config.WORK_DIR, config.UPLOAD_DIR, config.JOB_DIR = work, work / "uploads", work / "jobs"
     config.DB_HOST, config.DB_PORT = parts.get("host", "localhost"), int(parts.get("port", 5432))
     config.DB_NAME, config.DB_USER = parts.get("dbname", "postgres"), parts.get("user", "postgres")
-    config.DB_PASSWORD, config.DB_SSLMODE = parts.get("password", ""), "disable"
+    config.DB_PASSWORD, config.DB_SSLMODE = parts.get("password", ""), parts.get("sslmode", "disable")
     config.BRONZE_SCHEMA, config.CONTROL_SCHEMA = f"bronze_t{suffix}", f"ingest_t{suffix}"
     config.SILVER_SCHEMA, config.CLEANSED_SCHEMA = f"silver_t{suffix}", f"cleansed_t{suffix}"
     config.STAGING_SCHEMA = f"staging_t{suffix}"
@@ -202,6 +202,8 @@ def test_validate_stage_and_load(env):
     assert (row["source_system"], row["bronze_load_flag"], row["is_active"]) == ("EXT_PC0001", "N", "Y")
     assert (row["file_received_date"], row["drt_reporting_start_date"], row["drt_reporting_end_date"]) == (
         date(2026, 7, 13), date(2026, 1, 1), date(2026, 6, 30))
+    # Staged under the bronze table it is bound for.
+    assert staged["staging_table"] == "ext_pc0001_arr_stg"
     assert _query(config, f'SELECT count(*) FROM {{s}}."{staged["staging_table"]}"')[0][0] == 24
     assert _query(config, "SELECT method FROM {b}.bronze_column_mapping WHERE profit_center = 'PC0001' "
                           "AND file_columns = 'Pol_Ef_Dt' AND silver_column_name = 'policy_effective_date'")

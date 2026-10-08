@@ -520,7 +520,7 @@ The last steps, **Validate** and **Ingest**, put the cleaned tables into the bro
   - **A monthly file for a month already in Bronze:** you choose to replace that month or reject the file, with a side-by-side comparison of rows, columns and AED/PED/TED population.
 - **File received date:** read from the file name in any common order (`_07132026` → 2026-07-13), using the last full date in the name. It is never used for the reporting dates.
 
-After Validate, the file is copied into a temporary `staging` schema and its plan is recorded in the **control table** (`ingest.control_table`): one row per sheet's table, with the sheet in `sheet_name` beside `file_name` (several sheets, comma-separated, when sheets with the same columns were stacked into one table).
+After Validate, the file is copied into a temporary `staging` schema, under the name of the bronze table it is bound for with `_stg` (`ext_pc0515_sheet1_stg`; `_stg_2` while another file for that table still waits to load), and its plan is recorded in the **control table** (`ingest.control_table`): one row per sheet's table, with the sheet in `sheet_name` beside `file_name` (several sheets, comma-separated, when sheets with the same columns were stacked into one table).
 
 **What the tool works out on its own for Ingest:**
 

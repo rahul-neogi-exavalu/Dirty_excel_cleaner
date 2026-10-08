@@ -16,6 +16,8 @@ from . import period_tokens
 
 PREFIX = "ext"
 GENERIC = "data"
+# A staging table is its bronze table's name with this suffix.
+STAGING_SUFFIX = "_stg"
 # Postgres truncates identifiers longer than this.
 MAX_IDENTIFIER = 63
 
@@ -76,6 +78,19 @@ def table_name(source_system: str, sheet_names: list[str], file_stem: str = "",
     else:
         part = "_".join(_without_source(slug(names[0]).split("_"), source)) or GENERIC
     return (legacy_identifier if legacy else identifier)(f"{PREFIX}_{source}_{part}")
+
+
+def staging_table(bronze_table: str, held: set[str] = frozenset()) -> str:
+    """Where a validated output waits for Ingest: the bronze table it is bound for, with
+    ``_stg`` (``ext_pc0515_sheet1`` -> ``ext_pc0515_sheet1_stg``). ``held``: staging tables
+    other files still wait in; while one of them holds the name, ``_stg_2``, ``_stg_3`` ..."""
+    name = f"{bronze_table}{STAGING_SUFFIX}"
+    if len(name) > MAX_IDENTIFIER:
+        # Shorten the table part, not the suffix, keeping long names apart by a digest.
+        digest = hashlib.sha256(bronze_table.encode()).hexdigest()[:8]
+        keep = MAX_IDENTIFIER - len(STAGING_SUFFIX) - len(digest) - 1
+        name = f"{bronze_table[:keep].rstrip('_')}_{digest}{STAGING_SUFFIX}"
+    return next_free(name, held)
 
 
 def _without_source(tokens: list[str], source: str) -> list[str]:
