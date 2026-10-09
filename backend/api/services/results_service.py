@@ -1,5 +1,5 @@
-"""Read-side of a finished job: summaries, a paginated preview, the column profile, and
-header renames.
+"""Read-side of a finished job: summaries, a paginated preview, the column profile,
+header renames, and the columns left out of bronze ingestion.
 
 The cleaned frame is never modified. A rename is stored as a mapping from the column's
 original name to the user's, and applied wherever the column is shown or exported, so
@@ -45,6 +45,7 @@ def output_summary(record: OutputRecord) -> dict:
         "sheet_names": record.sheet_names,
         "flagged_columns": sum(1 for flag in record.type_flags.values() if "CHECK" in flag),
         "renamed_columns": len(record.renames),
+        "excluded_columns": len(record.excluded),
         "headers_updated_at": record.headers_updated_at,
         "file": record.file,
         "metadata_file": record.metadata_file,
@@ -84,6 +85,7 @@ def preview(record: OutputRecord, offset: int, limit: int, query: str | None,
                 "original": name,
                 "dtype": str(record.frame.schema[name]),
                 "renamed": name in record.renames,
+                "excluded": name in record.excluded,
             }
             for name in record.frame.columns
         ],
@@ -213,3 +215,21 @@ def reset_headers(record: OutputRecord, columns: list[str] | None) -> OutputReco
         record.headers_updated_at = time.time()
     return record
 
+
+# --------------------------------------------------------------------------- #
+# Columns left out of bronze ingestion
+# --------------------------------------------------------------------------- #
+
+
+def set_excluded(record: OutputRecord, columns: list[str], excluded: bool) -> OutputRecord:
+    """Leave columns out of (or bring them back into) bronze ingestion, all or none."""
+    with record.lock:
+        chosen = {_original_name(record, name) for name in columns}
+        result = record.excluded | chosen if excluded else record.excluded - chosen
+        if len(result) >= len(record.frame.columns):
+            raise ApiError(
+                422, "no_columns_left", "At least one column must be ingested.",
+                "Keep at least one column selected.",
+            )
+        record.excluded = result
+    return record

@@ -10,17 +10,25 @@ import type {
   BronzeStatus,
   BronzeTable,
   ColumnProfile,
+  ControlRow,
+  DateRole,
   EligibleLoad,
   CleanupLoad,
   IngestPlan,
-  SavedMapping,
+  DrtMapping,
   SilverCatalog,
+  SilverJoinHow,
   SilverRun,
-  SilverSummaryRow,
+  SilverAggregateRow,
   JobResults,
   JobStatus,
   OutputSummary,
   Preview,
+  SourcePreview,
+  TaskProgress,
+  Validation,
+  ValidationChoice,
+  ValidationRun,
   Workbook,
 } from "./types";
 
@@ -188,6 +196,21 @@ export const api = {
     if (params.desc) query.set("desc", "true");
     return request<Preview>(`/api/jobs/${jobId}/outputs/${outputId}/preview?${query}`, { signal });
   },
+  /** One sheet of an uploaded file as it is, before cleaning. */
+  getSourcePreview: (
+    workbookId: string,
+    params: { sheet: string; offset: number; limit: number; colOffset: number; colLimit: number },
+    signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams({
+      sheet: params.sheet,
+      offset: String(params.offset),
+      limit: String(params.limit),
+      col_offset: String(params.colOffset),
+      col_limit: String(params.colLimit),
+    });
+    return request<SourcePreview>(`/api/workbooks/${workbookId}/preview?${query}`, { signal });
+  },
   getColumns: (jobId: string, outputId: string) =>
     request<ColumnProfile[]>(`/api/jobs/${jobId}/outputs/${outputId}/columns`),
   renameHeaders: (jobId: string, outputId: string, renames: Record<string, string>) =>
@@ -200,14 +223,62 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ columns }),
     }),
+  /** Leave columns (original names) out of bronze ingestion, or bring them back. */
+  setExcluded: (jobId: string, outputId: string, columns: string[], excluded: boolean) =>
+    request<OutputSummary>(`/api/jobs/${jobId}/outputs/${outputId}/exclusions`, {
+      method: "PUT",
+      body: JSON.stringify({ columns, excluded }),
+    }),
 
   bronzeStatus: () => request<BronzeStatus>("/api/bronze/status"),
   bronzeTables: () => request<BronzeTable[]>("/api/bronze/tables"),
-  createPlan: (job_ids: string[], batch_id: string | null) =>
-    request<IngestPlan>("/api/bronze/plans", { method: "POST", body: JSON.stringify({ job_ids, batch_id }) }),
+  /** Every control row staged and not loaded yet, or these. */
+  createPlan: (control_ids: number[] | null, batch_id: string | null) =>
+    request<IngestPlan>("/api/bronze/plans", { method: "POST", body: JSON.stringify({ control_ids, batch_id }) }),
   getPlan: (id: string) => request<IngestPlan>(`/api/bronze/plans/${id}`),
-  updatePlanFile: (id: string, jobId: string, change: { source_system?: string | null; period_start?: string | null; period_end?: string | null }) =>
-    request<IngestPlan>(`/api/bronze/plans/${id}/files/${jobId}`, { method: "PATCH", body: JSON.stringify(change) }),
+  bronzeControl: (params: { source_system?: string; status?: "pending" | "loaded" | "rejected" | "listed" } = {}) => {
+    const query = new URLSearchParams();
+    if (params.source_system) query.set("source_system", params.source_system);
+    if (params.status) query.set("status", params.status);
+    return request<ControlRow[]>(`/api/bronze/control${query.size ? `?${query}` : ""}`);
+  },
+
+  /** Starts validating in the background; follow it with `watchValidation`. */
+  startValidation: (job_ids: string[], batch_id: string | null) =>
+    request<ValidationRun>("/api/validations", { method: "POST", body: JSON.stringify({ job_ids, batch_id }) }),
+  /** The review once built; until then its progress, or why it stopped. */
+  getValidation: (id: string) => request<Validation | ValidationRun>(`/api/validations/${id}`),
+  updateValidationFile: (
+    id: string,
+    jobId: string,
+    change: { pc_id?: string | null; file_received_date?: string | null; division_name?: string | null },
+  ) => request<Validation>(`/api/validations/${id}/files/${jobId}`, { method: "PATCH", body: JSON.stringify(change) }),
+  updateValidationOutput: (
+    id: string,
+    key: string,
+    change: {
+      mapping?: Record<string, string | null>;
+      reporting_start_date?: string | null;
+      reporting_end_date?: string | null;
+      choice?: ValidationChoice | null;
+      use_control_dates?: boolean;
+      /** The date column that decides the dates (populated on every row); null: the priority's. */
+      date_role?: DateRole | null;
+      /** With choice revise: the exact name of the loaded file it replaces. */
+      replaces_file?: string | null;
+      /** With choice companion: the file it came with (an output key, or a loaded file's control id). */
+      companion_of?: string | null;
+      /** What the table holds, over the detection; null: back to the detection. */
+      grain?: "aggregate" | "transaction" | null;
+    },
+  ) =>
+    request<Validation>(`/api/validations/${id}/outputs/${encodeURIComponent(key)}`, {
+      method: "PATCH",
+      body: JSON.stringify(change),
+    }),
+  /** Write the outputs to staging and the control table; the signed-in user is recorded. */
+  stageValidation: (id: string, keys: string[] | null) =>
+    request<Validation>(`/api/validations/${id}/stage`, { method: "POST", body: JSON.stringify({ keys }) }),
   updatePlanItem: (id: string, key: string, change: { table_name?: string | null; action?: string | null }) =>
     request<IngestPlan>(`/api/bronze/plans/${id}/items/${encodeURIComponent(key)}`, { method: "PATCH", body: JSON.stringify(change) }),
   /** The signed-in user is recorded as the reviewer. */
@@ -219,16 +290,84 @@ export const api = {
   createSilverRun: (ingestion_ids: string[]) =>
     request<SilverRun>("/api/silver/runs", { method: "POST", body: JSON.stringify({ ingestion_ids }) }),
   getSilverRun: (id: string) => request<SilverRun>(`/api/silver/runs/${id}`),
-  editSilverRunMapping: (id: string, change: { table_name: string; bronze_column: string; silver_column: string | null; ignored: boolean }) =>
+  editSilverRunMapping: (
+    id: string,
+    change: { table_name: string; bronze_column: string; silver_column?: string | null; ignored?: boolean; also?: string[] },
+  ) =>
     request<SilverRun>(`/api/silver/runs/${id}/mapping`, { method: "PATCH", body: JSON.stringify(change) }),
   /** The signed-in user is recorded as the reviewer. */
   approveSilverRun: (id: string) =>
     request<SilverRun>(`/api/silver/runs/${id}/approve`, { method: "POST", body: JSON.stringify({}) }),
-  silverMapping: () => request<SavedMapping[]>("/api/silver/mapping"),
-  editSilverMapping: (row: { pc_id: string; bronze_table_name: string; bronze_column_name: string; silver_column_name: string | null }) =>
-    request<SavedMapping>("/api/silver/mapping", { method: "PATCH", body: JSON.stringify(row) }),
-  silverSummary: () => request<SilverSummaryRow[]>("/api/silver/summary"),
+  /** From the Silver side: which bronze column loads a DRT column (null: none does). */
+  assignSilverTarget: (id: string, change: { table_name: string; silver_column: string; bronze_column: string | null }) =>
+    request<SilverRun>(`/api/silver/runs/${id}/targets`, { method: "PATCH", body: JSON.stringify(change) }),
+  /** Join two tables of files that came together (how null: undo the join). */
+  joinSilverTables: (
+    id: string,
+    change: { left_table: string; right_table: string; how: SilverJoinHow | null; keys: { left: string; right: string }[]; ignore_case: boolean },
+  ) => request<SilverRun>(`/api/silver/runs/${id}/join`, { method: "PATCH", body: JSON.stringify(change) }),
+  /** An aggregated table's measure spread across columns, and its roll-up columns. */
+  spreadSilverTable: (
+    id: string,
+    change: { table_name: string; columns: string[]; measure: string | null; dimension: string | null; label?: string | null; rollups?: string[] },
+  ) => request<SilverRun>(`/api/silver/runs/${id}/spread`, { method: "PATCH", body: JSON.stringify(change) }),
+  ignoreUnmapped: (id: string, table_name?: string) =>
+    request<SilverRun>(`/api/silver/runs/${id}/ignore-unmapped`, {
+      method: "POST",
+      body: JSON.stringify({ table_name: table_name ?? null }),
+    }),
+  silverMapping: () => request<DrtMapping[]>("/api/silver/mapping"),
+  /** The row is named by all four of its values; its new Silver column is required. */
+  editSilverMapping: (row: DrtMapping & { new_silver_column_name: string }) =>
+    request<DrtMapping>("/api/silver/mapping", { method: "PATCH", body: JSON.stringify(row) }),
+  deleteSilverMapping: (row: DrtMapping) =>
+    request<void>("/api/silver/mapping", { method: "DELETE", body: JSON.stringify(row) }),
+  silverAggregate: () => request<SilverAggregateRow[]>("/api/silver/aggregate"),
 };
+
+export interface ValidationWatch {
+  /** Each step as it happens (bursts arrive coalesced, at most ~10 a second). */
+  progress: (progress: TaskProgress) => void;
+  done: (validation: Validation, progress: TaskProgress) => void;
+  failed: (error: ApiError, progress: TaskProgress) => void;
+  /** The connection dropped; the browser is reconnecting by itself. */
+  reconnecting: () => void;
+  /** The server would not stream (gone, signed out, or SSE blocked on the way): ask it directly. */
+  lost: () => void;
+}
+
+/** Follow a validation's progress over Server-Sent Events until it is done or fails.
+ *  Returns a function that stops listening. */
+export function watchValidation(id: string, on: ValidationWatch): () => void {
+  const source = new EventSource(`/api/validations/${encodeURIComponent(id)}/events`, { withCredentials: true });
+  let ended = false;
+  const end = () => {
+    ended = true;
+    source.close();
+  };
+  const read = (event: Event) => JSON.parse((event as MessageEvent<string>).data);
+  source.addEventListener("progress", (event) => on.progress(read(event)));
+  source.addEventListener("done", (event) => {
+    end();
+    const { result, progress } = read(event);
+    on.done(result, progress);
+  });
+  source.addEventListener("failed", (event) => {
+    end();
+    const { error, progress } = read(event);
+    on.failed(new ApiError(0, error), progress);
+  });
+  source.onerror = () => {
+    if (ended) return;
+    // CONNECTING: a dropped connection, retried by the browser. CLOSED: the server
+    // answered with something other than a stream (404, 401...) and it won't retry.
+    if (source.readyState === EventSource.CLOSED) {
+      end();
+      on.lost();
+    } else on.reconnecting();
+  };
+  return end;
+}
 
 export const exportUrls = {
   csv: (jobId: string, outputId: string) => `/api/jobs/${jobId}/outputs/${outputId}/export/csv`,

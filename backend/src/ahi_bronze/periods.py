@@ -12,15 +12,8 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
-_MONTHS = {
-    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
-}
-_MONTH_WORD = re.compile(
-    r"(?<![a-z])(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
-    r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?![a-z])",
-    re.IGNORECASE,
-)
+from . import period_tokens
+
 _YEAR = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 # Date columns whose name says they carry the reporting period, best first.
 _PREFERENCE = [
@@ -104,8 +97,7 @@ def sheet_months(sheet_names: list[str]) -> tuple[list[int], int | None]:
     """Month numbers named by the sheets, and a year if one is written there too."""
     months, years = set(), set()
     for name in sheet_names:
-        for word in _MONTH_WORD.findall(name or ""):
-            months.add(_MONTHS[word[:3].casefold()])
+        months.update(period_tokens.months_in(name or ""))
         years.update(int(year) for year in _YEAR.findall(name or ""))
     return sorted(months), (years.pop() if len(years) == 1 else None)
 

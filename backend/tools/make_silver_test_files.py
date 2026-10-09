@@ -1,4 +1,4 @@
-"""Write the 10 test workbooks for File -> Bronze -> Silver, plus the LOTL seed.
+"""Write the 14 test workbooks for File -> Bronze -> Silver, plus test LOTL rows.
 
     python backend/tools/make_silver_test_files.py
 
@@ -23,6 +23,10 @@ BASE = [
     "Profit Center Name", "Profit Center Number", "Insurance Company Name", "Producer Name",
     "Policy Number", "Premium", "Accounting Effective Date", "Policy Effective Date",
     "Transaction Effective Date",
+    # With the nine above, every column a file must carry to reach Bronze
+    # (backend/config/bronze_required_columns.csv), under the business's DRT names.
+    "MarketProvider", "Transaction Detail", "GrossCommissionAmount", "CommissionPct",
+    "ProducerCommissionAmount", "ProducerCommissionPct", "Revenue",
 ]
 # pc_id -> (legacy office name, profit center number): the LOTL seed.
 OFFICES = {
@@ -34,9 +38,13 @@ OFFICES = {
     "0505": ("Canton Office", "0505"),
     "0515": ("Toledo Office", "0515"),
     "0606": ("Youngstown Office", "0606"),
+    "0707": ("Lima Office", "0707"),
+    "0909": ("Mansfield Office", "0909"),
 }
 CARRIERS = ["Heritage Casualty Co", "National Indemnity Co", "Global Assurance Corp", "Liberty Mutual", "Zenith Insurance Group"]
 PRODUCERS = ["Pinnacle Agency Partners", "Apex Insurance Brokers", "Metro Agency Group", "Coastal Risk Advisors", "Brown & Brown"]
+MARKETS = ["Admitted", "Excess & Surplus", "Lloyd's", "Specialty"]
+TRANSACTIONS = ["New Business", "Renewal", "Endorsement", "Cancellation"]
 
 rng = random.Random(20260701)
 
@@ -44,16 +52,25 @@ rng = random.Random(20260701)
 def record(pc_id: str, month: int, n: int, year: int = 2026) -> dict:
     name, number = OFFICES[pc_id]
     accounting = date(year, month, 1 + (n * 3) % 27)
+    premium = round(rng.uniform(800, 25000), 2)
+    gross, share = round(premium * 0.12, 2), round(rng.uniform(0.4, 0.7), 2)
     return {
         "Profit Center Name": name,
         "Profit Center Number": int(number),
         "Insurance Company Name": rng.choice(CARRIERS),
         "Producer Name": rng.choice(PRODUCERS),
         "Policy Number": f"POL-{pc_id}-{month:02d}{n:03d}",
-        "Premium": round(rng.uniform(800, 25000), 2),
+        "Premium": premium,
         "Accounting Effective Date": accounting,
         "Policy Effective Date": accounting - timedelta(days=rng.randint(10, 300)),
         "Transaction Effective Date": accounting - timedelta(days=rng.randint(0, 5)),
+        "MarketProvider": rng.choice(MARKETS),
+        "Transaction Detail": rng.choice(TRANSACTIONS),
+        "GrossCommissionAmount": gross,
+        "CommissionPct": 0.12,
+        "ProducerCommissionAmount": round(gross * share, 2),
+        "ProducerCommissionPct": round(0.12 * share, 4),
+        "Revenue": round(gross - gross * share, 2),
     }
 
 
@@ -97,7 +114,7 @@ def main() -> None:
     # 2. July, identical columns.
     simple("02_ARR_pc0101_2026_Jul.xlsx", "ARR", BASE, rows("0101", [7], 5, start=100))
     # 3. August, same columns in another order.
-    reordered = [BASE[i] for i in (4, 0, 1, 5, 2, 3, 8, 6, 7)]
+    reordered = [BASE[i] for i in (4, 0, 1, 5, 2, 3, 8, 6, 7)] + BASE[9:][::-1]
     simple("03_ARR_pc0101_2026_Aug_reordered.xlsx", "ARR", reordered, rows("0101", [8], 5, start=200))
 
     # 4. September: renamed + extra columns (drives every cascade stage).
@@ -120,7 +137,7 @@ def main() -> None:
     book = openpyxl.Workbook()
     for month, label in enumerate(["Jan", "Feb", "Mar", "Apr", "May", "Jun"], start=1):
         data = rows("0202", [month], 4, start=month * 10)
-        sheet(book, label, [wording[h] for h in BASE], [[r[h] for h in BASE] for r in data])
+        sheet(book, label, [wording.get(h, h) for h in BASE], [[r[h] for h in BASE] for r in data])
     save(book, "05_Prem_pc0202_2026.xlsx")
 
     # 6. The four profit-center cases from the Bronze -> Silver doc, plus a no-match row.
@@ -183,11 +200,55 @@ def main() -> None:
     sheet(book, "Notes", ["Note"], [["Internal - do not load"]], hidden=True)
     save(book, "10_Report_pc0606_2026_JanJul.xlsx")
 
+    # 11. May-Jul for pc0101: overlaps the loaded Jan-Jun file only partly. Neither
+    #     Replace (loses Jan-Apr) nor Append (doubles May-Jun) is safe: the reviewer decides.
+    simple("11_ARR_pc0101_2026_MayJul_overlap.xlsx", "ARR", BASE, rows("0101", [5, 6, 7], 2, start=700))
+
+    # 12. October: the columns in another order *and* one more (cases 2 and 3 at once):
+    #     schema evolution, not a separate table.
+    october = rows("0101", [10], 4, start=800)
+    for r in october:
+        r["Commission %"] = f"{rng.randint(5, 15)}%"
+    shuffled = BASE[::-1] + ["Commission %"]
+    simple("12_ARR_pc0101_2026_Oct_reorder_newcol.xlsx", "ARR", shuffled, october)
+
+    # 13. Money and dates the document's formats do not cover: a two-digit year, fractional
+    #     seconds, ISO 'T', an out-of-range serial, currency with parentheses, half-cent
+    #     rounding, a European number, a code with letters.
+    edge = rows("0909", [3], 6)
+    # Premium (kept as text by the cleaner, so Silver reads it): -250.00, 1.01, 0.13, NULL,
+    # NULL, 9999999999999999.99. The dates are typed by the cleaner before Silver sees them.
+    for r, (premium, accounting) in zip(edge, [
+        ("$(250.00)", "1/5/26"),
+        ("1.005", "2026-03-04 13:45:00.123"),
+        ("0.125", "2026-03-05T08:00:00"),
+        ("1 200,50", "99999"),
+        ("USD 100", "45000"),
+        ("9999999999999999.99", "03/06/2026"),
+    ]):
+        r["Premium"], r["Accounting Effective Date"] = premium, accounting
+    simple("13_MoneyDates_pc0909_2026.xlsx", "Edge", BASE, edge)
+
+    # 14. Two headers that clean to the same name (Amount ($) -> amount, Amount (%) ->
+    #     amount_2), then February lists them the other way round: each must still land
+    #     in its own column.
+    clash = ["Amount ($)", "Amount (%)"]
+    january = [[r[h] for h in BASE] + [100 + n, 0.5] for n, r in enumerate(rows("0707", [1], 4))]
+    february = [[r[h] for h in BASE] + [0.5, 200 + n] for n, r in enumerate(rows("0707", [2], 4, start=10))]
+    book = openpyxl.Workbook()
+    sheet(book, "Clash", BASE + clash, january)
+    save(book, "14_Clash_pc0707_2026_Jan.xlsx")
+    book = openpyxl.Workbook()
+    sheet(book, "Clash", BASE + clash[::-1], february)
+    save(book, "14_Clash_pc0707_2026_Feb_swapped.xlsx")
+
+    # Test offices in the LOTL's own shape, added on top of the business's LOTL with
+    # backend/tools/seed_reference.py --add-lotl (the real LOTL does not know them).
     with open(OUT / "lotl_seed.csv", "w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["pc_id", "legacy_office_name", "profit_center_number"])
-        for pc_id, (name, number) in OFFICES.items():
-            writer.writerow([pc_id, name, number])
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(["profit_center_number", "legacy_office_name", "status"])
+        for number, (name, _) in OFFICES.items():
+            writer.writerow([number.lstrip("0"), name, "Active"])
     print("wrote lotl_seed.csv")
 
 

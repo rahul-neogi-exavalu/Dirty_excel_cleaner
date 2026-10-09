@@ -1,8 +1,9 @@
 """Bronze table names: ``ext_[source_system]_[sheet_name]``.
 
-A sheet named after a month or date (Jan, Feb, June, 2024-07 ...) would bake the
-period into the table name, so those tables get the generic ``ext_[source_system]_data``
-instead, and the next month's file lands in the same table.
+A sheet named after a month or date (Jan, Feb, June, 2024-07, Q1, H1, Week 32 ...) would
+bake the period into the table name, so those tables get the generic
+``ext_[source_system]_data`` instead, and the next month's file lands in the same table.
+What counts as a period is decided by ``period_tokens``.
 """
 
 from __future__ import annotations
@@ -11,31 +12,22 @@ import hashlib
 import re
 from pathlib import Path
 
+from . import period_tokens
+
 PREFIX = "ext"
 GENERIC = "data"
+# A staging table is its bronze table's name with this suffix.
+STAGING_SUFFIX = "_stg"
+# A table of the profit center's own aggregates (not transactions) ends with this.
+AGGREGATE_SUFFIX = "_agg"
 # Postgres truncates identifiers longer than this.
 MAX_IDENTIFIER = 63
 
-_MONTH = (
-    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
-    r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-)
-# Each alternative must stand on its own: "mar" in "market" is not March.
-_PERIOD_TOKEN = re.compile(
-    rf"(?<![a-z])(?:{_MONTH})(?![a-z])"
-    r"|(?<!\d)(?:19|20)\d{2}[-_/. ]?(?:0?[1-9]|1[0-2])(?!\d)"  # 2024-07, 202407
-    r"|(?<!\d)(?:0?[1-9]|1[0-2])[-_/. ](?:19|20)\d{2}(?!\d)"  # 07-2024
-    r"|(?<!\d)\d{1,2}[-_/.]\d{1,2}[-_/.]\d{2,4}(?!\d)"  # 07/31/2024
-    r"|(?<![a-z])q[1-4](?![a-z\d])"
-    r"|(?<![a-z])fy\s?\d{2,4}(?!\d)"
-    r"|(?<!\d)(?:19|20)\d{2}(?!\d)",  # a bare year
-    re.IGNORECASE,
-)
 
-
-def has_period(text: str) -> bool:
-    """Whether a sheet (or file) name carries a month, date, quarter or year."""
-    return bool(_PERIOD_TOKEN.search(text or ""))
+def has_period(text: str, years: set[int] | None = None) -> bool:
+    """Whether a sheet (or file) name carries a month, date, quarter, half, week or year
+    (a bare year only near ``years``, the file's own, when they are known)."""
+    return period_tokens.has_period(text, years)
 
 
 def slug(text: str) -> str:
@@ -46,38 +38,70 @@ def slug(text: str) -> str:
 def source_system_from_filename(filename: str, pattern: str) -> str | None:
     """The source system the team suffixed to the file name, e.g. ``ARR_pc0515`` -> ``pc0515``.
 
-    The last match in the stem wins, so ``pc_002_multisheet`` still yields ``pc002``.
-    Separators inside the code are dropped so ``PC-0515`` and ``pc0515`` agree.
+    The last match in the stem wins, so ``pc_002_multisheet`` still yields ``pc002``. A
+    match that is a period or a version (``fy2025``, ``jun2025``, ``q12026``, ``v12``) is
+    not a source system. Separators inside the code are dropped so ``PC-0515`` and
+    ``pc0515`` agree. (A ``PCnnn`` token, when there is one, is preferred by the caller.)
     """
     stem = Path(filename or "").stem.casefold()
     matches = re.findall(pattern, stem, flags=re.IGNORECASE)
-    if not matches:
-        return None
-    found = matches[-1]
-    if isinstance(found, tuple):
-        found = next((part for part in found if part), "")
-    code = slug(found).replace("_", "")
-    return code or None
+    for found in reversed(matches):
+        if isinstance(found, tuple):
+            found = next((part for part in found if part), "")
+        code = slug(found).replace("_", "")
+        if code and not has_period(found) and not _VERSION.fullmatch(code):
+            return code
+    return None
+
+
+_VERSION = re.compile(r"(?:v|ver|version|rev|r)\d+")
 
 
 def clean_source_system(value: str | None) -> str:
     return slug(value or "").replace("_", "")
 
 
-def table_name(source_system: str, sheet_names: list[str], file_stem: str = "") -> str:
+def table_name(source_system: str, sheet_names: list[str], file_stem: str = "",
+               years: set[int] | None = None, legacy: bool = False, aggregated: bool = False) -> str:
     """The bronze table for one cleaned output.
 
     * every sheet carries a period, or several sheets were appended -> ``ext_src_data``
     * otherwise the sheet name, minus the source-system code if it repeats it
       (a CSV's only "sheet" is its file name) -> ``ext_src_arr``
+    * the profit center's own aggregates, not transactions -> the same, with ``_agg``
+      (``ext_src_data_agg``); its staging table is ``ext_src_data_agg_stg``
+
+    ``years``: the years the file covers, so a year in a sheet name counts as a period
+    only when it is one of them ("Plan 2000" stays a name in a 2026 file). ``legacy``:
+    the name a long one had before identifiers were hashed with SHA-256.
     """
     source = clean_source_system(source_system) or "unknown"
     names = [name for name in dict.fromkeys(sheet_names) if name]
-    if not names or len(names) > 1 or any(has_period(name) for name in names):
+    if not names or len(names) > 1 or any(has_period(name, years) for name in names):
         part = GENERIC
     else:
         part = "_".join(_without_source(slug(names[0]).split("_"), source)) or GENERIC
-    return identifier(f"{PREFIX}_{source}_{part}")
+    fit = legacy_identifier if legacy else identifier
+    if aggregated:
+        return with_suffix(fit(f"{PREFIX}_{source}_{part}"), AGGREGATE_SUFFIX)
+    return fit(f"{PREFIX}_{source}_{part}")
+
+
+def with_suffix(name: str, suffix: str) -> str:
+    """``name`` + ``suffix`` within the identifier limit: the name is shortened (with a
+    digest, so long names stay apart), never the suffix."""
+    if len(name) + len(suffix) <= MAX_IDENTIFIER:
+        return f"{name}{suffix}"
+    digest = hashlib.sha256(name.encode()).hexdigest()[:8]
+    keep = MAX_IDENTIFIER - len(suffix) - len(digest) - 1
+    return f"{name[:keep].rstrip('_')}_{digest}{suffix}"
+
+
+def staging_table(bronze_table: str, held: set[str] = frozenset()) -> str:
+    """Where a validated output waits for Ingest: the bronze table it is bound for, with
+    ``_stg`` (``ext_pc0515_sheet1`` -> ``ext_pc0515_sheet1_stg``). ``held``: staging tables
+    other files still wait in; while one of them holds the name, ``_stg_2``, ``_stg_3`` ..."""
+    return next_free(with_suffix(bronze_table, STAGING_SUFFIX), held)
 
 
 def _without_source(tokens: list[str], source: str) -> list[str]:
@@ -96,18 +120,41 @@ def _without_source(tokens: list[str], source: str) -> list[str]:
 
 def identifier(name: str) -> str:
     """Fit a name in Postgres's identifier limit without two long names colliding."""
+    return _fit(name, hashlib.sha256)
+
+
+def legacy_identifier(name: str) -> str:
+    """The name ``identifier`` gave before it hashed with SHA-256 (SHA-1), so tables and
+    columns made then are still recognised. Equal to ``identifier`` for short names."""
+    return _fit(name, hashlib.sha1)
+
+
+def _fit(name: str, digest_of) -> str:
     name = slug(name) or "t"
     if name[0].isdigit():
         name = f"t_{name}"
     if len(name) <= MAX_IDENTIFIER:
         return name
-    digest = hashlib.sha1(name.encode()).hexdigest()[:8]
+    digest = digest_of(name.encode()).hexdigest()[:8]
     return f"{name[: MAX_IDENTIFIER - 9].rstrip('_')}_{digest}"
 
 
-def column_names(names: list[str]) -> list[str]:
+# Columns every bronze table carries besides the file's own (see bronze_service), and the
+# internal lineage columns. A file column that would take one of these names is renamed
+# (file_name -> file_name_2), so CREATE TABLE never sees a duplicate.
+SYSTEM_COLUMNS = ("pc_id", "file_received_date", "reporting_start_date", "reporting_end_date", "division_name",
+                  "file_name", "processing_date")
+# _reporting_month: each row's month (YYYY-MM) by the date column that decided the reporting
+# dates, so one month of a load can be replaced.
+LINEAGE_COLUMNS = ("_ingestion_id", "_source_file", "_source_sheet", "_reporting_month", "_ingested_at")
+# file_date was the file received date's earlier name: still reserved, so a file column of
+# that name keeps the identifier earlier loads gave it (file_date_2).
+RESERVED = SYSTEM_COLUMNS + LINEAGE_COLUMNS + ("file_date",)
+
+
+def column_names(names: list[str], reserved=RESERVED) -> list[str]:
     """Column identifiers for the bronze table, unique and within the length limit."""
-    used: set[str] = set()
+    used: set[str] = set(reserved)
     result = []
     for index, name in enumerate(names):
         base = identifier(name) if slug(name) else f"column_{index + 1}"

@@ -49,6 +49,19 @@ def pool():
         if not _migrated:
             try:
                 migrate(_pool)
+                # The business's reference tables, filled from assets/ while they are empty.
+                from .services import bronze_service, reference_service, silver_service
+
+                with _pool.connection() as conn:
+                    reference_service.seed_control(conn)
+                    reference_service.seed_silver(conn, silver_service.catalog())
+                    # Every DRT column of the Silver schema, and the mapping rows' DRT columns.
+                    reference_service.sync_drt_columns(conn, silver_service.catalog())
+                    # After the DRT mapping, which seeds the bronze mapping.
+                    reference_service.seed_bronze_mapping(conn)
+                    reference_service.seed_control_table(conn)
+                    # Bronze tables made before file_received_date and the reporting dates.
+                    bronze_service.upgrade_tables(conn)
             except Exception as error:
                 if _is_connection_error(error):
                     raise unreachable(error) from error
@@ -59,6 +72,11 @@ def pool():
                 ) from error
             _migrated = True
     return _pool
+
+
+def prepared() -> bool:
+    """Whether the pool is open and the database migrated and seeded (the first use does both)."""
+    return _pool is not None and _migrated
 
 
 @contextmanager
@@ -92,15 +110,19 @@ def unreachable(error: Exception) -> ApiError:
 
 def migrate(target_pool) -> list[str]:
     """Apply the numbered SQL files in ``backend/migrations`` that have not run yet."""
-    return run_migrations(target_pool, MIGRATIONS, config.CONTROL_SCHEMA, "{control}", "ahi-migrations")
+    return run_migrations(target_pool, MIGRATIONS, config.CONTROL_SCHEMA, "{control}", "ahi-migrations",
+                          extra={"{silver}": config.SILVER_SCHEMA, "{cleansed}": config.CLEANSED_SCHEMA,
+                                 "{bronze}": config.BRONZE_SCHEMA, "{staging}": config.STAGING_SCHEMA})
 
 
-def run_migrations(target_pool, folder: Path, schema: str, placeholder: str, lock_key: str) -> list[str]:
+def run_migrations(target_pool, folder: Path, schema: str, placeholder: str, lock_key: str,
+                   extra: dict[str, str] | None = None) -> list[str]:
     """Apply the SQL files in ``folder`` not yet recorded in ``schema.schema_migrations``.
 
-    ``placeholder`` in a file is replaced by the quoted schema name. Files run in name
-    order, each in the one transaction, under an advisory lock so two API processes
-    starting together never migrate twice.
+    ``placeholder`` in a file is replaced by the quoted schema name, and each of ``extra``'s
+    placeholders by its quoted schema. Files run in name order, each in the one
+    transaction, under an advisory lock so two API processes starting together never
+    migrate twice.
     """
     from psycopg import sql
 
@@ -114,10 +136,14 @@ def run_migrations(target_pool, folder: Path, schema: str, placeholder: str, loc
             "(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
         ).format(target))
         done = {row[0] for row in conn.execute(sql.SQL("SELECT name FROM {}.schema_migrations").format(target))}
+        names = {placeholder: target.as_string(conn)}
+        names.update({key: sql.Identifier(value).as_string(conn) for key, value in (extra or {}).items()})
         for path in sorted(Path(folder).glob("*.sql")):
             if path.name in done:
                 continue
-            text = path.read_text(encoding="utf-8").replace(placeholder, target.as_string(conn))
+            text = path.read_text(encoding="utf-8")
+            for key, quoted in names.items():
+                text = text.replace(key, quoted)
             conn.execute(text)
             conn.execute(sql.SQL("INSERT INTO {}.schema_migrations (name) VALUES (%s)").format(target), [path.name])
             applied.append(path.name)

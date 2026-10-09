@@ -509,15 +509,32 @@ threads, and measured the opposite by a wide margin. The default follows the mea
 
 ## Loading into the bronze layer
 
-The last step, **Ingest**, puts the cleaned tables into the bronze database. It follows
-the same rules the team applied by hand (the AHI File → Bronze scenario document), but a
-person still approves every change that matters.
+The last steps, **Validate** and **Ingest**, put the cleaned tables into the bronze database. They follow the same rules the team applied by hand (the AHI File → Bronze scenario document), but a person still approves every change that matters.
 
-**What the tool works out on its own:**
+**What happens in Validate:**
+- **Required columns:** each file's columns are matched to your 14 required columns. The match uses what was approved before, exact spelling, fuzzy, semantic meaning, and AI. Any required column still missing means the file is rejected. Two pairs need only one of the pair (either, or both, is fine): **CommissionPct or GrossCommissionAmount**, and **ProducerCommissionAmount or ProducerCommissionPct** (the `one_of` column of `backend/config/bronze_required_columns.csv`). Each screen shows a "% fit for Bronze" score.
+- **The whole file, but for sheets that are not data:** a sheet missing the required columns (a lookup or notes sheet beside the data) is left out on its own, and the file's valid sheets still go to Bronze. Any other unfit sheet (dates flagged, rejected by you) rejects all the file's sheets, and a file is staged with all its sheets at once.
+- **Reporting dates:** AED (Accounting Effective Date) decides if every row has a readable date, otherwise TED (Transaction Effective Date), then PED (Policy Effective Date). Otherwise the reviewer enters them. Dates are stored as whole months.
+  - **You may pick the date column:** the Reporting dates table shows each date column populated on every row with its months and whether that is year to date, monthly or neither. When AED's months are neither (Feb–Jun) but TED's are a clean year to date, pick TED: its months become the reporting dates and the control table's `date_detail` records **TED**. Only a column readable on every row can be picked.
+  - **`date_detail` for dates you type:** the date column whose months they exactly are (TED, say), and blank only when they match none of AED, TED and PED.
+  - **YTD or monthly:** YTD is January through month N of one year, monthly is a single month.
+  - **Neither** (e.g. Mar–Jun, or dates spanning several years): flagged, and rejected unless the reviewer corrects the dates.
+- **Against the profit center's files already in Bronze** (the profit center is read from the file name, so the files may be named anything):
+  - **A month after them** (July after a Jan–Jun year-to-date file): appended, into the **same bronze table** as the files it follows, whatever its sheet is called. Validate shows its columns against the earlier file's (the same, reordered, columns added or missing, or different), and Ingest evolves the table where columns were added or left out.
+  - **A month already loaded** (June again after Jan–Jun): **flagged, and the control table rejects it.** A side-by-side comparison of rows, columns and AED/TED/PED population shows why.
+  - **Exactly the reporting dates of a loaded file:** your call. A **revision** replaces the file you name (type or pick its exact name; it is looked up in the control table among the profit center's loaded files of those dates, and refused otherwise), and Ingest deletes the old file's rows and loads the new one, recreating the table with the new columns when nothing else is in it. A **companion** came with it and is kept beside it (below). Or reject it.
+- **Companion files:** a file that came with another of the same profit center (the same received date in the name) and carries only part of the picture: a broker list beside the transactions. Mark it as that file's companion: the two are checked **together** for the required columns (the broker list's MarketProvider counts for the transactions), the companion takes the other file's reporting dates, and Silver joins the two.
+- **Aggregated files:** some profit centers send figures they already aggregated (a premium summary per partner and product line, a month to a sheet) instead of transactions. Validate tells them by their shape: a column or row that totals the others, mostly amounts, no policy number and no transaction dates. They are not held to the transaction columns, take their dates from the month each sheet names (or the file name), are compared only with the profit center's other aggregated files, and the control table flags them (`is_aggregated = Y`). You can say otherwise either way.
+- **File received date:** read from the file name in any common order (`_07132026` → 2026-07-13), using the last full date in the name. It is never used for the reporting dates.
 
-- **Source system:** read from the file name's suffix (`ARR_pc0515.xlsx` → `pc0515`).
-- **Period:** which months the file covers, read from its accounting or transaction dates, or from month-named sheets.
-- **Table name:** `ext_pc0515_arr`, or `ext_pc0515_data` when sheets are named after months.
+After Validate, the file is copied into a temporary `staging` schema, under the name of the bronze table it is bound for with `_stg` (`ext_pc0515_sheet1_stg`; `_stg_2` while another file for that table still waits to load; an aggregated file's `ext_pc2030_data_agg_stg`), and its plan is recorded in the **control table** (`ingest.control_table`): one row per sheet's table, with the sheet in `sheet_name` beside `file_name` (several sheets, comma-separated, when sheets with the same columns were stacked into one table).
+
+**What the tool works out on its own for Ingest:**
+
+- **Source system:** read from the file name's `PC` code, the same one as the profit center (`ARR_PC515.xlsx` → `pc0515`). A name with two different PC codes is left for you to fill in.
+- **Profit center (pc_id):** read from the file name. `PC796_2026-06 796 TPI - AJG Data Submission_796 TPI` becomes `PC0796`.
+- **Division:** looked up in the business's division table by profit center. For the few profit centers listed under two divisions, you choose.
+- **Table name:** `ext_pc0515_arr`, or `ext_pc0515_data` when sheets are named after months; an aggregated file's ends with `_agg` (`ext_pc2030_data_agg`). A month appended after the profit center's earlier files goes to their table instead, and a companion never replaces the file it came with.
 - **What to do** with the file against what is already loaded:
   - A first file creates the table.
   - A July file with the same columns is appended. If the columns are only in a different order, they are put back in the table's order first.
@@ -526,9 +543,13 @@ person still approves every change that matters.
   - A revised Jan–Jun file, or a Jan–Jul file, replaces the earlier load. This needs your confirmation and a final check.
   - The very same file again is skipped.
 
-**What you decide:** the reviewer checks the source system and period, can rename a
-table or choose another action, ticks a confirmation for every risky item, and enters
-their name. Nothing is written until then.
+**What you decide:** you check the profit center, file received date, division, source system
+and reporting dates, can rename a table or choose another action, and tick a confirmation for every
+risky item. You approve as the signed-in user. Nothing is written until then, and a file
+with no profit center or file received date can't be approved.
+
+**What every bronze row carries:** the profit center first, then the file's own columns,
+then the file received date, the division, the exact file name, and the time it was loaded.
 
 **What protects the data:**
 
@@ -541,17 +562,17 @@ their name. Nothing is written until then.
 
 Every source names its columns differently: one file says `Carrier`, another
 `Insurance Company Name`, a third `Carrier Name`. The last step, **Silver**, puts them all
-into one common table under the names the business has agreed (the DRT).
+into one common table, with exactly the columns of the business's Silver schema.
 
 **How a column finds its Silver name.** Five checks look at every column, each on its own, and each casts a vote:
 
-1. **What was approved before.** Next month's file reuses last month's decisions.
+1. **What was approved before.** The business's DRT column mapping says, per profit center, which source column means which Silver column. Every decision you approve is added to it, so next month's file reuses last month's decisions.
 2. **The same name.** `Acct Eff Date` is recognised as Accounting Effective Date.
 3. **A near spelling.** `Premium Amt` is recognised as Premium. A guess that rests only on a shared word like "name" is never made.
 4. **The same meaning,** from a language model of English words. `Carrier` is recognised as the insurance company and `Agency` as the producer.
 5. **AI (Azure OpenAI),** which reads report abbreviations: `acc_eff_dt` is the accounting effective date, `incp_dt` the policy start. Only the column names are sent, never the data.
 
-**You choose.** The answer most checks agree on is pre-selected and marked *Recommended*. Open a row's list to see every suggestion and which checks voted for it, for example "total_premium: Semantic + AI" and "premium: Fuzzy". Rows where the checks disagree are flagged *Split*, so look at those first. You can pick any suggestion, any other Silver column, or "Ignore".
+**You choose.** The answer most checks agree on is pre-selected and marked *Recommended*. Open a row's list to see every suggestion and which checks voted for it, for example "total_premium: Semantic + AI" and "premium: Fuzzy". Rows where the checks disagree are flagged *Split*, so look at those first. You work from the Silver side: each of the 48 DRT columns takes one source column from its list (suggestions first, then every other column, then "None"), so a file of 100 columns is still 48 choices. Columns with no recommendation sit on their own *Not mapped* tab, and source columns nothing takes are listed under *Bronze not loaded*. One source column can feed two DRT columns: choose it for both. Some profit centers use one "Effective Date" for both the policy and the accounting date.
 
 **Nothing is remembered until you approve.** Approving saves the whole mapping, including the rows the tool filled in from before, so the next file from that source maps itself.
 
@@ -562,9 +583,11 @@ into one common table under the names the business has agreed (the DRT).
 - **Amounts:** `$1,200.50` and `(250.00)`, which means minus 250, are understood.
 - **Unreadable values** are left empty and counted, so you see how many there were before you approve.
 
-**Profit centers** are filled in and corrected from the LOTL reference table, exactly as the AHI document describes. A missing number is looked up from the name, a wrong number is corrected, and a row with neither gets the office of its source. Numbers are always four digits (`94` becomes `0094`). Rows the LOTL can't settle are kept and flagged, never dropped.
+**Profit centers** are filled in and corrected from the business's LOTL table, exactly as the AHI document describes. A missing number is looked up from the name, a wrong number is corrected, and a row with neither gets the office of its source. Numbers are always four digits (`94` becomes `0094`). Rows the LOTL can't settle are kept and flagged, never dropped.
 
 **When a file is replaced in bronze** (a revised Jan–Jun file), its old rows are removed from Silver on the next run, so nothing is counted twice.
+
+**The aggregate** adds up premium, fees, commissions, revenue and the number of policies per profit center and month, in the business's aggregate table. It is rebuilt after every load.
 
 ## What this tool does not do
 

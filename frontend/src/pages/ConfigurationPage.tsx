@@ -12,6 +12,7 @@ import {
   Layers,
   ListChecks,
   RefreshCw,
+  ScanEye,
   Sheet,
   Table2,
   Trash2,
@@ -25,7 +26,7 @@ import { PageHeader, SectionCard } from "../components/layout/Layout";
 import { SectionNav } from "../components/SectionNav";
 import { AppendModeOptions } from "./AppendSection";
 import { Badge } from "../components/ui/Badge";
-import { Button } from "../components/ui/Button";
+import { Button, IconButton } from "../components/ui/Button";
 import { Checkbox, SearchInput } from "../components/ui/Controls";
 import { Alert, EmptyState, ProgressBar, StatTile, useToast } from "../components/ui/Feedback";
 import { Modal, Tooltip } from "../components/ui/Overlay";
@@ -87,7 +88,7 @@ export function ConfigurationPage() {
           </ShowSection.Provider>
         </div>
         <aside className="scroll-thin xl:sticky xl:top-[136px] xl:max-h-[calc(100dvh-152px)] xl:self-start xl:overflow-y-auto">
-          <SummaryPanel onContinue={() => navigate("run")} />
+          <SummaryPanel onPreview={() => navigate("preview")} />
         </aside>
       </div>
       {!flow.hydrated && <span className="sr-only">Loading workspace</span>}
@@ -374,6 +375,7 @@ function LoadedFileRow({ entry }: { entry: FileEntry }) {
   const none = entry.selected.length === 0;
 
   const show = useContext(ShowSection);
+  const navigate = useNavigate();
   const focus = () => {
     flow.setFocusedId(workbook.id);
     show("section-sheets");
@@ -399,6 +401,15 @@ function LoadedFileRow({ entry }: { entry: FileEntry }) {
       <div className="hidden shrink-0 sm:block">
         {fileStatus(flow, entry) ?? (none ? <Badge tone="warning" icon={<TriangleAlert />}>No sheets</Badge> : <Badge tone="neutral" dot>Ready</Badge>)}
       </div>
+      <IconButton
+        label={`Preview ${workbook.filename}`}
+        onClick={() => {
+          flow.setFocusedId(workbook.id);
+          navigate("preview");
+        }}
+      >
+        <ScanEye />
+      </IconButton>
       <Tooltip content={flow.running ? "Locked while cleaning" : "Remove"}>
         <button
           type="button"
@@ -506,6 +517,7 @@ const FILES_PER_PAGE = 5;
 
 function SheetSection({ part }: { part: "sheets" | "append" }) {
   const flow = useWorkflow();
+  const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const entry = flow.focused;
   const workbook = entry?.workbook ?? null;
@@ -646,6 +658,7 @@ function SheetSection({ part }: { part: "sheets" | "append" }) {
                 </th>
                 <th scope="col" className="px-4 py-2.5 text-right">Columns</th>
                 <th scope="col" className="px-4 py-2.5">Status</th>
+                <th scope="col" className="w-12 px-2 py-2.5"><span className="sr-only">Preview</span></th>
               </tr>
             </thead>
             <tbody>
@@ -690,12 +703,23 @@ function SheetSection({ part }: { part: "sheets" | "append" }) {
                         <Badge tone="neutral" dot>Ready</Badge>
                       )}
                     </td>
+                    <td className="px-2 py-1.5" onClick={(event) => event.stopPropagation()}>
+                      <IconButton
+                        label={`Preview ${sheet.name}`}
+                        onClick={() => {
+                          flow.setPreviewSheet(workbook.id, sheet.name);
+                          navigate("preview");
+                        }}
+                      >
+                        <ScanEye />
+                      </IconButton>
+                    </td>
                   </tr>
                 );
               })}
               {!visible.length && (
                 <tr>
-                  <td colSpan={5}>
+                  <td colSpan={6}>
                     <EmptyState compact icon={<Sheet />} title="No matches" description={`Nothing matches “${query}”.`} action={<Button size="sm" onClick={() => setQuery("")}>Clear</Button>} />
                   </td>
                 </tr>
@@ -722,9 +746,10 @@ function SheetSection({ part }: { part: "sheets" | "append" }) {
 /* Summary                                                                     */
 /* -------------------------------------------------------------------------- */
 
-function SummaryPanel({ onContinue }: { onContinue: () => void }) {
+function SummaryPanel({ onPreview }: { onPreview: () => void }) {
   const flow = useWorkflow();
-  const reason = flow.runBlockedReason;
+  // Previewing needs the files only; a sheet selection is needed later, to run.
+  const reason = !flow.files.length ? "Upload a workbook first." : flow.uploading ? "Wait for the uploads to finish." : null;
   const count = flow.files.length;
   const appending = flow.files.filter(effectiveAppend).length;
   const missing = flow.files.filter((entry) => entry.selected.length === 0);
@@ -801,12 +826,12 @@ function SummaryPanel({ onContinue }: { onContinue: () => void }) {
       )}
       <div className="mt-6 border-t border-ink-200 pt-5">
         <Tooltip content={reason} className="w-full">
-          <Button variant="primary" size="lg" className="w-full" iconRight={<ArrowRight />} disabled={Boolean(reason)} onClick={onContinue}>
-            Continue
+          <Button variant="primary" size="lg" className="w-full" iconRight={<ArrowRight />} disabled={Boolean(reason)} onClick={onPreview}>
+            Preview
           </Button>
         </Tooltip>
         {reason && (
-          <p className="mt-2 text-center text-caption text-ink-500" id="continue-reason">
+          <p className="mt-2 text-center text-caption text-ink-500" id="preview-reason">
             {reason}
           </p>
         )}

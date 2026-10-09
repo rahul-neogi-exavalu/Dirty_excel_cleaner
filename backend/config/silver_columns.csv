@@ -1,12 +1,70 @@
-silver_column_name,drt_column_name,data_type,business_key,description
-profit_center_name,Profit Center Name,text,n,"Name of the profit center / office (legacy office name, branch, zone)"
-profit_center_number,Profit Center Number,text,y,"Four-digit profit center code (PC number, office number, branch code)"
-insurance_company_name,Insurance Company Name,text,y,"Insurance carrier that writes the policy (carrier, insurer, underwriter, company)"
-producer_name,Producer Name,text,n,"Producer or agency that sold the policy (agent, agency, broker, writing agency)"
-policy_number,Policy Number,text,y,"Policy identifier (policy no, policy id, policy reference)"
-premium,Premium,decimal,n,"Premium amount (written premium, premium amount, gross premium)"
-commission,Commission,decimal,n,"Commission amount or rate paid to the producer"
-accounting_effective_date,Accounting Effective Date,date,n,"Date the transaction is booked for accounting (posting date, accounting date)"
-policy_effective_date,Policy Effective Date,date,n,"Date the policy coverage starts (inception date, effective date)"
-transaction_effective_date,Transaction Effective Date,date,y,"Date the policy transaction takes effect (transaction date)"
-line_of_business,Line of Business,text,n,"Product line or line of business (LOB, product, coverage type)"
+silver_column_name,drt_column_name,data_type,business_key,role,description
+ahi_policy_transaction_id,,bigint,n,system,Surrogate key of the Silver row (generated)
+source_system,,string,n,system,Source system of the bronze table (profit center code)
+source_table,,string,n,system,Bronze table the row came from
+product_line_name,Product Line Name,string,n,mapped,"Product line or line of business (LOB, product, line of business, coverage type, program type)"
+profit_center_number,Profit Center Number,string,y,mapped,"Four-digit profit center code (PC number, office number, branch code, profit center)"
+profit_center_name,Profit Center Name,string,n,mapped,"Name of the profit center / office (legacy office name, branch name, office, zone)"
+parent_producer_name,Parent Producer Name,string,n,mapped,"Parent of the producer or agency (parent agency, master agency, parent producer)"
+producer_agency_name,Producer/Agency Name,string,n,mapped,"Producer or agency that sold the policy (producer name, agency, agent, broker, writing agency, retail agent, billing co)"
+market_provider,MarketProvider,string,n,mapped,"Market the risk is placed with (market, mkt provider, market name)"
+is_mga,Is MGA,boolean,n,mapped,"Whether the business is written through an MGA (MGA flag)"
+is_mgu,Is MGU,boolean,n,mapped,"Whether the business is written through an MGU (MGU flag)"
+policy_effective_year,PolicyEffectiveYear,int,n,mapped,"Year the policy takes effect (policy year, effective year)"
+policy_effective_month,PolicyEffectiveMonth,int,n,mapped,"Month the policy takes effect (policy month, effective month)"
+policy_effective_date,PolicyEffectiveDate,date,n,mapped,"Date the policy coverage starts (inception date, effective date, eff date)"
+premium,Premium,"decimal(18,2)",n,mapped,"Premium amount (written premium, net premium, gross premium, premium amount, total premium)"
+insurance_company_name,InsuranceCompany Name,string,y,mapped,"Insurance carrier that writes the policy (carrier, insurer, issuing company, writing company, company name)"
+program_name,Program Name,string,n,mapped,"Insurance program the policy belongs to (program)"
+policy_number,PolicyNumber,string,y,mapped,"Policy identifier (policy no, policy #, policy id, policy reference)"
+policy_status,Policy Status,string,n,mapped,"Status of the policy (status, policy state)"
+transaction_detail,Transaction Detail,string,n,mapped,"Type of policy transaction (transaction type, transaction description, trans code, new or renewal, endorsement)"
+transaction_effective_date,TransactionEffectiveDate <for different transactions>,date,y,mapped,"Date the policy transaction takes effect (transaction date, tran date, endorsement date)"
+policy_tran_id,Policy Transaction ID,string,n,mapped,"Identifier of the policy transaction (transaction id, tran id)"
+accounting_effective_date,AccountingEffective Date,date,n,mapped,"Date the transaction is booked for accounting (posting date, accounting date, booked date, invoice date)"
+policy_expiration_date,Policy Expiration Date,date,n,mapped,"Date the policy coverage ends (expiration date, expiry date, exp date)"
+renewal_flag,Renewal Flag,boolean,n,mapped,"Whether the policy is a renewal (renewal, new or renewal flag)"
+market_provider_id,MarketProviderID,string,n,mapped,"Identifier of the market provider (market id)"
+naic_code,NAIC Code,string,n,mapped,"NAIC code of the insurance company (NAIC)"
+insurance_company_am_best_number,Insurance Company AM Best Number,string,n,mapped,"AM Best number of the insurance company (AM Best)"
+insurance_company_id,InsuranceCompanyID,string,n,mapped,"Identifier of the insurance company (carrier id, company code, issuing company code)"
+producer_license_number,Producer License Number,string,n,mapped,"Producer's license number (license number, license no)"
+producer_billing_address,Producer Billing Address,string,n,mapped,"Producer billing street address (billing address)"
+producer_billing_city,Producer Billing City,string,n,mapped,"Producer billing city (billing city)"
+producer_billing_state,Producer Billing State,string,n,mapped,"Producer billing state (billing state)"
+producer_billing_zipcode,Producer Billing Zipcode,string,n,mapped,"Producer billing ZIP code (billing zip, billing postal code)"
+producer_office_location,Producer Office Location,string,n,mapped,"Producer office address (office location, office address)"
+producer_office_city,Producer Office City,string,n,mapped,"Producer office city (office city)"
+producer_office_state,Producer Office State,string,n,mapped,"Producer office state (office state)"
+producer_office_zipcode,Producer Office Zipcode,string,n,mapped,"Producer office ZIP code (office zip, office postal code)"
+producer_effective_date,Producer Effective Date,date,n,mapped,"Date the producer appointment starts (producer start date, appointment date)"
+producer_expiration_date,Producer Expiration Date,date,n,mapped,"Date the producer appointment ends (producer end date)"
+parent_producer_id,Parent Producer ID,string,n,mapped,"Identifier of the parent producer (parent agency id)"
+producer_eo_policy_number,Producer E&O Policy Number,string,n,mapped,"Producer errors and omissions policy number (E&O policy number)"
+producer_eo_insurance_company_name,Producer E&O Insurance Company Name,string,n,mapped,"Carrier of the producer's E&O policy (E&O carrier)"
+producer_code,Producer Code,string,n,mapped,"Producer or agency code (agent code, agency id, broker code, producer id)"
+producer_tax_id,Producer Tax ID,string,n,mapped,"Producer tax identifier (FEIN, tax id, TIN)"
+gross_commission_amount,GrossCommissionAmount,"decimal(18,2)",n,mapped,"Gross commission amount (gross commission, commission amount, agency commission, MGA commission)"
+commission_pct,CommissionPct,"decimal(10,6)",n,mapped,"Gross commission rate (commission percent, commission %, commission rate, comm pct)"
+producer_commission_amount,ProducerCommissionAmount,"decimal(18,2)",n,mapped,"Commission paid to the producer (agent commission, broker commission, producer commission, sub agent commission)"
+producer_commission_pct,ProducerCommissionPct,"decimal(10,6)",n,mapped,"Rate of the commission paid to the producer (agent commission %, broker commission percent, producer rate)"
+policy_fees,PolicyFees,"decimal(18,2)",n,mapped,"Policy fees (fees, policy fee, MGA fee, fee amount)"
+revenue,Revenue,"decimal(18,2)",n,mapped,"Revenue (net revenue, total revenue, net commission)"
+business_key_hash,,string,n,system,SHA-256 of the business-key columns
+row_hash,,string,n,system,SHA-256 of every business column
+source_file,,string,n,system,File the row was loaded from
+ingestion_timestamp,,timestamp,n,system,When the bronze load ran (its processing_date)
+processed_timestamp,,timestamp,n,system,When the Silver run processed the row
+silver_insert_timestamp,,timestamp,n,system,When the row was inserted into Silver
+silver_update_timestamp,,timestamp,n,system,When the row was last updated in Silver
+source_data_period_start_date,,date,n,system,Start date of the business data period represented by the source-provided dataset
+source_data_period_end_date,,date,n,system,End date of the business data period represented by the source-provided dataset
+source_data_period_type,,string,n,system,"Type of source data period, e.g. MONTH, DATE, DATE_RANGE, YTD, YEAR, SNAPSHOT"
+UltimateParentProducerNames,,string,n,mapped,"Ultimate parent of the producer (ultimate parent producer, ultimate parent agency). Not a DRT column: never offered as a mapping target"
+drt_reporting_start_date,,date,n,system,Reporting start date from the control table (1st of the first month)
+drt_reporting_end_date,,date,n,system,Reporting end date from the control table (last day of the last month)
+drt_reporting_year,,int,n,system,Year of the reporting end date
+drt_reporting_month,,int,n,system,Month of the reporting end date
+drt_reporting_period,,string,n,system,Reporting period: the end month (YYYY-MM)
+drt_reporting_period_type,,string,n,system,Reporting period type from the control table: YTD or MONTHLY
+ajg_apd,,string,n,mapped,"AJG APD value (APD). Not a DRT column: never offered as a mapping target"

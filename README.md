@@ -169,24 +169,33 @@ step shows "Database not configured" and cleaning works as before.
 | New table | Create `ext_{source}_{sheet}`, or `ext_{source}_data` for month/date sheets | — |
 | Later period, identical columns | Append | — |
 | Later period, same columns reordered | Reorder to the table's order, append | — |
-| Later period, columns added or missing | Evolve (`ADD COLUMN`; missing load as NULL) | Required |
-| Later period, different schema | New table `…_{yyyy_mm}` | Required |
-| Overlapping period (revised Jan–Jun, or Jan–Jul) | Replace the earlier load(s) | Required |
+| Later period, columns added or missing (in any order) | Evolve (`ADD COLUMN`; missing load as NULL) | Required |
+| Later period, different schema | Another table of the same source it fits, else a new table `…_v2` (never a date in the name) | Required |
+| Period covering the loaded one (revised Jan–Jun, or Jan–Jul) | Replace the earlier load(s), in whichever table they are | Required |
+| Period overlapping the loaded one only partly (May–Jul after Jan–Jun) | Blocked until the reviewer chooses Replace, Append, a new table or Skip | Required |
 | Same file content again | Skip (can be overridden to Replace) | Required if overridden |
 
-- **Detection:** the source system comes from the file-name suffix (`ARR_pc0515.xlsx` → `pc0515`). The period comes from the accounting / transaction date columns, then from month-named sheets. Both are pre-filled and editable.
+- **Detection:** the source system and `pc_id` come from the same `PC` token in the file name, zero-padded (`ARR_PC515.xlsx` → `pc0515`, `PC0515`). A name with two different PC tokens is left for the reviewer; a name with none falls back to `AHI_SOURCE_SYSTEM_PATTERN`, never taking a period (`fy2025`, `jun2025`) or a version (`v12`). The period comes from the file name when it states one in words (`JanJun_2026`, `Q2 2026`, `H1`), else from the accounting / transaction date columns, then month-named sheets. All are pre-filled and editable, and the review warns when the data's dates fall outside the period the name states, or the profit center has no division.
+- **File-level values** (the business's bronze schema), detected and editable in the Files step:
+  - `pc_id`: `PC` plus the 4-digit profit center, from the file name (`PC796_2026-06 …` → `PC0796`).
+  - `file_date`: from the file name (`2026-06` → 2026-06-01; `Jun 2026` and `202606` also work).
+  - `division_name`: from `division_mapping` by profit center. The reviewer picks when the table lists two divisions.
+
+  A missing pc_id or file date, or an unchosen division, blocks approval.
 - **Atomic loads:** an approved plan loads in **one transaction**, so either all of it lands or none of it does. Rows are checked against the cleaned row count before commit.
-- **Lineage:** every bronze row carries `_ingestion_id`, `_source_file`, `_source_sheet` and `_ingested_at`. Bronze columns are `text`, and typing is left to Silver.
+- **Columns:** every bronze table is `pc_id`, then the file's columns, then `file_date`, `division_name`, `file_name` (exact) and `processing_date` (the load time, a timestamp, one per load). Internal lineage follows: `_ingestion_id`, `_source_file`, `_source_sheet`, `_ingested_at`. Tables created earlier gain the five columns on their next load. The file's columns are `text`; typing is left to Silver.
 - **Tests:** run the unit tests with `python -m pytest backend/tests -k bronze`. The end-to-end test runs when `AHI_TEST_DATABASE_URL` points at a scratch Postgres.
-- **Duplicates:** a file is identified by its content hash plus the sheets an output came from. Each table of a multi-table workbook is matched to its own earlier load, and the same file twice in one batch is loaded once.
-- **Approval is re-checked:** on approve, the plan is rebuilt against the bronze layer as it is now. If anything the reviewer confirmed has changed (action, target table, columns, or the loads it replaces), approval is refused with `plan_changed` and the plan must be reviewed again.
+- **Duplicates:** a file is identified by its content hash plus the table regions an output came from, so two tables on one sheet are two loads. Each table of a multi-table workbook is matched to its own earlier load, and the same file twice in one batch is loaded once. When a batch holds Jan–Jun and Jan–Jul of the same table, only Jan–Jul loads by default.
+- **Repeated headers:** headers that clean to the same name are numbered (`Amount ($)` → `amount`, `Amount (%)` → `amount_2`). A later file that lists them the other way round is matched by the headers as written, so each loads into its own column.
+- **Source headers:** every bronze column's header as the file wrote it is kept in the registry and the audit table; Silver shows it and saves it in the DRT column mapping.
+- **Approval is re-checked:** on approve, and again inside the load under its lock, the plan is rebuilt against the bronze layer as it is now. If anything the reviewer confirmed has changed (action, target table, columns, or the loads it replaces), the plan is refused with `plan_changed` and must be reviewed again.
 - **Errors:** an unreachable database, or a user that can't create schemas, returns a 503 with advice rather than a server error.
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/bronze/status` | Configured / reachable |
 | `POST /api/bronze/plans` | Build a plan `{job_ids, batch_id}` |
-| `PATCH /api/bronze/plans/{id}/files/{job_id}` | Edit source system / period |
+| `PATCH /api/bronze/plans/{id}/files/{job_id}` | Edit pc_id, file date, division, source system, period |
 | `PATCH /api/bronze/plans/{id}/items/{key}` | Edit table name / action |
 | `POST /api/bronze/plans/{id}/approve` | `{reviewed_by, confirmed}`; 409 until every risky item is confirmed |
 | `GET /api/bronze/tables` | Registry with ingestion history |
@@ -199,19 +208,32 @@ Step 5 of the UI follows `enhancements/AHI-Bronze-Silver-Scenario-Doc.docx`. It 
 > architecture, the voting matcher, cleansing, and every business requirement mapped to the
 > code and test that satisfies it.
 
+**Stages:** Bronze → **Silver Cleansed** → **Final Silver**, as the document describes. Each bronze table has a source-specific cleansed table of the same name in `AHI_CLEANSED_SCHEMA` (e.g. `ahi_bronze_cleansed.ext_pc0101_arr`): its rows mapped onto the Silver columns and typed, with the load they came from, how the profit center was settled and which values could not be read. Final Silver (`silver_transaction`) is loaded from it in the same transaction.
+
 **Tables in `AHI_SILVER_SCHEMA`:**
 
 | Table | Holds |
 |---|---|
-| `column_mapping` | **Approved** mappings only: `pc_id, bronze_table_name, bronze_column_name, drt_column_name, silver_column_name`. A NULL `silver_column_name` means the column was approved as ignored. |
-| `detail` | Every loaded row under the Silver column names, typed (text / date / numeric(18,2)), with `pc_id`, `pc_lookup_status`, `business_key_hash`, `row_hash` and lineage (`_bronze_table`, `_ingestion_id`, `_source_file`, `_source_sheet`, `_silver_run_id`). |
-| `summary` | Rows and premium by `pc_id`, profit center and accounting month, rebuilt for each profit center a run touches. |
+| `drt_column_mapping` | The business's DRT column mapping (`profit_center, pc_column, drt_column`) plus `silver_column_name`, the silver_transaction column it means. It is seeded from `assets/drt_column_mapping.xlsx` and grows with every approved mapping. `pc_column` is the header as the file wrote it. `drt_column` is the business's DRT column for the row's Silver column (one of the 48 in `<control>.drt_label`). One source column may have two rows (two Silver columns). Ignores are never saved: an ignored column is asked about again next time. |
+| `silver_transaction` | **Exactly** the 69 columns of the business's `silver_schema` (`backend/config/silver_columns.csv`), typed as it states. A bronze load's rows are identified by `source_table`, `source_file` and `ingestion_timestamp` (the load's `processing_date`). |
+| `silver_aggregate` | **Exactly** the 75 columns of `silver_aggregate_schema` (`backend/config/silver_aggregate_columns.csv`). It holds two kinds of rows, told apart by `agg_data_source`: the roll-up of `silver_transaction` (`silver_transaction`), and the profit center's own aggregates, loaded as reported from an `_agg` bronze table (`bronze_aggregate`, `record_grain` `AS_REPORTED`). Rebuilding the roll-up never touches the second kind. The roll-up is rebuilt from `silver_transaction` per source system at profit center × accounting month grain: sums of premium, fees, commissions and revenue, plus the policy count. Columns the detail cannot supply stay NULL. |
 
-**The Silver columns** (the DRT) are listed in `backend/config/silver_columns.csv` (`silver_column_name, drt_column_name, data_type, business_key, description`). A draft built from the document's fields ships; replace it with the business's DRT. Synonyms written in the description's parentheses help matching.
+**Reference data** (`assets/`, loaded into empty tables on first use; reload with `python backend/tools/seed_reference.py --replace`):
+
+| Table | Workbook | Used for |
+|---|---|---|
+| `<control>.division_mapping` | `division_table_details.xlsx` | bronze `division_name` |
+| `<control>.lotl` | `pc_name_pc_number_from_lotl.xlsx` (`profit_center_number, legacy_office_name, status`) | Silver profit center name and number |
+| `<silver>.drt_column_mapping` | `drt_column_mapping.xlsx` | the saved vote and the approved mapping |
+| `<control>.drt_label` | `drt_column_mapping.xlsx` (distinct `DRT_Column`), then every DRT column of `silver_columns.csv` | the DRT columns, each with its `silver_column_name`; the only labels written to `drt_column`. Kept in step at startup, which also fills `drt_column` on rows saved without one |
+
+**The Silver columns** are listed in `backend/config/silver_columns.csv` (`silver_column_name, drt_column_name, data_type, business_key, role, description`), mirroring `assets/silver_schema.xlsx`:
+- **Roles:** 50 are `mapped` (a bronze column can map to them); 19 are `system` (keys, hashes, lineage, timestamps and periods, filled by the pipeline).
+- **Matching help:** synonyms written in the description's parentheses help matching.
 
 **Matching: independent votes.** The methods do not run one after another. Each one votes on every column (`backend/src/ahi_silver/matching.py`):
 
-1. **Saved:** this table's approved mapping, or the same column name approved for another table.
+1. **Saved:** the rows in `drt_column_mapping` of the profit centers the table's loads carry, or the same column name approved for another profit center. A bronze column meets a row by its source header as written (case and spacing aside); a load made before headers were kept meets it on normalized words ("Net Premium" ~ `net_premium`).
 2. **Exact:** same words as the Silver or DRT name, after splitting run-together names (`profitcentername`) and expanding abbreviations (`acct_eff_dt`).
 3. **Fuzzy:** rapidfuzz WRatio of at least `AHI_MATCH_FUZZY_MIN` (85). The match must share a distinctive word, beat the runner-up by 5 points and agree on the kind of value, so a column that shares only "name" is never guessed.
 4. **Semantic:** word2vec cosine of at least `AHI_MATCH_SEMANTIC_MIN` (0.72) against the name, DRT name and synonyms, with the same margin and kind rule. Names with an unexpanded abbreviation (`acc`, `incp`) get no word2vec vote.
@@ -230,44 +252,56 @@ Step 5 of the UI follows `enhancements/AHI-Bronze-Silver-Scenario-Doc.docx`. It 
 
 **Ranking and the reviewer:**
 
-- Votes for the same Silver column form a candidate. Candidates rank by this table's saved mapping first, then the number of methods that agree, then the strongest vote.
-- The top candidate is pre-selected. Each row's dropdown lists every candidate with the methods behind it (`total_premium`, recommended, Semantic + AI; `premium`, Fuzzy), then every Silver column, then Ignore.
+- Votes for the same Silver column form a candidate. Candidates rank by this profit center's saved mapping first, then the number of methods that agree, then the strongest vote.
+- **One column, two targets:** one bronze column can fill several DRT columns: choose it for each. The DRT mapping does this for some profit centers, e.g. one `EffectiveDate` for both the policy and the accounting date.
+- **The review is made from the Silver side.** The business's 48 DRT columns are fixed; each takes one bronze column from a dropdown, or none. A table of 100 bronze columns is still 48 choices, and a bronze column no DRT column takes is not loaded (listed on its own tab, with a *Load into* shortcut). The tabs: *Mapped*, *Not mapped* (no recommendation, kept apart), *Bronze not loaded* and *Data quality*; each pages at least three bands at a time.
+- Each DRT column's dropdown lists the bronze columns voted for it, best first, with the methods behind each (`total_premium`, recommended, Semantic + AI), then every other bronze column, then *None* (it loads empty). Type a few letters to jump to a column.
 - Rows where methods disagree are flagged **Split**.
-- Approval is blocked until every column is mapped or set to Ignore, and no two columns share a target.
-- **Approving saves the whole mapping, pre-filled rows included.** Suggestions are never saved.
-- Saved rows stay editable in the Mapping tab.
+- Approval is blocked only when two bronze columns feed one DRT column.
+- **Approving saves the whole mapping, pre-filled rows included,** for every profit center in the table. Suggestions and ignores are never saved. A saved row is replaced only by an approval for the same header, so two headers that normalize alike ("Agent Commission", "Agent Commission%") never overwrite each other.
+- Saved rows stay editable in the Mapping tab, and can be removed there.
+- **Reviews live in the database** (`<control>.silver_draft`): any API process can serve them and they survive a restart. An unapproved review expires after `AHI_SILVER_DRAFT_TTL_HOURS` (72) of inactivity.
 
 **Cleansing:**
 
 - **Text:** trimmed, and blank becomes NULL.
-- **Dates:** the document's formats in its order, then Excel serials.
-- **Decimals:** `$1,200.50` and `(250.00)` forms are understood.
+- **Dates:** the document's formats in its order (also with fractional seconds or an ISO `T`), then Excel serials. A year is always four digits (`1/5/26` is unreadable, not the year 26); `yyyyMMdd` and serials count only between 1900 and 2100.
+- **Decimals:** `$1,200.50`, `(250.00)` and `$(250.00)` forms are understood, read exactly (no floating point) and rounded half up to each column's own scale (`decimal(18,2)`, `decimal(10,6)`). A percent sign divides by 100: `12%` is 0.12. Anything else (`1 200,50`, `USD 100`) is unreadable.
+- **Integers, booleans, timestamps:** whole numbers (and month names for a `*_month` column); `Y`/`no`/`true`/`0`; ISO date-times.
+- **Derived:** `policy_effective_year` and `policy_effective_month` come from `policy_effective_date` when the file does not give them.
 - **Unreadable values** become NULL and are counted in the review.
 
-**Profit center:** follows the document's four cases against the LOTL. Numbers are padded to 4 digits (`94` becomes `0094`). The `pc_id` is the numeric part of the source system. Until the real LOTL exists, a placeholder table `<control schema>.lotl` is used; `AHI_LOTL_TABLE` points elsewhere. Load it with:
+**Profit center:** follows the document's four cases against the LOTL, which is the business's `pc_name_pc_number_from_lotl` table.
+- **Padding:** numbers are padded to 4 digits (`94` becomes `0094`, `069_01` becomes `0069_01`).
+- **Duplicates:** when a name or number appears twice, the Active row wins.
+- **Both missing:** the name comes from the row's own load's pc_id (`PC0303` → `0303`), so a table holding several profit centers' loads gets each one right.
+- **Matching names:** case, extra spaces, line breaks and dash styles are ignored; the text `null` or `N/A` is a missing value; a number written `PC0094` is read as `0094`.
+- **Location:** `AHI_LOTL_TABLE` points at another table if needed.
+- **Test offices:** the test workbooks use offices the real LOTL does not know. Add them with:
 
 ```bash
-python backend/tools/seed_lotl.py enhancements/test-files/lotl_seed.csv
+python backend/tools/seed_reference.py --add-lotl enhancements/test-files/lotl_seed.csv
 ```
 
-**Loading:** one transaction. It saves the mapping, deletes the Silver rows of bronze loads that were replaced (`status='superseded'`), `COPY`s the new rows, checks the counts, rebuilds the summary, and sets `ingest.ingestion.silver_status`. `ingest.silver_run` keeps every run with its reviewer and the mapping they approved, including, per row, whether it was the recommendation or a manual choice, and every method's vote.
+**Loading:** one transaction. It saves the mapping into `drt_column_mapping`, deletes the Silver rows of bronze loads that were replaced (`status='superseded'`, found by table, file and processing date, and by load in their cleansed table), `COPY`s the new rows into the cleansed table, checks the counts per load, inserts them from there into `silver_transaction`, rebuilds the aggregate, and sets `ingest.ingestion.silver_status`. A failed run is rolled back and then recorded: `silver_status = 'failed'` on its loads (they stay eligible) and a `silver_run` row with the mapping it tried. `ingest.silver_run` keeps every run with its reviewer and the mapping they approved, including, per row, whether it was the recommendation or a manual choice, and every method's vote.
 
 - **Removal-only runs:** a run with no loads selected is allowed. It only removes the rows of loads replaced in Bronze.
 - **Stale approvals are refused** with `409 plan_changed`. Approval (and the load, under its lock) checks that the loads are still eligible (not replaced in Bronze, not loaded by another run), that the bronze tables' columns are unchanged, and that every mapped Silver column still exists.
-- **No database connection is held during matching.** Bronze rows, the saved mapping and the LOTL are read once and the connection is released before word2vec or the AI is consulted. Mapping edits re-check quality against those rows in memory.
+- **No database connection is held during matching.** Bronze rows, the saved mapping and the LOTL are read once and the connection is released before word2vec or the AI is consulted. Mapping edits re-check quality against those rows, kept briefly in a small per-process cache.
 
 **Word2vec vectors:** Google's pretrained Google News vectors (1.7 GB, gzipped) go in `backend/models/`, which is git-ignored. Download them from the gensim-data releases on GitHub (`word2vec-google-news-300.gz`) and set `AHI_WORD2VEC_PATH=backend/models/word2vec-google-news-300.gz`.
 
-**Test data:** 10 workbooks covering every scenario are in `enhancements/test-files/`; its README gives the order and the expected outcome of each.
+**Test data:** 14 workbooks covering every scenario are in `enhancements/test-files/`; its README gives the order and the expected outcome of each.
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/silver/eligible` | Loads to process, plus replaced loads whose rows will be removed |
 | `POST /api/silver/runs` | Suggest a mapping and a dry-run quality report `{ingestion_ids}` |
-| `PATCH /api/silver/runs/{id}/mapping` | Change one row `{table_name, bronze_column, silver_column, ignored}` |
-| `POST /api/silver/runs/{id}/approve` | `{reviewed_by}`; returns 409 until every column is decided |
-| `GET` / `PATCH /api/silver/mapping` | Saved mapping, editable |
-| `GET /api/silver/summary`, `GET /api/silver/catalog` | Summary table; the Silver column list and which matchers are active |
+| `PATCH /api/silver/runs/{id}/targets` | From the Silver side: `{table_name, silver_column, bronze_column}` (`null`: none) |
+| `PATCH /api/silver/runs/{id}/mapping` | Change one bronze column `{table_name, bronze_column, silver_column, ignored}`, or its extra targets `{also: [...]}` |
+| `POST /api/silver/runs/{id}/approve` | `{reviewed_by}`; returns 409 while two bronze columns feed one DRT column |
+| `GET` / `PATCH` / `DELETE /api/silver/mapping` | The DRT column mapping; a row is named by `{profit_center, pc_column, drt_column, silver_column_name}`, and an edit adds `new_silver_column_name` |
+| `GET /api/silver/aggregate`, `GET /api/silver/catalog` | The aggregate table; the Silver columns (with their role) and which matchers are active |
 
 ## Outputs
 
@@ -585,9 +619,10 @@ frontend/                React + Vite UI (Configure → Run → Results → Inge
 .env.example             bronze database settings template (copy to .env)
 design-system/           UI design system (MASTER.md): tokens, type, copy rules
 enhancements/            AHI scenario documents (File → Bronze, Bronze → Silver)
+assets/                  the business's reference workbooks: division mapping, LOTL, DRT column mapping, Silver schemas
 backend/
   api/                   FastAPI service: routes, validation, jobs, exports, bronze ingest
-  migrations/            SQL for the bronze control tables, applied on first use
+  migrations/            SQL for the control and reference tables, applied on first use
   legacy/                the original six POC workbooks
   sample_files_uncleaned/  the scenario corpus (git-ignored; supply your own)
   tests/                 cleaner and API test suites
@@ -596,10 +631,11 @@ backend/
   tools/ablation.py      disables each signal in turn to show what is load-bearing
   src/ahi_bronze/        File → Bronze rules, pure: naming, periods, schema cases, planner
   src/ahi_silver/        Bronze → Silver rules, pure: voting matcher, AI prompt, cleansing, profit center, hashes
-  config/silver_columns.csv  the Silver target columns (DRT draft)
+  config/silver_columns.csv  the 69 silver_transaction columns (the business's silver_schema)
+  config/silver_aggregate_columns.csv  the 75 silver_aggregate columns
   models/                word2vec vectors (git-ignored)
   tools/make_silver_test_files.py  writes the 10 scenario workbooks
-  tools/seed_lotl.py     loads a LOTL CSV
+  tools/seed_reference.py  (re)loads the reference tables from assets/
   src/ahi_clean/
     signals.py        scoring primitives (fill, uniqueness, type profile, coverage, contrast)
     typing_utils.py   fine-grained type inference

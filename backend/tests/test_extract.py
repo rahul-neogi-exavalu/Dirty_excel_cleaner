@@ -582,3 +582,22 @@ def test_the_header_hint_is_read_from_the_sheet_label():
     result = one(rows)
     assert result.frame["createdat"].dtype == pl.Date
     assert any("names a date" in flag for flag in result.trace["flags"]["createdat"])
+
+
+# --------------------------------------------------------------------------- #
+# The header as written, kept for the business's own column mapping
+# --------------------------------------------------------------------------- #
+
+
+def test_each_column_keeps_its_header_as_written():
+    result = one([HEADER] + records(6))
+    assert result.trace["source_headers"] == dict(zip(NAMES, HEADER))
+
+
+def test_a_two_row_header_is_kept_joined_with_a_space():
+    top = ["Profit Center", "Profit Center", "Producer", "Insurance", "Premium", "Policy", "Accounting", "Commission"]
+    bottom = ["Name", "Number", "Agency", "Company", None, "Number", "Date", "%"]
+    result = one([top, bottom] + records(10))
+    headers = result.trace["source_headers"]
+    assert headers["profit_center_name"] == "Profit Center Name"
+    assert headers["premium"] == "Premium" and headers[result.frame.columns[-1]] == "Commission %"

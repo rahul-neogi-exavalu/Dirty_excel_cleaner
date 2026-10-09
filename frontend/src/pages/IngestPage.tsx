@@ -3,12 +3,12 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  ClipboardList,
   Columns3,
   Database,
   DatabaseZap,
   FileSpreadsheet,
   History,
-  Info,
   ListChecks,
   RefreshCw,
   Rows3,
@@ -18,16 +18,16 @@ import {
   TriangleAlert,
   UserCheck,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api/client";
-import type { BronzeStatus, BronzeTable, IngestAction, IngestPlan, PlanFile, PlanItem } from "../api/types";
+import type { BronzeStatus, BronzeTable, ControlRow, IngestAction, IngestPlan, PlanItem } from "../api/types";
 import { ColumnChips } from "../components/AppendOutcome";
 import { PageHeader, SectionCard } from "../components/layout/Layout";
 import { Badge, type Tone } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
-import { Checkbox, LabeledCheckbox } from "../components/ui/Controls";
+import { Checkbox, LabeledCheckbox, SearchInput } from "../components/ui/Controls";
 import { Alert, EmptyState, ProgressBar, Skeleton, StatTile, useToast } from "../components/ui/Feedback";
-import { Modal, Tooltip } from "../components/ui/Overlay";
+import { Modal } from "../components/ui/Overlay";
 import { Pagination, useFitPageSize, usePaged } from "../components/ui/Pagination";
 import { Segmented } from "../components/ui/Segmented";
 import { Select } from "../components/ui/Select";
@@ -51,10 +51,13 @@ const POLL_MS = 700;
 
 const toError = (error: unknown) => (error instanceof ApiError ? error : new ApiError(0, { code: "unknown", message: String(error) }));
 
+// An ingestion row's status, as the load history shows it.
+const LOAD_STATUS: Record<string, string> = { ingested: "Live", superseded: "Superseded", skipped: "Skipped", removed: "Removed" };
+
 export function IngestPage() {
   const [status, setStatus] = useState<BronzeStatus | null>(null);
   const [statusError, setStatusError] = useState<ApiError | null>(null);
-  const [tab, setTab] = useState<"plan" | "tables">("plan");
+  const [tab, setTab] = useState<"plan" | "control" | "tables">("plan");
 
   const loadStatus = useCallback(() => {
     setStatus(null);
@@ -66,7 +69,7 @@ export function IngestPage() {
   const ready = status?.configured && status.reachable;
   return (
     <>
-      <PageHeader page="ingest" title="Ingest" description="Load cleaned tables into the bronze layer." />
+      <PageHeader page="ingest" title="Ingest" description="Load the staged files the control table lists into Bronze." />
       {statusError ? (
         <div className="card"><EmptyState icon={<ServerOff />} title="Service unavailable" description={statusError.body.message} action={<Button icon={<RefreshCw />} onClick={loadStatus}>Retry</Button>} /></div>
       ) : !status ? (
@@ -96,6 +99,7 @@ export function IngestPage() {
               onChange={setTab}
               items={[
                 { id: "plan", label: "Plan", icon: <ListChecks /> },
+                { id: "control", label: "Control table", icon: <ClipboardList /> },
                 { id: "tables", label: "Bronze tables", icon: <Database /> },
               ]}
             />
@@ -105,7 +109,10 @@ export function IngestPage() {
             </span>
           </div>
           <TabPanel idPrefix="ingest" id="plan" active={tab === "plan"}>
-            <PlanView onShowTables={() => setTab("tables")} />
+            <PlanView onShowTables={() => setTab("tables")} onShowControl={() => setTab("control")} />
+          </TabPanel>
+          <TabPanel idPrefix="ingest" id="control" active={tab === "control"}>
+            {tab === "control" && <ControlView />}
           </TabPanel>
           <TabPanel idPrefix="ingest" id="tables" active={tab === "tables"}>
             {tab === "tables" && <TablesView />}
@@ -120,29 +127,27 @@ export function IngestPage() {
 /* Plan                                                                        */
 /* -------------------------------------------------------------------------- */
 
-function readPlanId(batchId: string): string | null {
+function readPlanId(): string | null {
   try {
-    const saved = JSON.parse(sessionStorage.getItem(PLAN_KEY) ?? "null");
-    return saved?.batchId === batchId ? saved.planId : null;
+    return JSON.parse(sessionStorage.getItem(PLAN_KEY) ?? "null")?.planId ?? null;
   } catch {
     return null;
   }
 }
 
-function savePlanId(batchId: string, planId: string | null) {
+function savePlanId(planId: string | null) {
   try {
-    sessionStorage.setItem(PLAN_KEY, JSON.stringify({ batchId, planId }));
+    sessionStorage.setItem(PLAN_KEY, JSON.stringify({ planId }));
   } catch {
     /* storage unavailable */
   }
 }
 
-function PlanView({ onShowTables }: { onShowTables: () => void }) {
+/** The plan is built from the control table: every file staged by Validate and not loaded yet. */
+function PlanView({ onShowTables, onShowControl }: { onShowTables: () => void; onShowControl: () => void }) {
   const flow = useWorkflow();
   const navigate = useNavigate();
   const toast = useToast();
-  const batch = flow.batch;
-  const jobIds = useMemo(() => (batch?.jobs ?? []).filter((job) => job.status === "succeeded").map((job) => job.id), [batch]);
   const [plan, setPlan] = useState<IngestPlan | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(false);
@@ -150,36 +155,38 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
   const reviewer = useAuth().user?.user_name ?? "";
   const [finalCheck, setFinalCheck] = useState(false);
   const [schemaFor, setSchemaFor] = useState<PlanItem | null>(null);
-  // Files and Plan take turns on screen; null until the first plan picks where to start.
-  const [part, setPart] = useState<"files" | "plan" | null>(null);
+  // Staged files and Plan take turns on screen.
+  const [part, setPart] = useState<"files" | "plan">("plan");
 
   const createPlan = useCallback(async () => {
-    if (!batch || !jobIds.length) return;
     setError(null);
     setBusy(true);
     try {
-      const next = await api.createPlan(jobIds, batch.id);
+      const next = await api.createPlan(null, flow.batch?.id ?? null);
       setPlan(next);
       setConfirmed(new Set());
-      savePlanId(batch.id, next.id);
+      savePlanId(next.id);
     } catch (err) {
+      setPlan(null);
       setError(toError(err));
     } finally {
       setBusy(false);
     }
-  }, [batch, jobIds]);
+  }, [flow.batch?.id]);
 
-  // Reuse this batch's plan while it lives on the server; otherwise build a fresh one.
+  // Reuse the plan while it lives on the server and is still a draft; otherwise build one.
   useEffect(() => {
-    if (!batch || !jobIds.length || flow.running) return;
-    const saved = readPlanId(batch.id);
+    const saved = readPlanId();
     if (!saved) {
       void createPlan();
       return;
     }
-    api.getPlan(saved).then(setPlan).catch(() => void createPlan());
+    api
+      .getPlan(saved)
+      .then((found) => (found.status === "draft" ? setPlan(found) : void createPlan()))
+      .catch(() => void createPlan());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [batch?.id, jobIds.join(","), flow.running]);
+  }, []);
 
   // Follow a running ingestion.
   useEffect(() => {
@@ -211,11 +218,20 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
     }
   };
 
-  if (flow.running) return <div className="card"><EmptyState icon={<RefreshCw className="animate-spin" />} title="Cleaning in progress" description="Ingest when cleaning finishes." /></div>;
-  if (!batch || !jobIds.length)
+  if (error && error.status === 409 && !plan)
     return (
       <div className="card">
-        <EmptyState icon={<FileSpreadsheet />} title="Nothing to ingest" description="Clean a workbook first." action={<Button variant="primary" icon={<ArrowLeft />} onClick={() => navigate(flow.files.length ? "run" : "configuration")}>{flow.files.length ? "Run" : "Configure"}</Button>} />
+        <EmptyState
+          icon={<FileSpreadsheet />}
+          title="Nothing staged for Bronze"
+          description="Validate cleaned files and stage them first. Rejected files are recorded in the control table and never loaded."
+          action={
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button variant="primary" icon={<ArrowLeft />} onClick={() => navigate("validate")}>Validate</Button>
+              <Button icon={<History />} onClick={onShowControl}>Control table</Button>
+            </div>
+          }
+        />
       </div>
     );
   if (error)
@@ -231,17 +247,14 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
   const active = plan.items.filter((item) => item.action !== "skip");
   const needConfirm = active.filter((item) => item.requires_confirmation);
   const unconfirmed = needConfirm.filter((item) => !confirmed.has(item.key));
-  const replacing = active.filter((item) => item.replaces.length > 0);
+  const replacing = active.filter((item) => item.replaces.length > 0 || item.month_replaces.length > 0);
   const rows = active.reduce((sum, item) => sum + item.rows, 0);
   const tables = new Set(active.map((item) => item.table_name)).size;
   const blocked = plan.blockers.length > 0;
   const canApprove = !blocked && !unconfirmed.length && active.length > 0;
-  const filesMissing = plan.files.filter((file) => !file.source_system || !file.period_start).length;
   const itemsToCheck = plan.items.filter(
     (item) => item.action !== "skip" && (item.blockers.length > 0 || (item.requires_confirmation && !confirmed.has(item.key))),
   ).length;
-  // Start where the work is: files missing an input first, otherwise the plan.
-  const shown = part ?? (filesMissing ? "files" : "plan");
 
   const approve = async () => {
     setFinalCheck(false);
@@ -267,46 +280,42 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
   return (
     <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
       <div className="min-w-0 space-y-6">
-        {flow.stale && (
-          <Alert tone="warning" title="Results are out of date" action={<Button size="sm" onClick={() => navigate("run")}>Run again</Button>}>
-            The configuration changed after cleaning. This plan uses the last run.
-          </Alert>
-        )}
         <Segmented
           label="Plan sections"
-          value={shown}
+          value={part}
           onChange={setPart}
           items={[
-            { id: "files", label: `Files (${plan.files.length})`, step: 1, icon: <FileSpreadsheet />, attention: filesMissing > 0, done: filesMissing === 0 },
-            { id: "plan", label: `Plan (${plan.items.length})`, step: 2, icon: <Table2 />, attention: itemsToCheck > 0, done: itemsToCheck === 0 && filesMissing === 0 },
+            { id: "files", label: `Staged files (${plan.files.length})`, step: 1, icon: <FileSpreadsheet />, done: true },
+            { id: "plan", label: `Plan (${plan.items.length})`, step: 2, icon: <Table2 />, attention: itemsToCheck > 0, done: itemsToCheck === 0 },
           ]}
         />
-        {shown === "files" ? (
-        <SectionCard
-          step={1}
-          icon={<FileSpreadsheet />}
-          title="Files"
-          description="Confirm source system and period."
-          actions={<Button size="sm" variant="ghost" icon={<RefreshCw />} onClick={createPlan} disabled={busy}>Re-plan</Button>}
-        >
-          <FilesTable plan={plan} busy={busy} onChange={(jobId, change) => mutate(() => api.updatePlanFile(plan.id, jobId, change))} />
-        </SectionCard>
+        {part === "files" ? (
+          <SectionCard
+            step={1}
+            icon={<FileSpreadsheet />}
+            title="Staged files"
+            description="Decided in Validate and recorded in the control table. Change them there."
+            actions={<Button size="sm" variant="ghost" icon={<RefreshCw />} onClick={createPlan} disabled={busy}>Re-plan</Button>}
+          >
+            <StagedFilesTable plan={plan} />
+          </SectionCard>
         ) : (
-        <SectionCard step={2} icon={<Table2 />} title="Plan" description="Target table and action per output.">
-          <PlanTable
-            plan={plan}
-            busy={busy}
-            confirmed={confirmed}
-            onConfirm={(key, on) => setConfirmed((current) => {
-              const next = new Set(current);
-              if (on) next.add(key);
-              else next.delete(key);
-              return next;
-            })}
-            onSchema={setSchemaFor}
-            onChange={(key, change) => mutate(() => api.updatePlanItem(plan.id, key, change))}
-          />
-        </SectionCard>
+          <SectionCard step={2} icon={<Table2 />} title="Plan" description="Target table and action per staged file."
+            actions={<Button size="sm" variant="ghost" icon={<RefreshCw />} onClick={createPlan} disabled={busy}>Re-plan</Button>}>
+            <PlanTable
+              plan={plan}
+              busy={busy}
+              confirmed={confirmed}
+              onConfirm={(key, on) => setConfirmed((current) => {
+                const next = new Set(current);
+                if (on) next.add(key);
+                else next.delete(key);
+                return next;
+              })}
+              onSchema={setSchemaFor}
+              onChange={(key, change) => mutate(() => api.updatePlanItem(plan.id, key, change))}
+            />
+          </SectionCard>
         )}
       </div>
 
@@ -341,7 +350,7 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
             Ingest
           </Button>
           <p className="mt-2 flex items-center justify-center gap-1.5 text-caption text-ink-500">
-            <ShieldCheck className="h-3.5 w-3.5" aria-hidden /> All or nothing
+            <ShieldCheck className="h-3.5 w-3.5" aria-hidden /> All or nothing · control rows marked loaded
           </p>
         </section>
       </aside>
@@ -350,7 +359,7 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
         open={finalCheck}
         onClose={() => setFinalCheck(false)}
         title="Replace existing data?"
-        description="These earlier loads will be deleted and superseded."
+        description="These earlier loads lose their rows: whole files, or the one month named."
         footer={
           <>
             <Button onClick={() => setFinalCheck(false)}>Cancel</Button>
@@ -364,7 +373,12 @@ function PlanView({ onShowTables }: { onShowTables: () => void }) {
               <p className="font-mono text-caption font-medium text-ink-900">{item.table_name}</p>
               {item.replaces.map((ref) => (
                 <p key={ref.id} className="num text-caption text-ink-600">
-                  {ref.file_name} · {periodLabel(ref.period_start, ref.period_end)}
+                  {ref.file_name} · {periodLabel(ref.period_start, ref.period_end)} · whole file
+                </p>
+              ))}
+              {item.month_replaces.map((ref) => (
+                <p key={ref.id} className="num text-caption text-ink-600">
+                  {ref.file_name} · only {item.replace_month}
                 </p>
               ))}
             </li>
@@ -403,102 +417,59 @@ function keepConfirmed(current: Set<string>, before: IngestPlan | null, after: I
 
 const periodLabel = (start: string | null, end: string | null) => (!start ? "—" : start === end || !end ? start : `${start} → ${end}`);
 
-/* ---- Files ---- */
+/* ---- Staged files ---- */
 
-function FilesTable({ plan, busy, onChange }: { plan: IngestPlan; busy: boolean; onChange: (jobId: string, change: Record<string, string | null>) => void }) {
+const ACTION_TONE: Record<string, Tone> = { INSERT: "brand", APPEND: "success", REJECTED: "danger" };
+
+function StagedFilesTable({ plan }: { plan: IngestPlan }) {
   const list = useRef<HTMLDivElement>(null);
-  const paged = usePaged(plan.files, useFitPageSize(list, { min: 3, max: 20, fallbackRow: 62, reserve: 140 }));
+  const paged = usePaged(plan.files, useFitPageSize(list, { min: 3, max: 20, fallbackRow: 58, reserve: 140 }));
   return (
     <div ref={list} className="overflow-hidden rounded-lg border border-ink-200">
-    <div className="relative overflow-x-auto scroll-thin">
-      <table className="w-full min-w-[640px] border-collapse text-table">
-        <caption className="sr-only">Files in this plan</caption>
-        <thead className="bg-ink-50">
-          <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
-            <th scope="col" className="min-w-[180px] px-4 py-2.5">File</th>
-            <th scope="col" className="min-w-[130px] px-3 py-2.5">Source system</th>
-            <th scope="col" className="min-w-[300px] px-3 py-2.5">Period</th>
-          </tr>
-        </thead>
-        <tbody>
-          {paged.slice.map((file) => (
-            <FileRow key={file.job_id} file={file} busy={busy} onChange={(change) => onChange(file.job_id, change)} />
-          ))}
-        </tbody>
-      </table>
+      <div className="relative overflow-x-auto scroll-thin">
+        <table className="w-full min-w-[1080px] border-collapse text-table">
+          <caption className="sr-only">Files staged for this plan</caption>
+          <thead className="bg-ink-50">
+            <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
+              <th scope="col" className="px-4 py-2.5">Control</th>
+              <th scope="col" className="min-w-[220px] px-3 py-2.5">File</th>
+              <th scope="col" className="px-3 py-2.5">Source system</th>
+              <th scope="col" className="px-3 py-2.5">File received date</th>
+              <th scope="col" className="px-3 py-2.5">Reporting start date</th>
+              <th scope="col" className="px-3 py-2.5">Reporting end date</th>
+              <th scope="col" className="px-3 py-2.5">Type</th>
+              <th scope="col" className="px-3 py-2.5">Action</th>
+              <th scope="col" className="px-4 py-2.5 text-right">Rows</th>
+            </tr>
+          </thead>
+          <tbody>
+            {paged.slice.map((file) => (
+              <tr key={file.key} data-row className="border-b border-ink-100 align-middle last:border-0">
+                <td className="num px-4 py-2.5 font-mono text-ink-700">{file.control_id}</td>
+                <td className="max-w-[300px] px-3 py-2.5">
+                  <span className="block truncate font-medium text-ink-900" title={file.file_name}>{file.file_name}</span>
+                  <span className="block truncate text-caption text-ink-500">
+                    {[file.output_name, file.division_name, file.date_detail ? `dates from ${file.date_detail}` : "dates entered"].filter(Boolean).join(" · ")}
+                  </span>
+                </td>
+                <td className="px-3 py-2.5 font-mono text-ink-800">{file.source_system}</td>
+                <td className="num px-3 py-2.5">{file.file_received_date ?? "—"}</td>
+                <td className="num px-3 py-2.5">{file.reporting_start_date}</td>
+                <td className="num px-3 py-2.5">{file.reporting_end_date}</td>
+                <td className="px-3 py-2.5">{file.reporting_period_type ?? "—"}</td>
+                <td className="px-3 py-2.5">
+                  <Badge tone={ACTION_TONE[file.processing_action] ?? "neutral"}>{file.processing_action}</Badge>
+                  {file.replace_month && <span className="block text-caption text-ink-500">replaces {file.replace_month}</span>}
+                  {!file.replace_month && file.file_replaced && <span className="block max-w-[200px] truncate text-caption text-ink-500" title={file.file_replaced}>replaces {file.file_replaced}</span>}
+                </td>
+                <td className="num px-4 py-2.5 text-right">{formatNumber(file.rows)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pagination {...paged} onPage={paged.setPage} noun="file" />
     </div>
-    <Pagination {...paged} onPage={paged.setPage} noun="file" />
-    </div>
-  );
-}
-
-function FileRow({ file, busy, onChange }: { file: PlanFile; busy: boolean; onChange: (change: Record<string, string | null>) => void }) {
-  const [source, setSource] = useState(file.source_system ?? "");
-  const [start, setStart] = useState(file.period_start ?? "");
-  const [end, setEnd] = useState(file.period_end ?? "");
-  useEffect(() => setSource(file.source_system ?? ""), [file.source_system]);
-  useEffect(() => setStart(file.period_start ?? ""), [file.period_start]);
-  useEffect(() => setEnd(file.period_end ?? ""), [file.period_end]);
-
-  const commitPeriod = (nextStart: string, nextEnd: string) => {
-    if (nextStart === (file.period_start ?? "") && nextEnd === (file.period_end ?? "")) return;
-    onChange({ period_start: nextStart || null, period_end: nextEnd || nextStart || null });
-  };
-  const input = "h-8 w-full rounded border bg-white px-2 text-body outline-none focus-visible:shadow-focus disabled:bg-ink-50";
-  const sourceChanged = file.detected_source_system !== file.source_system;
-  const periodChanged = file.detected_period_start !== file.period_start || file.detected_period_end !== file.period_end;
-
-  return (
-    <tr data-row className="border-b border-ink-100 align-middle last:border-0">
-      <td className="max-w-[280px] px-4 py-2.5">
-        <span className="flex items-center gap-2">
-          <FileSpreadsheet className="h-4 w-4 shrink-0 text-brand-600" aria-hidden />
-          <span className="truncate font-medium text-ink-900" title={file.file_name}>{file.file_name}</span>
-          {(sourceChanged || periodChanged) && <Badge tone="info">Edited</Badge>}
-        </span>
-        <div className="ml-6 min-w-0 overflow-hidden">
-        <Tooltip
-          content={
-            file.period_candidates.length ? (
-              <ul className="space-y-0.5">
-                {file.period_candidates.map((candidate) => (
-                  <li key={candidate.source}>{candidate.source}: {periodLabel(candidate.start, candidate.end)}</li>
-                ))}
-              </ul>
-            ) : "No date columns or month sheets found."
-          }
-        >
-          <span tabIndex={0} className="flex min-w-0 items-center gap-1 text-caption text-ink-500">
-            <Info className="h-3 w-3 shrink-0" aria-hidden />
-            <span className="truncate">From {file.period_source ?? "— not found"}</span>
-          </span>
-        </Tooltip>
-        </div>
-      </td>
-      <td className="px-3 py-2.5">
-        <input
-          aria-label={`Source system for ${file.file_name}`}
-          value={source}
-          disabled={busy}
-          placeholder="pc0515"
-          onChange={(event) => setSource(event.target.value)}
-          onBlur={() => source !== (file.source_system ?? "") && onChange({ source_system: source || null })}
-          onKeyDown={(event) => event.key === "Enter" && (event.target as HTMLInputElement).blur()}
-          className={clsx(input, "font-mono", file.source_system ? "border-ink-200" : "border-amber-400")}
-        />
-      </td>
-      <td className="px-3 py-2.5">
-        <span className="flex items-center gap-1.5">
-          <input type="month" aria-label={`Period start for ${file.file_name}`} value={start} disabled={busy}
-            onChange={(event) => setStart(event.target.value)} onBlur={() => commitPeriod(start, end)}
-            className={clsx(input, "num min-w-0", file.period_start ? "border-ink-200" : "border-amber-400")} />
-          <ArrowRight className="h-3.5 w-3.5 shrink-0 text-ink-400" aria-label="to" />
-          <input type="month" aria-label={`Period end for ${file.file_name}`} value={end} disabled={busy}
-            onChange={(event) => setEnd(event.target.value)} onBlur={() => commitPeriod(start, end)}
-            className={clsx(input, "num min-w-0", file.period_end ? "border-ink-200" : "border-amber-400")} />
-        </span>
-      </td>
-    </tr>
   );
 }
 
@@ -624,7 +595,7 @@ function PlanRow({
             />
           </div>
           <p className="num ml-6 truncate text-caption text-ink-500" title={item.file_name}>
-            {item.file_name} · {item.sheet_names.join(", ")} · {formatNumber(item.rows)} rows · {periodLabel(item.period_start, item.period_end)}
+            {item.file_name} · {item.sheet_names.join(", ")} · {formatNumber(item.rows)} rows · reporting {periodLabel(item.period_start, item.period_end)}
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2 pl-6 lg:pl-0">
@@ -801,19 +772,21 @@ function TablesView() {
                 <span className="num flex shrink-0 gap-4 pl-6 text-caption text-ink-600 sm:pl-0">
                   <span>{formatNumber(table.rows)} rows</span>
                   <span>{table.columns.length} cols</span>
-                  <span>{periodLabel(table.period_start, table.period_end)}</span>
+                  <span>Reporting {periodLabel(table.period_start, table.period_end)}</span>
                 </span>
               </button>
               {expanded && (
                 <div className="animate-fade-in space-y-3 bg-ink-50/50 px-5 pb-4 pt-1 md:px-6">
                   <ColumnChips names={table.columns.map((column) => column.name)} tone="neutral" />
                   <div className="relative overflow-x-auto rounded-md border border-ink-200 bg-white scroll-thin">
-                    <table className="w-full min-w-[620px] text-caption">
+                    <table className="w-full min-w-[720px] text-caption">
                       <caption className="sr-only">Ingestion history for {table.table_name}</caption>
                       <thead className="bg-ink-50 text-left text-ink-600">
                         <tr>
                           <th scope="col" className="px-3 py-1.5 font-semibold">File</th>
-                          <th scope="col" className="px-3 py-1.5 font-semibold">Period</th>
+                          <th scope="col" className="px-3 py-1.5 font-semibold">Control</th>
+                          <th scope="col" className="px-3 py-1.5 font-semibold">Reporting start date</th>
+                          <th scope="col" className="px-3 py-1.5 font-semibold">Reporting end date</th>
                           <th scope="col" className="px-3 py-1.5 font-semibold">Action</th>
                           <th scope="col" className="px-3 py-1.5 text-right font-semibold">Rows</th>
                           <th scope="col" className="px-3 py-1.5 font-semibold">Status</th>
@@ -825,11 +798,13 @@ function TablesView() {
                         {table.ingestions.map((load) => (
                           <tr key={load.id} className={clsx("border-t border-ink-100", load.status !== "ingested" && "text-ink-400")}>
                             <td className="max-w-[200px] truncate px-3 py-1.5" title={load.file_name}>{load.file_name}</td>
-                            <td className="num px-3 py-1.5">{periodLabel(load.period_start, load.period_end)}</td>
+                            <td className="num px-3 py-1.5 font-mono">{load.control_id ?? "—"}</td>
+                            <td className="num px-3 py-1.5">{load.reporting_start_date ?? load.period_start ?? "—"}</td>
+                            <td className="num px-3 py-1.5">{load.reporting_end_date ?? load.period_end ?? load.period_start ?? "—"}</td>
                             <td className="px-3 py-1.5">{ACTION[load.action]?.label ?? load.action}</td>
                             <td className="num px-3 py-1.5 text-right">{formatNumber(load.rows_loaded)}</td>
                             <td className="px-3 py-1.5">
-                              <Badge tone={load.status === "ingested" ? "success" : "neutral"}>{load.status === "ingested" ? "Live" : load.status === "superseded" ? "Superseded" : "Skipped"}</Badge>
+                              <Badge tone={load.status === "ingested" ? "success" : "neutral"}>{LOAD_STATUS[load.status] ?? load.status}</Badge>
                             </td>
                             <td className="px-3 py-1.5">{load.reviewed_by ?? "—"}</td>
                             <td className="num px-3 py-1.5">{formatTimestamp(load.created_at)}</td>
@@ -846,8 +821,119 @@ function TablesView() {
       </ul>
       <Pagination {...paged} onPage={paged.setPage} noun="table" />
       <p className="flex items-center gap-1.5 border-t border-ink-100 px-5 py-3 text-caption text-ink-500 md:px-6">
-        <ArrowRight className="h-3.5 w-3.5" aria-hidden /> Every row carries _ingestion_id, _source_file and _source_sheet.
+        <ArrowRight className="h-3.5 w-3.5" aria-hidden /> Every row carries pc_id, file_received_date, reporting_start_date, reporting_end_date, division_name, file_name, processing_date and its _reporting_month.
       </p>
+    </section>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Control table                                                               */
+/* -------------------------------------------------------------------------- */
+
+type ControlFilter = "all" | "pending" | "loaded" | "rejected" | "listed";
+
+const FLAG_TONE: Record<string, Tone> = { Y: "success", N: "neutral" };
+
+/** The control table: the business's columns first, in their order, then what the app adds. */
+function ControlView() {
+  const [rows, setRows] = useState<ControlRow[] | null>(null);
+  const [error, setError] = useState<ApiError | null>(null);
+  const [filter, setFilter] = useState<ControlFilter>("all");
+  const [query, setQuery] = useState("");
+  const list = useRef<HTMLDivElement>(null);
+  const load = useCallback(() => {
+    setError(null);
+    setRows(null);
+    api.bronzeControl(filter === "all" ? {} : { status: filter }).then(setRows).catch((err) => setError(toError(err)));
+  }, [filter]);
+  useEffect(load, [load]);
+  const needle = query.trim().toLowerCase();
+  const shown = (rows ?? []).filter((row) => !needle || `${row.file_name} ${row.sheet_name ?? ""} ${row.source_system}`.toLowerCase().includes(needle));
+  const paged = usePaged(shown, useFitPageSize(list, { min: 5, max: 50, fallbackRow: 45, reserve: 150 }), `${filter}|${needle}`);
+
+  return (
+    <section className="card" aria-labelledby="control-title">
+      <header className="flex flex-col gap-3 border-b border-ink-100 px-5 py-4 md:px-6 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <h2 id="control-title" className="text-card text-ink-900">Control table</h2>
+          <p className="text-caption text-ink-500">Every file Bronze has been told about: listed by the business, staged by Validate, loaded or rejected.</p>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+          <SearchInput value={query} onChange={setQuery} placeholder="File, sheet or source system" label="Search the control table" className="w-full sm:w-64" />
+          <Select<ControlFilter>
+            label="Show"
+            hideLabel
+            value={filter}
+            onChange={setFilter}
+            className="w-full sm:w-48"
+            options={[
+              { value: "all", label: "All rows" },
+              { value: "pending", label: "Staged, not loaded" },
+              { value: "loaded", label: "Loaded (Y)" },
+              { value: "rejected", label: "Rejected" },
+              { value: "listed", label: "Listed, not received" },
+            ]}
+          />
+          <Button size="md" variant="ghost" icon={<RefreshCw />} onClick={load}>Refresh</Button>
+        </div>
+      </header>
+      {error ? (
+        <div className="p-5"><Alert tone="error" title={error.body.message} action={<Button size="sm" onClick={load}>Retry</Button>}>{error.body.advice}</Alert></div>
+      ) : !rows ? (
+        <div className="space-y-2 p-6"><Skeleton className="h-8" /><Skeleton className="h-8" /><Skeleton className="h-8" /></div>
+      ) : !shown.length ? (
+        <EmptyState compact icon={<ListChecks />} title="No rows" description={needle ? `Nothing matches “${query}”.` : "Nothing in the control table for this filter."} />
+      ) : (
+        <div ref={list}>
+          <div className="relative overflow-x-auto scroll-thin">
+            <table className="w-full min-w-[1560px] border-collapse text-table">
+              <caption className="sr-only">The control table</caption>
+              <thead className="bg-ink-50">
+                <tr className="border-b border-ink-200 text-left text-caption font-semibold text-ink-600">
+                  {["control_id", "source_system", "file_name", "sheet_name", "reporting_period_type", "processing_action", "bronze_load_flag",
+                    "file_received_date", "drt_reporting_start_date", "drt_reporting_end_date", "date_detail", "file_replaced", "is_active"].map((name) => (
+                    <th key={name} scope="col" className="whitespace-nowrap px-3 py-2.5 font-mono text-[11px]">{name}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {paged.slice.map((row) => {
+                  const rejected = row.processing_action === "REJECTED";
+                  return (
+                    <tr key={row.control_id} data-row className={clsx("border-b border-ink-100 align-top last:border-0", rejected && "bg-danger-50/30 text-ink-500")}>
+                      <td className="num px-3 py-2 font-mono">{row.control_id}</td>
+                      <td className="px-3 py-2 font-mono">{row.source_system}</td>
+                      <td className="max-w-[340px] px-3 py-2">
+                        <span className="block truncate" title={row.file_name}>{row.file_name}</span>
+                        {rejected && row.rejection_reason && (
+                          <span className="block text-caption text-danger-700" title={row.rejection_reason}>{row.rejection_reason}</span>
+                        )}
+                        {!row.staging_table && row.bronze_load_flag === "N" && !rejected && (
+                          <span className="block text-caption text-ink-400">Listed by the business; not received here yet</span>
+                        )}
+                      </td>
+                      <td className="max-w-[200px] px-3 py-2">
+                        <span className="block truncate" title={row.sheet_name ?? undefined}>{row.sheet_name ?? "—"}</span>
+                      </td>
+                      <td className="px-3 py-2">{row.reporting_period_type ?? "—"}</td>
+                      <td className="px-3 py-2">{row.processing_action ? <Badge tone={rejected ? "danger" : row.processing_action === "APPEND" ? "success" : "brand"}>{row.processing_action}</Badge> : "—"}</td>
+                      <td className="px-3 py-2"><Badge tone={FLAG_TONE[row.bronze_load_flag]}>{row.bronze_load_flag}</Badge></td>
+                      <td className="num whitespace-nowrap px-3 py-2">{row.file_received_date ?? "—"}</td>
+                      <td className="num whitespace-nowrap px-3 py-2">{row.drt_reporting_start_date ?? "—"}</td>
+                      <td className="num whitespace-nowrap px-3 py-2">{row.drt_reporting_end_date ?? "—"}</td>
+                      <td className="px-3 py-2">{row.date_detail ?? "—"}</td>
+                      <td className="max-w-[220px] truncate px-3 py-2" title={row.file_replaced ?? undefined}>{row.file_replaced ?? "—"}</td>
+                      <td className="px-3 py-2"><Badge tone={row.is_active === "Y" ? "success" : "neutral"}>{row.is_active}</Badge></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <Pagination {...paged} onPage={paged.setPage} noun="row" />
+        </div>
+      )}
     </section>
   );
 }

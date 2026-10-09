@@ -31,7 +31,7 @@ def app_db_env(signed_in, monkeypatch):
     for name, value in {
         "APP_DB_HOST": parts.get("host", "localhost"), "APP_DB_PORT": int(parts.get("port", 5432)),
         "APP_DB_NAME": parts.get("dbname", "postgres"), "APP_DB_USER": parts.get("user", "postgres"),
-        "APP_DB_PASSWORD": parts.get("password", ""), "APP_DB_SSLMODE": "disable",
+        "APP_DB_PASSWORD": parts.get("password", ""), "APP_DB_SSLMODE": parts.get("sslmode", "disable"),
         "APP_DB_SCHEMA": schema, "APP_DB_CONFIGURED": True,
     }.items():
         monkeypatch.setattr(config, name, value)

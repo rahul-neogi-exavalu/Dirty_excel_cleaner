@@ -64,7 +64,9 @@ def homogeneity(values) -> float:
     1.0 means every populated cell in the sequence is the same type; a sequence
     with nothing in it scores 0.0 so that empty axes never win a vote.
     """
-    types = [infer_type(value) for value in values]
+    # Whole numbers and decimals are one kind: an amount column holding 0 and 4036.57
+    # is homogeneous, not mixed.
+    types = [FLOAT if kind == INT else kind for kind in (infer_type(value) for value in values)]
     populated = [type_name for type_name in types if type_name != EMPTY]
     if not populated:
         return 0.0

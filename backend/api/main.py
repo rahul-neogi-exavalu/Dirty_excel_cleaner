@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from . import app_db, auth, config, db
 from .errors import ApiError, api_error_handler, validation_error_handler
 from .routes import auth as auth_routes
-from .routes import batches, bronze, exports, history, jobs, silver, users, workbooks
+from .routes import batches, bronze, exports, history, jobs, silver, users, validation, workbooks
 from .services import job_history, sheet_pool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -56,8 +56,8 @@ app.add_exception_handler(RequestValidationError, validation_error_handler)
 # Sign-in, sign-out and "who am I" guard themselves; everything else needs a user.
 app.include_router(auth_routes.router)
 signed_in = [Depends(auth.require_user)]
-for router in (workbooks.router, jobs.router, exports.router, batches.router, bronze.router, silver.router,
-               history.router, users.router):
+for router in (workbooks.router, jobs.router, exports.router, batches.router, validation.router, bronze.router,
+               silver.router, history.router, users.router):
     app.include_router(router, dependencies=signed_in)
 
 

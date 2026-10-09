@@ -224,6 +224,13 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
     width = max((len(row) for row in rows), default=0)
 
     found = header_mod.find_header(rows, width, styles)
+    orientation = trace.get("orientation") or {}
+    if (orientation.get("decided_by") == "shape" and orientation.get("orientation") == "normal"
+            and found.detected and found.score >= HEADER_LOW_CONFIDENCE):
+        # The shape's call is confirmed by the reading it gives: a clear row of labels
+        # over the columns. Only an upright call is confirmed this way -- a header found
+        # after a flip could be the entity names of a lookup.
+        orientation.update(confident=True, decided_by="shape_and_header")
     trace["header"] = {
         "row_index": found.row_index,
         "detected": found.detected,
@@ -243,6 +250,9 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
 
     body = rows[body_start:]
     names = _fit_names(found.names, width)
+    # The source header of each column name, for the layers that report back to the
+    # business in its own words (the DRT column mapping keeps the header as written).
+    written = {name: label for name, label in zip(names, found.labels) if label}
     # The header as the sheet wrote it, per column name: typing reads it for one tie only.
     labels = (
         {name: label for name, label in zip(names, header_row) if not is_blank(label)}
@@ -278,6 +288,7 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
 
     _report_empty_columns(frame, grid, trace)
     trace["column_names"] = names
+    trace["source_headers"] = {name: written[name] for name in frame.columns if name in written}
     trace["clean_shape"] = list(frame.shape)
     return SheetResult(grid.name, frame, trace, region_index=index)
 

@@ -4,7 +4,8 @@ Stored with every Silver row. As the AHI document notes, they are not used for
 duplicate removal or record validation (yet) -- they are there so they can be.
 
 Values are normalised before hashing (trimmed, case-folded, dates ISO, decimals with two
-places, NULL as an empty field), so the same record always hashes the same.
+places -- enough for the decimal(10,6) rates --, NULL as an empty field, booleans as
+true/false), so the same record always hashes the same.
 """
 
 from __future__ import annotations
@@ -21,8 +22,10 @@ def _text(value) -> str:
         return ""
     if isinstance(value, (date, datetime)):
         return value.isoformat()
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if isinstance(value, Decimal):
-        return f"{value:.2f}"
+        return f"{value:.6f}"
     return str(value).strip().casefold()
 
 

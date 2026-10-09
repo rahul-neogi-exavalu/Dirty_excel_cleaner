@@ -111,6 +111,20 @@ export function DataTable({
     setReload((n) => n + 1);
   };
 
+  const [excluding, setExcluding] = useState(false);
+  /** Leave columns out of bronze ingestion, or bring them back. */
+  const setExcluded = async (originals: string[], excluded: boolean) => {
+    setExcluding(true);
+    try {
+      onRenamed(await api.setExcluded(jobId, output.id, originals, excluded));
+    } catch (err) {
+      toast({ severity: "error", title: "Column not updated", description: err instanceof ApiError ? err.body.message : String(err) });
+    } finally {
+      setExcluding(false);
+    }
+  };
+  const excludedCount = data?.columns.filter((column) => column.excluded).length ?? output.excluded_columns;
+
   const cycleSort = (column: PreviewColumn) => {
     setSort((current) =>
       current?.original !== column.original ? { original: column.original, desc: false } : current.desc ? null : { original: column.original, desc: true },
@@ -128,7 +142,7 @@ export function DataTable({
       <div className="flex flex-col gap-3 border-b border-ink-200 px-4 py-3 lg:flex-row lg:items-center">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <p className="text-body font-medium text-ink-900">Preview</p>
-          <Tooltip content="Click the pencil on a header to rename it. Used in all exports.">
+          <Tooltip content="Click the pencil on a header to rename it. Used in all exports. Untick a header's box to leave that column out of Bronze ingestion.">
             <span tabIndex={0} className="rounded text-ink-400 hover:text-ink-600" aria-label="About editable headers">
               <Pencil className="h-3.5 w-3.5" />
             </span>
@@ -136,6 +150,19 @@ export function DataTable({
           {output.renamed_columns > 0 && (
             <span className="rounded-full bg-sky-50 px-2 py-0.5 text-caption font-medium text-sky-700 ring-1 ring-inset ring-sky-200">
               {output.renamed_columns} renamed
+            </span>
+          )}
+          {excludedCount > 0 && (
+            <span className="flex items-center gap-1.5 rounded-full bg-amber-50 px-2 py-0.5 text-caption font-medium text-amber-800 ring-1 ring-inset ring-amber-200">
+              {excludedCount} not ingested
+              <button
+                type="button"
+                className="font-semibold underline-offset-2 hover:underline disabled:opacity-50"
+                disabled={excluding}
+                onClick={() => void setExcluded(data?.columns.filter((column) => column.excluded).map((column) => column.original) ?? [], false)}
+              >
+                Include all
+              </button>
             </span>
           )}
         </div>
@@ -165,6 +192,7 @@ export function DataTable({
               <strong className="text-ink-900">{formatNumber(total)}</strong>
               {filtered && <> matching “{debouncedQuery}” (of {formatNumber(data.total_unfiltered)})</>}
               {hidden.size > 0 && <> · {hidden.size} hidden</>}
+              {excludedCount > 0 && <> · {excludedCount} not ingested</>}
             </>
           ) : (
             "Loading rows…"
@@ -200,6 +228,9 @@ export function DataTable({
                     onResize={(width) => setWidths((all) => ({ ...all, [column.original]: width }))}
                     sort={sort?.original === column.original ? (sort.desc ? "desc" : "asc") : null}
                     onSort={() => cycleSort(column)}
+                    onExclude={(excluded) => void setExcluded([column.original], excluded)}
+                    lastIncluded={!column.excluded && excludedCount >= data.columns.length - 1}
+                    excluding={excluding}
                     allNames={data.columns.map((c) => c.name)}
                     jobId={jobId}
                     outputId={output.id}
@@ -227,7 +258,7 @@ export function DataTable({
                         className={clsx(
                           "max-w-[420px] truncate border-b border-ink-100 px-3 py-2 group-hover:bg-ink-50",
                           numeric ? "num text-right" : "text-left",
-                          value === null ? "text-ink-300" : "text-ink-800",
+                          column.excluded ? "bg-ink-50/60 text-ink-300" : value === null ? "text-ink-300" : "text-ink-800",
                         )}
                         title={value === null ? "Empty" : String(value)}
                       >
@@ -282,6 +313,9 @@ function HeaderCell({
   onResize,
   sort,
   onSort,
+  onExclude,
+  lastIncluded,
+  excluding,
   allNames,
   jobId,
   outputId,
@@ -292,6 +326,11 @@ function HeaderCell({
   onResize: (width: number) => void;
   sort: "asc" | "desc" | null;
   onSort: () => void;
+  /** Leave the column out of bronze ingestion (true), or bring it back (false). */
+  onExclude: (excluded: boolean) => void;
+  /** The only column still ingested: it can't be left out. */
+  lastIncluded: boolean;
+  excluding: boolean;
   allNames: string[];
   jobId: string;
   outputId: string;
@@ -374,7 +413,7 @@ function HeaderCell({
       style={{ width, minWidth: width ?? 150, maxWidth: width }}
       className={clsx(
         "group/th sticky top-0 z-10 border-b border-r border-ink-200 px-3 py-2 text-left align-top font-medium transition-colors",
-        editing ? "bg-brand-50" : column.renamed ? "bg-sky-50" : "bg-ink-50",
+        editing ? "bg-brand-50" : column.excluded ? "bg-ink-100" : column.renamed ? "bg-sky-50" : "bg-ink-50",
         justSaved && "!bg-emerald-50",
       )}
     >
@@ -420,6 +459,16 @@ function HeaderCell({
         </div>
       ) : (
         <div className="flex items-center gap-1.5">
+          <Tooltip content={lastIncluded ? "At least one column must be ingested." : column.excluded ? "Not ingested into Bronze. Tick to include." : "Ingested into Bronze. Untick to leave out."}>
+            <span className="inline-flex">
+              <Checkbox
+                label={`Ingest ${column.name} into Bronze`}
+                checked={!column.excluded}
+                disabled={excluding || lastIncluded}
+                onChange={(on) => onExclude(!on)}
+              />
+            </span>
+          </Tooltip>
           <DtypeIcon dtype={column.dtype} />
           <button
             type="button"
@@ -428,7 +477,7 @@ function HeaderCell({
             aria-label={`${column.name}, sort ${sort === "asc" ? "descending" : sort === "desc" ? "off" : "ascending"}`}
             title={column.renamed ? `Renamed from “${column.original}”` : column.name}
           >
-            <span className="truncate">{column.name}</span>
+            <span className={clsx("truncate", column.excluded && "text-ink-400 line-through decoration-ink-300")}>{column.name}</span>
             {sort === "asc" ? <ArrowUp className="h-3.5 w-3.5 shrink-0 text-brand-600" /> : sort === "desc" ? <ArrowDown className="h-3.5 w-3.5 shrink-0 text-brand-600" /> : <ArrowUpDown className="h-3.5 w-3.5 shrink-0 text-ink-300 opacity-0 group-hover/th:opacity-100" />}
           </button>
           {justSaved && <Check className="h-3.5 w-3.5 shrink-0 animate-scale-in text-emerald-600" aria-label="Saved" />}

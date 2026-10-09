@@ -13,6 +13,7 @@ from __future__ import annotations
 import gzip
 import threading
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -46,8 +47,19 @@ class Vectors:
         return float(np.dot(a, b))
 
 
-def load(path: str, limit: int = 200_000) -> Vectors:
-    """Read (and cache) a word2vec file."""
+# Told how many words have been read: (words read, words wanted).
+Progress = Callable[[int, int], None]
+# How often a reader reports.
+PROGRESS_EVERY = 5_000
+
+
+def loaded(path: str, limit: int = 200_000) -> bool:
+    """Whether ``load`` would answer from its cache."""
+    return (str(path), limit) in _cache
+
+
+def load(path: str, limit: int = 200_000, progress: Progress | None = None) -> Vectors:
+    """Read (and cache) a word2vec file. ``progress`` hears every ``PROGRESS_EVERY`` words."""
     key = (str(path), limit)
     with _lock:
         if key not in _cache:
@@ -62,7 +74,7 @@ def load(path: str, limit: int = 200_000) -> Vectors:
                 binary = name.endswith(".bin")
                 opener = lambda: open(file, "rb") if binary else open(file, encoding="utf-8", errors="ignore")  # noqa: E731
             with opener() as handle:
-                table = _read_binary(handle, limit) if binary else _read_text(handle, limit)
+                table = (_read_binary if binary else _read_text)(handle, limit, progress)
             _cache[key] = Vectors(table)
         return _cache[key]
 
@@ -72,7 +84,7 @@ def _normalize(vector: np.ndarray) -> np.ndarray:
     return vector / norm if norm else vector
 
 
-def _read_text(handle, limit: int) -> dict[str, np.ndarray]:
+def _read_text(handle, limit: int, progress: Progress | None = None) -> dict[str, np.ndarray]:
     table: dict[str, np.ndarray] = {}
     first = handle.readline()
     head = first.split()
@@ -85,6 +97,8 @@ def _read_text(handle, limit: int) -> dict[str, np.ndarray]:
         word = parts[0].casefold()
         if word not in table:
             table[word] = _normalize(np.asarray(parts[1:], dtype=np.float32))
+            if progress and len(table) % PROGRESS_EVERY == 0:
+                progress(len(table), limit)
         if len(table) >= limit:
             break
     return table
@@ -95,11 +109,14 @@ def _chain(first: str, rest):
     yield from rest
 
 
-def _read_binary(handle, limit: int) -> dict[str, np.ndarray]:
+def _read_binary(handle, limit: int, progress: Progress | None = None) -> dict[str, np.ndarray]:
     table: dict[str, np.ndarray] = {}
     count, dims = (int(part) for part in handle.readline().split())
     width = np.dtype(np.float32).itemsize * dims
-    for _ in range(min(count, limit)):
+    wanted = min(count, limit)
+    for index in range(wanted):
+        if progress and index and index % PROGRESS_EVERY == 0:
+            progress(index, wanted)
         word = bytearray()
         while (char := handle.read(1)) not in (b" ", b""):
             if char != b"\n":

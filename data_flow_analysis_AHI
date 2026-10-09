@@ -1,0 +1,372 @@
+# Complete Data Flow: Excel Cleaning → Bronze Ingestion → Silver Load
+
+## High-Level Architecture
+
+```mermaid
+flowchart TB
+    subgraph PHASE1["Phase 1 — Excel Cleaning"]
+        A[("🗂️ Dirty Excel File\n(uploaded)")] --> B["Reader\n(openpyxl)"]
+        B --> C["Geometry\n(find table regions)"]
+        C --> D["Header Detection"]
+        D --> E["Row Classification\n(junk removal)"]
+        E --> F["Type Coercion\n(dates, numbers)"]
+        F --> G["Orchestrate\n(append, plan, write)"]
+        G --> H[("📄 Cleaned CSVs\n+ Metadata + Audit")]
+    end
+
+    subgraph PHASE2["Phase 2 — Bronze Ingestion"]
+        H --> I["Period Detection\n(dates, sheet names)"]
+        I --> J["Source System Detection\n(filename suffix)"]
+        J --> K["Planner\n(CREATE / APPEND / REPLACE / EVOLVE)"]
+        K --> L["👤 Human Review\n(confirm plan)"]
+        L --> M["Execute\n(PostgreSQL COPY)"]
+        M --> N[("🥉 Bronze Tables\n(all text, lineage cols)")]
+    end
+
+    subgraph PHASE3["Phase 3 — Silver Load"]
+        N --> O["Column Matching\n(saved · exact · fuzzy · semantic · AI)"]
+        O --> P["👤 Human Review\n(approve mapping)"]
+        P --> Q["Transform\n(type cast, cleanse, hash)"]
+        Q --> R["Profit Center Lookup\n(LOTL)"]
+        R --> S["Load + Summary Rebuild"]
+        S --> T[("🥈 Silver Tables\ndetail + summary")]
+    end
+
+    style PHASE1 fill:#1a1a2e,stroke:#16213e,color:#e94560
+    style PHASE2 fill:#1a1a2e,stroke:#16213e,color:#f5a623
+    style PHASE3 fill:#1a1a2e,stroke:#16213e,color:#00b4d8
+```
+
+---
+
+## Phase 1 — Excel Cleaning
+
+> **Entry point:** [`POST /api/jobs`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/routes/jobs.py#L49-L51) → [`cleaning_service.start_job()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/cleaning_service.py#L112-L117)
+
+### 1.1 Job Creation & Validation
+
+| Step | Code | What happens |
+|------|------|-------------|
+| Validate sheets | [`_prepare()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/cleaning_service.py#L66-L100) | Checks that selected sheet names exist in the upload, ensures no other active job for the same file |
+| Create Job | [`start_job()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/cleaning_service.py#L112-L117) | Creates a `Job` object, records history, launches a **daemon thread** to run `_run()` |
+
+### 1.2 The Cleaning Pipeline (`_run`)
+
+The main runner in [`_run()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/cleaning_service.py#L268-L366) moves through 5 progress stages:
+
+```
+read (0–15%) → clean (15–80%) → append (80–86%) → validate (86–90%) → write (90–100%)
+```
+
+#### Stage: Read + Clean Sheets
+
+[`_clean_sheets()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/cleaning_service.py#L391-L431) dispatches each selected sheet to the **process pool** ([`sheet_pool.run_sheets()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/sheet_pool.py)):
+
+For **each sheet**, the per-sheet pipeline is:
+
+```mermaid
+flowchart LR
+    A["read_sheet\n(openpyxl → Grid)"] --> B["extract_sheet"]
+    B --> C["find_regions\n(geometry.py)"]
+    C --> D["detect_header\n(header.py)"]
+    D --> E["classify_rows\n(rowclass.py)"]
+    E --> F["drop junk rows\n(banners, totals, blanks)"]
+    F --> G["coerce types\n(coerce.py)"]
+    G --> H["SheetResult\n(DataFrame + trace)"]
+```
+
+**Key sub-steps inside [`extract_sheet()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_clean/extract.py#L45-L67):**
+
+1. **Orient** — checks if the sheet is transposed (data runs L→R instead of top-down); flips if needed
+2. **Geometry** ([`geometry.find_regions()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_clean/geometry.py)) — finds rectangular blocks of data separated by blank rows/columns; a single sheet can hold **multiple table regions**
+3. **Header detection** ([`header.py`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_clean/header.py)) — locates the header row using type-diversity signals (a row that is all-text above rows that have mixed types is likely the header)
+4. **Row classification** ([`rowclass.py`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_clean/rowclass.py)) — classifies each row as `DATA`, `BANNER`, `TOTAL`, `BLANK`, `NOTE`, etc., using content signals
+5. **Junk removal** — drops all non-`DATA` rows; records every dropped row with its classification + reason in the trace
+6. **Type coercion** ([`coerce.py`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_clean/coerce.py)) — casts each column to its inferred type (Date, Float64, Int64, String) with per-cell failure logging
+7. **Flags** ([`flags.py`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_clean/flags.py)) — annotates columns with `CHECK` flags (e.g., "mixed types", "mostly blank", "no header")
+
+Each sheet produces a **`SheetResult`** containing:
+- `frame` — the cleaned Polars DataFrame
+- `trace` — full provenance: header row index, region shape, dropped rows, coercion failures, notes
+
+#### Stage: Append (header matching)
+
+[`_plan()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/cleaning_service.py#L434-L455) → [`orchestrate.plan_workbook()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_clean/orchestrate.py#L265-L320):
+
+1. **Sibling header adoption** — a continuation sheet with no header row borrows column names from a sibling with the same width + column-type profile (≥ 90% overlap)
+2. **Table role classification** — each table is classified as `FACT`, `DIMENSION`, or `UNKNOWN` using measures (fractional/repeating/negative numbers), keys (high-cardinality columns), and dates
+3. **Exact header grouping** — tables whose `frozenset(columns)` match exactly are **vertically stacked** (`pl.concat`), with a `source_sheet` column added for provenance
+4. **Standalone tables** — everything else ships as its own CSV
+
+#### Stage: Validate
+
+[`contracts.check_all()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_clean/contracts.py) — post-clean contracts: "no empty output", "no duplicate column names", "row counts match" etc.
+
+#### Stage: Write
+
+[`_write()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/cleaning_service.py#L458-L487):
+
+For each output table:
+1. Write the cleaned DataFrame as **CSV** to `JOB_DIR/<job_id>/`
+2. Build **metadata CSV** — per-column: name, inferred dtype, null%, unique count, min/max, type flags
+3. Build an **audit report** (JSON) — full provenance: region shapes, header decisions, dropped rows, coercion failures, validation findings
+
+> **Output:** Cleaned CSVs + metadata + audit JSON, stored on disk under the job's directory. The `Job.outputs` list holds `OutputRecord` objects with the in-memory DataFrames for the next phase.
+
+---
+
+## Phase 2 — Bronze Ingestion
+
+> **Entry point:** [`POST /api/bronze/plans`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/routes/bronze.py#L60-L63) → [`bronze_service.create_plan()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/bronze_service.py#L158-L182)
+
+### 2.1 Plan Creation
+
+```mermaid
+flowchart TB
+    A["Cleaned job outputs"] --> B["Detect source system\n(filename suffix regex)"]
+    A --> C["Detect period\n(date columns → min/max month)"]
+    B --> D["Build Candidates"]
+    C --> D
+    D --> E["Query existing bronze layer\n(tables + live ingestions)"]
+    E --> F["planner.plan()\ndecide action per table"]
+    F --> G["Plan with items\n(draft status)"]
+```
+
+**Step by step:**
+
+| Step | Code | Logic |
+|------|------|-------|
+| Source system | [`naming.source_system_from_filename()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_bronze/naming.py#L46-L60) | Regex against the file name (e.g., `ARR_pc0515.xlsx` → `pc0515`) |
+| Period | [`_detect_period()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/bronze_service.py#L185-L193) → [`periods.detect()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_bronze/periods.py#L113-L132) | Priority: accounting date columns → transaction date columns → month-named sheets. Produces a `Period(start="2024-01", end="2024-06")` |
+| Table name | [`naming.table_name()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_bronze/naming.py#L67-L80) | Convention: `ext_<source>_<sheet_slug>`, or `ext_<source>_data` if sheets are period-named or were appended |
+| Planner | [`planner.plan()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_bronze/planner.py) | Compares each candidate's columns + period against the existing bronze registry |
+
+### 2.2 Planner Decision Logic
+
+The planner in [`planner.py`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_bronze/planner.py) produces one `PlanItem` per cleaned output. Decisions:
+
+| Scenario | Action | Needs confirmation? |
+|----------|--------|-------------------|
+| Table name is new (not in registry) | `CREATE` | No |
+| Same file hash already ingested | `SKIP` | No (reviewer can override) |
+| Period overlaps an existing load | `REPLACE` | **Yes** — deletes old rows first |
+| Same columns, same order | `APPEND` | No |
+| Same columns, different order | `REORDER` | No |
+| Columns added or removed | `EVOLVE` | **Yes** — adds missing columns as `text` |
+| Completely different schema | `NEW_TABLE` | **Yes** — creates a separate table |
+
+Schema comparison uses [`schema_compare.compare()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_bronze/schema_compare.py) → returns `IDENTICAL`, `REORDERED`, `EVOLVED`, or `DIFFERENT`.
+
+### 2.3 Human Review (Edit the Plan)
+
+The reviewer can:
+- Change the **source system** or **period** of any file → [`update_file()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/bronze_service.py#L230-L250)
+- Change the **table name** or **action** of any item → [`update_item()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/bronze_service.py#L253-L270)
+
+Every edit triggers `_replan()` — the entire plan is rebuilt from scratch with the same inputs + the reviewer's overrides, so the plan shown is always the one that would run.
+
+### 2.4 Approval & Execution
+
+[`approve()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/bronze_service.py#L280-L313):
+
+1. **Staleness check** — replans once more; if the signature changed since review, rejects
+2. **Blocker check** — every risky action (`replace`, `evolve`, `new_table`) must be explicitly confirmed
+3. Launches `_run()` in a daemon thread
+
+[`_execute()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/bronze_service.py#L372-L411) — **one database transaction for the entire plan**:
+
+```mermaid
+flowchart TB
+    A["pg_advisory_xact_lock\n('ahi-bronze')"] --> B["For each item"]
+    B --> C{"Action?"}
+    C -->|skip| D["Audit row only"]
+    C -->|create| E["CREATE TABLE ext_... (col text, ...)\n+ lineage columns"]
+    C -->|append / reorder| F["INSERT via COPY"]
+    C -->|evolve| G["ALTER TABLE ADD COLUMN ...\nthen INSERT via COPY"]
+    C -->|replace| H["DELETE old ingestion's rows\nthen INSERT via COPY"]
+    E --> I["Row count check\n(loaded == cleaned)"]
+    F --> I
+    G --> I
+    H --> I
+    I --> J["Update bronze_table registry\n(columns, datatypes)"]
+    J --> K["Audit row\n(ingestion table)"]
+```
+
+**Key details of `_load()`:**
+
+- All data columns are stored as **`text`** — no typing in bronze
+- 4 lineage columns are added: `_ingestion_id`, `_source_file`, `_source_sheet`, `_ingested_at`
+- Data is written via `COPY FROM STDIN` (streaming, row by row from the Polars DataFrame)
+- A post-load row count is verified against the cleaned table's height
+- The `bronze_table` registry row is upserted with the merged column list + inferred datatypes
+
+> **Output:** Bronze tables in PostgreSQL schema (`ext_bronze`), each with `text` columns + lineage. The `control.ingestion` audit table tracks every load.
+
+---
+
+## Phase 3 — Silver Load
+
+> **Entry point:** [`POST /api/silver/runs`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/routes/silver.py#L112-L114) → [`silver_service.create_run()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/silver_service.py#L259-L317)
+
+### 3.1 Eligibility
+
+[`eligible()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/silver_service.py#L122-L141) — queries bronze loads where `status = 'ingested' AND silver_status IS DISTINCT FROM 'succeeded'`. These are loads that reached bronze but haven't been successfully promoted to silver yet.
+
+### 3.2 Run Creation (Column Matching)
+
+```mermaid
+flowchart TB
+    A["Selected bronze loads\n(ingestion_ids)"] --> B["Group by bronze table"]
+    B --> C["Read bronze columns + sample rows"]
+    C --> D["Load Silver column catalog\n(silver_columns.csv)"]
+    D --> E["Load approved mappings\n(column_mapping table)"]
+    E --> F["5 independent matchers vote"]
+
+    F --> G["saved — this table's approved mapping"]
+    F --> H["exact — word-for-word match with Silver/DRT name"]
+    F --> I["fuzzy — spelling distance (rapidfuzz)"]
+    F --> J["semantic — word2vec cosine similarity"]
+    F --> K["AI — LLM reads the column name + samples\n(Azure OpenAI or Gemini)"]
+
+    G --> L["Pool votes into candidates\nRank by: own > support count > best score"]
+    H --> L
+    I --> L
+    J --> L
+    K --> L
+    L --> M["Pre-select best candidate\nper bronze column"]
+    M --> N["Dry-run transform\n(quality report)"]
+```
+
+The **Silver catalog** is defined in [`silver_columns.csv`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/config/silver_columns.csv):
+
+| Silver column | DRT name | Type | Business key? |
+|---------------|----------|------|---------------|
+| `profit_center_name` | Profit Center Name | text | no |
+| `profit_center_number` | Profit Center Number | text | yes |
+| `insurance_company_name` | Insurance Company Name | text | yes |
+| `producer_name` | Producer Name | text | no |
+| `policy_number` | Policy Number | text | yes |
+| `premium` | Premium | decimal | no |
+| `commission` | Commission | decimal | no |
+| `accounting_effective_date` | Accounting Effective Date | date | no |
+| `policy_effective_date` | Policy Effective Date | date | no |
+| `transaction_effective_date` | Transaction Effective Date | date | yes |
+| `line_of_business` | Line of Business | text | no |
+
+The matching logic lives in [`matching.suggest()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_silver/matching.py):
+
+- Each method votes independently with a score (0–1)
+- Votes for the same Silver column are pooled into a **candidate**
+- Candidates are ranked: own approved mapping first → then by support count → then by highest weighted score
+- The top candidate is pre-selected as the **recommendation**
+- The reviewer sees all candidates with their method backing and can override any choice
+
+### 3.3 Human Review (Edit Mappings)
+
+For each bronze column, the reviewer can:
+- Accept the recommendation
+- Pick any other candidate
+- Pick any Silver column (even one nobody voted for)
+- Mark as **Ignored** (column is not loaded)
+
+Each edit triggers [`_quality()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/silver_service.py#L324-L327) — a dry-run transform of the bronze rows using the current mapping, producing a live quality report showing invalid values, profit center lookup status, and unmapped Silver columns.
+
+### 3.4 Approval & Execution
+
+[`approve()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/silver_service.py#L395-L421):
+
+1. Checks every column is either mapped or ignored
+2. Validates that bronze tables and Silver catalog haven't changed since review
+3. Launches `_run()` in a daemon thread
+
+[`_execute()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/api/services/silver_service.py#L492-L577) — **one database transaction**:
+
+```mermaid
+flowchart TB
+    A["pg_advisory_xact_lock\n('ahi-silver')"] --> B["Staleness re-check"]
+    B --> C["Ensure tables exist\n(detail, summary, column_mapping)"]
+    C --> D["Step 1: Save approved mapping\nINSERT INTO column_mapping"]
+    D --> E["Step 2: Remove superseded loads\nDELETE FROM detail\nWHERE _ingestion_id = superseded"]
+    E --> F["Step 3: For each table"]
+    F --> G["Read bronze rows\n(all text + lineage)"]
+    G --> H["transform.transform()"]
+    H --> I["Type cast per Silver column\n(text→date, text→decimal)"]
+    H --> J["Profit center resolution\n(LOTL lookup)"]
+    H --> K["Compute hashes\n(business_key_hash, row_hash)"]
+    I --> L["COPY INTO detail"]
+    J --> L
+    K --> L
+    L --> M["Row count verification"]
+    M --> N["Mark ingestion.silver_status = 'succeeded'"]
+    N --> O["Step 4: Rebuild summary\n(GROUP BY pc_id, month)"]
+    O --> P["Audit row in silver_run table"]
+```
+
+### 3.5 The Transform ([`transform.transform()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_silver/transform.py#L20-L82))
+
+This is the core Bronze → Silver conversion:
+
+1. **Column selection** — for each Silver catalog column, find the mapped bronze column (or NULL if unmapped)
+2. **Type casting** ([`cleanse.by_type()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_silver/cleanse.py)) — cast `text` → `date`, `text` → `numeric(18,2)`, or keep as `text`, counting failures
+3. **Profit center resolution** ([`profit_center.resolve()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_silver/profit_center.py)) — looks up the LOTL table to normalize profit center names/numbers; produces a status per row (`exact_match`, `name_only`, `number_only`, `lotl_unavailable`, etc.)
+4. **Hashing** ([`hashing.digest()`](file:///c:/Exavalu_internal_projects/excel_cleaner_proj/Dirty_excel_cleaner/backend/src/ahi_silver/hashing.py)):
+   - `business_key_hash` — SHA-256 of the business-key columns (policy number, profit center number, etc.)
+   - `row_hash` — SHA-256 of all Silver columns
+5. **Extra columns** added: `pc_id`, `pc_lookup_status`, `business_key_hash`, `row_hash`
+6. **Lineage preserved**: `_bronze_table`, `_ingestion_id`, `_source_file`, `_source_sheet`, `_silver_run_id`, `_loaded_at`
+
+### 3.6 Silver Schema
+
+The `detail` table contains:
+
+| Column group | Columns | Source |
+|-------------|---------|--------|
+| Silver catalog | `profit_center_name`, `profit_center_number`, `insurance_company_name`, `producer_name`, `policy_number`, `premium`, `commission`, `accounting_effective_date`, `policy_effective_date`, `transaction_effective_date`, `line_of_business` | Mapped from bronze via approved mapping |
+| Profit center | `pc_id`, `pc_lookup_status` | LOTL lookup |
+| Hashes | `business_key_hash`, `row_hash` | Computed |
+| Lineage | `_bronze_table`, `_ingestion_id`, `_source_file`, `_source_sheet`, `_silver_run_id`, `_loaded_at` | Carried from bronze |
+
+The `summary` table is rebuilt per profit center:
+- `GROUP BY pc_id, profit_center_number, profit_center_name, date_trunc('month', accounting_effective_date)`
+- Aggregates: `count(*)`, `sum(premium)`
+
+---
+
+## End-to-End Data Lineage
+
+```mermaid
+flowchart LR
+    A["Excel cell\n(row 15, col B,\nSheet 'Jan')"] --> B["Cleaned row\n(trace: header row 3,\njunk rows dropped)"]
+    B --> C["CSV output\n(job_id/file.csv)"]
+    C --> D["Bronze row\n(_ingestion_id,\n_source_file='Report.xlsx',\n_source_sheet='Jan')"]
+    D --> E["Silver detail row\n(_bronze_table='ext_pc0515_arr',\n_ingestion_id,\n_silver_run_id,\n_source_file,\n_source_sheet)"]
+```
+
+Every row in Silver can be traced back to:
+1. Which Silver run loaded it (`_silver_run_id`)
+2. Which bronze ingestion it came from (`_ingestion_id`)
+3. Which bronze table it was in (`_bronze_table`)
+4. Which original Excel file it came from (`_source_file`)
+5. Which sheet within that file (`_source_sheet`)
+6. The cleaning job's audit report has the exact row numbers, header decisions, and which rows were dropped and why
+
+---
+
+## Human-in-the-Loop Checkpoints
+
+| Checkpoint | Phase | What is reviewed | Blockers |
+|-----------|-------|-----------------|----------|
+| Sheet selection | Cleaning | Which sheets to clean, whether to append matching headers | None — the user picks |
+| Bronze plan review | Bronze | Source system, period, table name, action (create/append/replace/evolve) per output | `REPLACE`, `EVOLVE`, `NEW_TABLE` require explicit confirmation |
+| Silver mapping review | Silver | Bronze column → Silver column mapping for every column, with quality preview | Every column must be mapped or explicitly ignored |
+
+---
+
+## Key Design Principles
+
+1. **All-or-nothing transactions** — Bronze loads the entire plan in one PostgreSQL transaction; Silver does the same. Failure rolls back everything.
+2. **Advisory locks** — `pg_advisory_xact_lock` prevents concurrent bronze or silver runs from interleaving.
+3. **Staleness detection** — Both bronze and silver re-check the state of the world under the lock before writing, and reject if anything changed since review.
+4. **All text in bronze** — Bronze stores everything as `text`; type casting only happens at the Silver layer, keeping the raw data intact.
+5. **Idempotent loads** — Silver deletes any existing rows for the same `_ingestion_id` before loading, so a retried run never doubles rows.
+6. **Pure planner** — The bronze planner is a pure function: same inputs + overrides = same plan. The plan shown is always the plan that runs.

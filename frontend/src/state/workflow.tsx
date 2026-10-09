@@ -13,15 +13,15 @@ import type { BatchStatus, JobResults, JobStatus, OutputSummary, Workbook } from
 import { useToast } from "../components/ui/Feedback";
 import { plural } from "../lib/format";
 
-/** The five workflow steps, in order. */
-export type StepPage = "configuration" | "run" | "results" | "ingest" | "silver";
+/** The seven workflow steps, in order. */
+export type StepPage = "configuration" | "preview" | "run" | "results" | "validate" | "ingest" | "silver";
 /** Every page: the steps plus the workspace pages beside them. */
 export type Page = StepPage | "history" | "users";
 
 const STORAGE_KEY = "exavalu.workflow.v2";
 /** Everything this browser keeps about a session's files; cleared on sign-out so the
  *  next person to sign in starts clean. */
-export const STORAGE_KEYS = [STORAGE_KEY, "exavalu.ingest.plan"];
+export const STORAGE_KEYS = [STORAGE_KEY, "exavalu.ingest.plan", "exavalu.validation"];
 const POLL_MS = 700;
 /** Matches the server's AHI_MAX_BATCH_FILES default. */
 export const MAX_FILES = 20;
@@ -46,6 +46,18 @@ interface Persisted {
   batchConfigKey: string | null;
   resultsJobId: string | null;
   outputIds: Record<string, string>;
+  /** Per uploaded file: the sheet Preview shows, and whether Preview has shown the file. */
+  previewSheets?: Record<string, string>;
+  previewed?: string[];
+  validation?: ValidationProgress | null;
+}
+
+/** How far the Validate step got with the current batch: its tables staged so far. */
+export interface ValidationProgress {
+  batchId: string;
+  id: string;
+  staged: number;
+  total: number;
 }
 
 interface Workflow {
@@ -70,6 +82,15 @@ interface Workflow {
   setResultsJobId: (jobId: string) => void;
   outputIdFor: (jobId: string) => string | null;
   setOutputId: (jobId: string, outputId: string) => void;
+  /** The sheet Preview last showed for this file, if it still has it. */
+  previewSheetFor: (workbookId: string) => string | null;
+  setPreviewSheet: (workbookId: string, sheet: string) => void;
+  /** Files Preview has shown; every one of them means the Preview step is done. */
+  previewed: Set<string>;
+  markPreviewed: (workbookId: string) => void;
+  /** The Validate step's session for the current batch; every table staged means the step is done. */
+  validation: ValidationProgress | null;
+  setValidation: (progress: ValidationProgress | null) => void;
 
   /** The batch no longer matches the current files and settings. */
   stale: boolean;
@@ -136,6 +157,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const [resultsErrors, setResultsErrors] = useState<Record<string, ApiError>>({});
   const [resultsJobId, setResultsJobId] = useState<string | null>(null);
   const [outputIds, setOutputIds] = useState<Record<string, string>>({});
+  const [previewSheets, setPreviewSheets] = useState<Record<string, string>>({});
+  const [previewed, setPreviewed] = useState<Set<string>>(new Set());
+  const [validation, setValidation] = useState<ValidationProgress | null>(null);
   const announced = useRef<string | null>(null);
   const requested = useRef(new Set<string>());
 
@@ -156,7 +180,10 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           }),
         );
         const kept = found.filter((entry): entry is FileEntry => entry !== null);
+        const ids = new Set(kept.map((entry) => entry.workbook.id));
         setFiles(kept);
+        setPreviewSheets(Object.fromEntries(Object.entries(saved.previewSheets ?? {}).filter(([id]) => ids.has(id))));
+        setPreviewed(new Set((saved.previewed ?? []).filter((id) => ids.has(id))));
         setFocusedId(kept.some((entry) => entry.workbook.id === saved.focusedId) ? saved.focusedId : kept[0]?.workbook.id ?? null);
         if (saved.batchId) {
           try {
@@ -166,6 +193,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
             setBatchConfigKey(saved.batchConfigKey);
             setResultsJobId(saved.resultsJobId);
             setOutputIds(saved.outputIds ?? {});
+            if (saved.validation?.batchId === status.id) setValidation(saved.validation);
           } catch {
             /* batch expired with a server restart */
           }
@@ -184,13 +212,16 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       batchConfigKey,
       resultsJobId,
       outputIds,
+      previewSheets,
+      previewed: [...previewed],
+      validation,
     };
     try {
       sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     } catch {
       /* storage unavailable: state simply won't survive a reload */
     }
-  }, [hydrated, files, focusedId, batch?.id, batchConfigKey, resultsJobId, outputIds]);
+  }, [hydrated, files, focusedId, batch?.id, batchConfigKey, resultsJobId, outputIds, previewSheets, previewed, validation]);
 
   const running = isActive(batch?.status);
 
@@ -328,6 +359,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     await Promise.allSettled(files.map((entry) => api.deleteWorkbook(entry.workbook.id)));
     setFiles([]);
     setFocusedId(null);
+    setPreviewSheets({});
+    setPreviewed(new Set());
     clearBatch();
     toast({ severity: "info", title: "Workspace cleared" });
   }, [files, toast]);
@@ -388,6 +421,22 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const jobFor = useCallback((workbookId: string) => jobsByWorkbook.get(workbookId) ?? null, [jobsByWorkbook]);
   const outputIdFor = useCallback((jobId: string) => outputIds[jobId] ?? null, [outputIds]);
   const setOutputId = useCallback((jobId: string, outputId: string) => setOutputIds((all) => ({ ...all, [jobId]: outputId })), []);
+  const previewSheetFor = useCallback(
+    (workbookId: string) => {
+      const sheet = previewSheets[workbookId];
+      const entry = files.find((item) => item.workbook.id === workbookId);
+      return sheet && entry?.workbook.sheets.some((item) => item.name === sheet) ? sheet : null;
+    },
+    [previewSheets, files],
+  );
+  const setPreviewSheet = useCallback(
+    (workbookId: string, sheet: string) => setPreviewSheets((all) => (all[workbookId] === sheet ? all : { ...all, [workbookId]: sheet })),
+    [],
+  );
+  const markPreviewed = useCallback(
+    (workbookId: string) => setPreviewed((seen) => (seen.has(workbookId) ? seen : new Set(seen).add(workbookId))),
+    [],
+  );
 
   const unselected = files.find((entry) => entry.selected.length === 0);
   const runBlockedReason = !files.length
@@ -423,6 +472,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     setResultsJobId,
     outputIdFor,
     setOutputId,
+    previewSheetFor,
+    setPreviewSheet,
+    previewed,
+    markPreviewed,
+    validation: validation && validation.batchId === batch?.id ? validation : null,
+    setValidation,
     stale,
     running,
     canRun: !runBlockedReason && !running,
@@ -452,7 +507,7 @@ export function useWorkflow(): Workflow {
 
 /* ---- hash routing: deep-linkable, back button works ---- */
 
-const PAGES: Page[] = ["configuration", "run", "results", "ingest", "silver", "history", "users"];
+const PAGES: Page[] = ["configuration", "preview", "run", "results", "validate", "ingest", "silver", "history", "users"];
 
 export const NavContext = createContext<(page: Page) => void>(() => {});
 export const useNavigate = () => useContext(NavContext);

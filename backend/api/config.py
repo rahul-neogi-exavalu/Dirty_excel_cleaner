@@ -92,6 +92,14 @@ ALLOWED_SUFFIXES = WORKBOOK_SUFFIXES | DELIMITED_SUFFIXES
 MAX_HEADER_LENGTH = 128
 PREVIEW_MAX_LIMIT = 100
 
+# The source preview (the uploaded file before cleaning). One page shows at most this many
+# columns; a sheet's cells are held for paging up to the per-sheet ceiling (a larger sheet
+# pages through its first rows and reports the rest as not shown), and the sheets held at
+# once share the cache budget, oldest dropped first.
+SOURCE_PREVIEW_MAX_COLUMNS = 100
+SOURCE_PREVIEW_MAX_CELLS = int(os.environ.get("AHI_SOURCE_PREVIEW_MAX_CELLS", "1000000"))
+SOURCE_PREVIEW_CACHE_CELLS = int(os.environ.get("AHI_SOURCE_PREVIEW_CACHE_CELLS", "3000000"))
+
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 CORS_ORIGINS = os.environ.get(
     "AHI_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
@@ -109,6 +117,13 @@ DB_SSLMODE = os.environ.get("AHI_DB_SSLMODE", "prefer").strip()
 # Raw cleaned tables, and the registry / audit tables that describe them.
 BRONZE_SCHEMA = os.environ.get("AHI_BRONZE_SCHEMA", "bronze").strip()
 CONTROL_SCHEMA = os.environ.get("AHI_CONTROL_SCHEMA", "ingest").strip()
+# A validated file is staged here (one table per cleaned output) while the control table
+# decides whether it is inserted, appended or rejected; Bronze loads from it.
+STAGING_SCHEMA = os.environ.get("AHI_STAGING_SCHEMA", "staging").strip()
+# The columns every file must map before it may reach Bronze, as Silver catalog names;
+# AED / PED / TED among them decide the reporting dates (backend/config).
+BRONZE_REQUIRED_COLUMNS_FILE = Path(os.environ.get(
+    "AHI_BRONZE_REQUIRED_COLUMNS_FILE", ROOT / "config" / "bronze_required_columns.csv"))
 # The team adds the source system to the file name as a suffix, e.g. ARR_pc0515.xlsx.
 # One capture group; the last match in the file stem wins.
 SOURCE_SYSTEM_PATTERN = os.environ.get(
@@ -125,11 +140,25 @@ def _flag(name: str, default: str) -> bool:
 
 # --- Silver layer --------------------------------------------------------------
 SILVER_SCHEMA = os.environ.get("AHI_SILVER_SCHEMA", "silver").strip()
+# The AHI doc's "source-specific Silver Cleansed" tables: one per bronze table, under the
+# same name, holding its rows mapped and typed. Final Silver (silver_transaction, or
+# silver_aggregate for a profit center's own aggregates) loads from them.
+CLEANSED_SCHEMA = os.environ.get("AHI_CLEANSED_SCHEMA", "bronze_cleansed").strip()
+# A Silver review not approved within this many hours is discarded (sliding: every edit renews it).
+SILVER_DRAFT_TTL_HOURS = float(os.environ.get("AHI_SILVER_DRAFT_TTL_HOURS") or "72")
 # The AHI doc's LOTL (pc_id -> legacy_office_name -> profit center number). Until the
 # real one exists this is a placeholder in the control schema, seeded for testing.
-LOTL_TABLE = os.environ.get("AHI_LOTL_TABLE", "").strip() or f"{CONTROL_SCHEMA}.lotl"
-# The Silver target columns (DRT). A draft ships; the business replaces it.
+# Empty: <control schema>.lotl, resolved when used (the control schema can be overridden).
+LOTL_TABLE = os.environ.get("AHI_LOTL_TABLE", "").strip()
+# The silver_transaction columns, exactly as the business's silver_schema lists them.
 SILVER_COLUMNS_FILE = Path(os.environ.get("AHI_SILVER_COLUMNS_FILE", ROOT / "config" / "silver_columns.csv"))
+# The silver_aggregate columns, exactly as the business's silver_aggregate_schema lists them.
+SILVER_AGGREGATE_COLUMNS_FILE = Path(os.environ.get(
+    "AHI_SILVER_AGGREGATE_COLUMNS_FILE", ROOT / "config" / "silver_aggregate_columns.csv"))
+# The business's reference workbooks (division mapping, LOTL, DRT column mapping).
+REFERENCE_DIR = Path(os.environ.get("AHI_REFERENCE_DIR") or PROJECT_ROOT / "assets")
+if not REFERENCE_DIR.is_absolute():
+    REFERENCE_DIR = PROJECT_ROOT / REFERENCE_DIR
 # Thresholds for a fuzzy or word2vec vote.
 MATCH_FUZZY_MIN = float(os.environ.get("AHI_MATCH_FUZZY_MIN") or "85")
 MATCH_SEMANTIC_MIN = float(os.environ.get("AHI_MATCH_SEMANTIC_MIN") or "0.72")

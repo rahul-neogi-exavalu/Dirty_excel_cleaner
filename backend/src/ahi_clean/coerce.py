@@ -450,7 +450,8 @@ def code_shape(values) -> str | None:
     digits = [text for text in texts if text.isdigit()]
     if len(digits) < len(texts) or len(digits) < 3:
         return None
-    if any(text.startswith("0") for text in digits):
+    # A lone 0 is zero, not a zero leading a code: 08085 has a digit after it.
+    if any(len(text) > 1 and text.startswith("0") for text in digits):
         return LEADING_ZERO
     widths = {len(text) for text in digits}
     if len(widths) == 1 and next(iter(widths)) >= 3 and len(set(digits)) / len(digits) >= 0.9:

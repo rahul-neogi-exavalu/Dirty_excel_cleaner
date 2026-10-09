@@ -92,6 +92,8 @@ export interface OutputSummary {
   sheet_names: string[];
   flagged_columns: number;
   renamed_columns: number;
+  /** Columns left out of bronze ingestion. */
+  excluded_columns: number;
   headers_updated_at: number | null;
   file: string;
   metadata_file: string;
@@ -184,6 +186,8 @@ export interface PreviewColumn {
   original: string;
   dtype: string;
   renamed: boolean;
+  /** Left out of bronze ingestion. */
+  excluded: boolean;
 }
 
 export interface Preview {
@@ -193,6 +197,28 @@ export interface Preview {
   limit: number;
   total: number;
   total_unfiltered: number;
+}
+
+/** A window of one uploaded sheet's cells, as the file holds them (before cleaning). */
+export interface SourcePreview {
+  sheet: string;
+  hidden: boolean;
+  source_format: string;
+  /** The used extent: the sheet row of the last value, and the last used column. */
+  total_rows: number;
+  total_columns: number;
+  /** Rows that can be paged through; fewer than total_rows for a sheet too large to hold. */
+  available_rows: number;
+  offset: number;
+  limit: number;
+  col_offset: number;
+  col_limit: number;
+  /** Column letters of the window; row numbers are offset + 1 onwards. */
+  columns: string[];
+  rows: (string | number | boolean | null)[][];
+  /** Merged ranges (A1:B2) touching the window, and how many the sheet has in all. */
+  merged: string[];
+  merged_total: number;
 }
 
 export interface ColumnProfile {
@@ -289,26 +315,29 @@ export interface BronzeStatus {
   error: string | null;
 }
 
-export interface PeriodCandidate {
-  source: string;
-  column: string | null;
-  start: string | null;
-  end: string | null;
-  rows: number | null;
-  months?: number[];
-}
-
+/** A staged control row in the plan: decided in Validate, read-only at Ingest. */
 export interface PlanFile {
-  job_id: string;
+  key: string;
+  control_id: number;
   file_name: string;
-  source_system: string | null;
-  detected_source_system: string | null;
-  period_start: string | null;
-  period_end: string | null;
-  detected_period_start: string | null;
-  detected_period_end: string | null;
-  period_source: string | null;
-  period_candidates: PeriodCandidate[];
+  output_name: string | null;
+  /** The control table's: EXT_PC0796. */
+  source_system: string;
+  pc_id: string | null;
+  division_name: string | null;
+  /** YYYY-MM-DD. */
+  file_received_date: string | null;
+  reporting_start_date: string;
+  reporting_end_date: string;
+  reporting_period_type: ReportingPeriodType | null;
+  date_detail: DateRole | null;
+  processing_action: ProcessingAction;
+  file_replaced: string | null;
+  replace_month: string | null;
+  rows: number;
+  fitness: number | null;
+  staging_table: string;
+  staged_at: number | null;
 }
 
 export interface PlanReplaceRef {
@@ -316,6 +345,7 @@ export interface PlanReplaceRef {
   file_name: string;
   period_start: string | null;
   period_end: string | null;
+  table_name?: string;
 }
 
 export interface PlanItem {
@@ -338,6 +368,9 @@ export interface PlanItem {
   requires_confirmation: boolean;
   reasons: string[];
   blockers: string[];
+  /** A monthly file replacing one month (YYYY-MM) of earlier loads, which keep their other months. */
+  replace_month: string | null;
+  month_replaces: PlanReplaceRef[];
 }
 
 export interface IngestPlan {
@@ -351,7 +384,7 @@ export interface IngestPlan {
   files: PlanFile[];
   items: PlanItem[];
   blockers: string[];
-  results: Record<string, { ingestion_id: string; rows_loaded: number; table_name: string }>;
+  results: Record<string, { ingestion_id: string; rows_loaded: number; table_name: string; control_id: number }>;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
@@ -364,10 +397,19 @@ export interface BronzeIngestion {
   period_end: string | null;
   action: IngestAction;
   rows_loaded: number;
-  status: "ingested" | "superseded" | "skipped";
+  /** removed: its bronze table no longer exists (tools/db_housekeeping.py). */
+  status: "ingested" | "superseded" | "skipped" | "removed";
   reviewed_by: string | null;
   created_at: number;
   superseded_by: string | null;
+  pc_id: string | null;
+  file_received_date: string | null;
+  division_name: string | null;
+  processing_date: number | null;
+  control_id: number | null;
+  reporting_start_date: string | null;
+  reporting_end_date: string | null;
+  reporting_period_type: ReportingPeriodType | null;
 }
 
 export interface BronzeTable {
@@ -383,10 +425,304 @@ export interface BronzeTable {
   ingestions: BronzeIngestion[];
 }
 
+/* ---- Validate and the control table ------------------------------------------ */
+
+export type DateRole = "AED" | "PED" | "TED";
+export type ReportingPeriodType = "YTD" | "MONTHLY";
+export type ProcessingAction = "INSERT" | "APPEND" | "REJECTED";
+/** What Validate decided; DECIDE: the reviewer has to choose first. */
+export type ValidationAction = ProcessingAction | "DECIDE";
+export type Verdict = "ready" | "needs_input" | "flagged" | "rejected";
+/**
+ * The reviewer's choices: reject; replace (an older year-to-date file); revise (a file of the same
+ * dates, named in replaces_file); companion (a file that came with another, named in companion_of).
+ * replace_month is what earlier stagings recorded (a month already loaded is now rejected).
+ */
+export type ValidationChoice = "reject" | "replace" | "replace_month" | "revise" | "companion";
+
+/** A file this one may be a companion of: in the same batch (ref: its output key) or loaded (ref: control:<id>). */
+export interface ValidationPartner {
+  ref: string;
+  file_name: string;
+  sheet_name: string | null;
+  loaded: boolean;
+  start: string | null;
+  end: string | null;
+  /** The file (and its sheet, when it has several tables). */
+  label: string;
+}
+
+/** What a table holds, told by its shape: transactions, or figures the profit center already aggregated. */
+export interface ValidationGrain {
+  aggregated: boolean;
+  signals: FitnessCheck[];
+  /** A column totalling others (TOTALS), and the columns it totals. */
+  total_column: string | null;
+  parts: string[];
+  /** Rows totalling the other rows of their sheet. */
+  total_rows: number;
+  measures: string[];
+  dimensions: string[];
+  /** The reviewer's word, over the detection. */
+  override: "aggregate" | "transaction" | null;
+}
+
+/** This table's columns against the file it continues in Bronze. */
+export interface SchemaChange {
+  against: string;
+  control_id: number;
+  kind: "identical" | "reordered" | "evolved" | "different";
+  /** In this file, not in the earlier one: the table gains them. */
+  added: string[];
+  /** In the earlier file, not in this one: left empty for this file. */
+  missing: string[];
+  reordered: boolean;
+}
+
+export interface ValidationFile {
+  job_id: string;
+  file_name: string;
+  pc_id: string | null;
+  detected_pc_id: string | null;
+  source_system: string | null;
+  /** YYYY-MM-DD. */
+  file_received_date: string | null;
+  detected_received_date: string | null;
+  received_note: string | null;
+  division_name: string | null;
+  division_matches: string[];
+  division_options: string[];
+  warnings: string[];
+}
+
+export interface OutputColumn {
+  original: string;
+  name: string;
+  current: string;
+  header: string;
+  excluded: boolean;
+  dtype: string;
+}
+
+export interface RequiredColumn {
+  name: string;
+  label: string;
+  date_role: DateRole | null;
+  /** The required columns that can stand in for this one (names): one of them is enough. */
+  one_of: string[];
+  /** The output's column (original name), or null: missing. */
+  column: string | null;
+  vote: { methods: MatchMethod[]; method: MatchMethod | "reviewer" | null; score: number | null; reason: string } | null;
+  options: { column: string; methods: MatchMethod[]; score: number }[];
+  reviewer: boolean;
+}
+
+export interface DateRange {
+  start: string;
+  end: string;
+  period_type: ReportingPeriodType | null;
+  /** Why the range is neither year-to-date nor monthly. */
+  flag: string | null;
+}
+
+export interface DateStat {
+  role: DateRole;
+  column: string | null;
+  rows: number;
+  populated: number;
+  invalid: number;
+  percent: number;
+  complete: boolean;
+  first: string | null;
+  last: string | null;
+}
+
+export interface FitnessCheck {
+  id: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface MonthView {
+  rows: number | null;
+  AED: number | null;
+  PED: number | null;
+  TED: number | null;
+}
+
+export interface ValidationOutput {
+  key: string;
+  job_id: string;
+  output_id: string;
+  name: string;
+  sheet_names: string[];
+  /** The control table's sheet_name: the sheet, or the stacked sheets comma-separated. */
+  sheet_name: string | null;
+  rows: number;
+  columns: OutputColumn[];
+  required: RequiredColumn[];
+  entered: boolean;
+  use_control_dates: boolean;
+  choice: ValidationChoice | null;
+  staged: { control_id: number; staging_table: string; processing_action: ProcessingAction; seeded: boolean } | null;
+  verdict: Verdict;
+  needs: string[];
+  warnings: string[];
+  missing: string[];
+  checks: FitnessCheck[];
+  fitness: number;
+  dates: Record<DateRole, DateStat>;
+  /** The date column the reporting dates are the range of: the control table's date_detail. */
+  date_detail: DateRole | null;
+  /**
+   * A date column (AED / TED / PED); picked: the reviewer's pick; entered / control: dates set by hand;
+   * sheets / file_name: an aggregated file's months; companion: the dates of the file it came with.
+   */
+  origin: DateRole | "picked" | "entered" | "control" | "sheets" | "file_name" | "companion" | null;
+  /** The date column the reviewer picked to decide the dates, if they did. */
+  date_role: DateRole | null;
+  /** Each date column populated on every row (so it may decide): its whole months, and YTD / monthly / neither. */
+  date_roles: Partial<Record<DateRole, DateRange>>;
+  flag: string | null;
+  period_type: ReportingPeriodType | null;
+  reporting_start_date: string | null;
+  reporting_end_date: string | null;
+  /** The reporting dates the control table lists for this file, when it lists them. */
+  listed: { start: string; end: string } | null;
+  months: Record<string, { rows: number } & Partial<Record<DateRole, number | null>>>;
+  action: ValidationAction | null;
+  reasons: string[];
+  options: ValidationChoice[];
+  confirm: boolean;
+  file_replaced: string | null;
+  /** The loaded file this revision replaces, as named (choice revise). */
+  replaces_file: string | null;
+  /** The loaded files of this profit center sharing a month with these dates: what a revision may name. */
+  revisable: { control_id: number; file_name: string; start: string; end: string; period_type: ReportingPeriodType | null; rows: number | null }[];
+  /** The profit center's own aggregates (to silver_aggregate), not transactions. */
+  aggregated: boolean;
+  grain: ValidationGrain;
+  /** An aggregated file's sheets and the month each names. */
+  sheet_months: Record<string, string> | null;
+  /** The loaded files this month is appended after, in their bronze table. */
+  appends_to: { control_id: number; file_name: string; start: string; end: string }[];
+  /** Columns against the file it continues (appended after, or replacing). */
+  schema: SchemaChange | null;
+  /** The file this one is a companion of (choice companion), and the files that are its companions. */
+  companion_of: string | null;
+  companion: ValidationPartner | null;
+  companions: string[];
+  /** The files of this profit center that came with it: what it may be a companion of. */
+  partners: ValidationPartner[];
+  /** The pair checked together, e.g. "Transactional.xlsx + BrokerList.xlsx". */
+  pair: string | null;
+  replace_month: string | null;
+  compare: {
+    month: string;
+    this: { file_name: string; columns: number } & MonthView;
+    earlier: ({ control_id: number; file_name: string; columns: number | null } & MonthView)[];
+  } | null;
+  /** The control row this output fills in: one the business listed (seeded), or its own from an earlier staging. */
+  control: { control_id: number; seeded: boolean } | null;
+}
+
+/* ---- live progress (Server-Sent Events) ------------------------------------ */
+
+export type ProgressPhaseState = "pending" | "active" | "done" | "failed";
+
+/** One step of a long task: its share of units done, what it is doing, how long it took. */
+export interface ProgressPhase {
+  id: string;
+  label: string;
+  state: ProgressPhaseState;
+  detail: string | null;
+  done: number;
+  total: number;
+  fraction: number;
+  /** Seconds spent so far (active) or in all (done); null before it starts. */
+  seconds: number | null;
+}
+
+/** How far a long server task has got, as each `progress` event carries it. */
+export interface TaskProgress {
+  status: "running" | "succeeded" | "failed";
+  /** 0..1, weighted by the work each step does; never goes backwards. */
+  fraction: number;
+  percent: number;
+  /** The step running now (or the one it failed at). */
+  phase: string | null;
+  label: string | null;
+  detail: string | null;
+  step: number;
+  steps: number;
+  phases: ProgressPhase[];
+  counters: Record<string, { done: number; total: number }>;
+  started_at: number;
+  elapsed: number;
+  error: ApiErrorBody | null;
+}
+
+/** A validation still being built, or one that stopped: what GET and POST answer until it is ready. */
+export interface ValidationRun {
+  id: string;
+  batch_id: string | null;
+  status: "running" | "failed";
+  progress: TaskProgress;
+  error: ApiErrorBody | null;
+}
+
+export interface Validation {
+  id: string;
+  batch_id: string | null;
+  status: "ready";
+  files: ValidationFile[];
+  outputs: ValidationOutput[];
+  notes: string[];
+  counts: Record<Verdict, number>;
+  created_at: number;
+  staged: number;
+}
+
+/** One row of the control table: the business's columns, then what the app adds. */
+export interface ControlRow {
+  control_id: number;
+  source_system: string;
+  file_name: string;
+  /** The sheet the row's table came from (several, comma-separated, when stacked); null when listed by the business. */
+  sheet_name: string | null;
+  reporting_period_type: ReportingPeriodType | null;
+  processing_action: ProcessingAction | null;
+  bronze_load_flag: "Y" | "N";
+  file_received_date: string | null;
+  drt_reporting_start_date: string | null;
+  drt_reporting_end_date: string | null;
+  date_detail: DateRole | null;
+  file_replaced: string | null;
+  is_active: "Y" | "N";
+  pc_id: string | null;
+  division_name: string | null;
+  job_id: string | null;
+  output_id: string | null;
+  staging_table: string | null;
+  ingestion_id: string | null;
+  rejection_reason: string | null;
+  replace_month: string | null;
+  created_by: string | null;
+  created_at: number | null;
+  staged_at: number | null;
+  loaded_at: number | null;
+  bronze_table: string | null;
+  fitness: number | null;
+  reasons: string[];
+  rows: number | null;
+  output_name: string | null;
+}
+
 /* ---- Silver ---------------------------------------------------------------- */
 
 /** A matching method; each one votes independently on every bronze column. */
-export type MatchMethod = "saved" | "exact" | "fuzzy" | "semantic" | "ai";
+export type MatchMethod = "saved" | "exact" | "fuzzy" | "semantic" | "ai" | "overlap";
 /** How the current choice was made: pre-selected from the votes, by the reviewer, or not yet. */
 export type MappingSelection = "recommended" | "manual" | "none";
 
@@ -410,14 +746,21 @@ export interface SilverCandidate {
 export interface SilverColumnDef {
   name: string;
   drt_name: string;
-  data_type: "text" | "date" | "decimal";
+  /** As the business's silver_schema states it: string, int, bigint, boolean, date, timestamp, decimal(p,s). */
+  data_type: string;
   business_key: boolean;
   description: string;
+  /** "mapped": a business column, filled from the bronze column mapped to it; "system": the pipeline fills it. */
+  role: "mapped" | "system";
+  /** One of the business's DRT columns: what a bronze column can be mapped to. The dropdowns offer only these. */
+  target: boolean;
 }
 
 export interface SilverCatalog {
   file: string;
+  /** Every silver_transaction column, in table order. */
   columns: SilverColumnDef[];
+  aggregate_columns: string[];
   semantic: boolean;
   ai: boolean;
   /** Provider and model, e.g. "Azure OpenAI · gpt-4.1-mini"; empty when off. */
@@ -434,18 +777,33 @@ export interface EligibleLoad {
   rows: number;
   ingested_at: number;
   silver_status: string | null;
+  pc_id: string | null;
+  division_name: string | null;
+  file_received_date: string | null;
+  processing_date: number;
+  reporting_start_date: string | null;
+  reporting_end_date: string | null;
+  reporting_period_type: ReportingPeriodType | null;
+  /** The profit center's own aggregates: loaded into silver_aggregate. */
+  aggregated: boolean;
 }
 
 export interface CleanupLoad {
   ingestion_id: string;
   table_name: string;
   file_name: string;
+  source_system: string | null;
   pc_id: string | null;
+  processing_date: string;
 }
 
 export interface SilverMappingRow {
   bronze_column: string;
+  /** The header as the source file wrote it ("Net Premium"); null for older loads. */
+  source_header?: string | null;
   silver_column: string | null;
+  /** More Silver columns the same bronze column also loads into. */
+  also: string[];
   ignored: boolean;
   selection: MappingSelection;
   /** Methods that voted for the current choice. */
@@ -462,16 +820,101 @@ export interface SilverQuality {
   rows: number;
   invalid_values: Record<string, number>;
   profit_center: Record<string, number>;
-  unmapped_silver_columns: string[];
+  unmapped_silver_columns?: string[];
+  /** Aggregated tables: rows loaded (after the unpivot), roll-up rows left out, each measure's total. */
+  rows_loaded?: number;
+  rollup_rows?: number;
+  measures?: Record<string, number>;
+  dimensions?: string[];
+}
+
+/** An aggregated table's columns that are one measure across a dimension: their headers are its values. */
+export interface SilverSpread {
+  columns: string[];
+  measure: string | null;
+  /** The aggregate column the headers fill; null: the next aggregation_dimension slot, named ``label``. */
+  dimension: string | null;
+  label: string;
+}
+
+export interface SilverJoinStats {
+  rows: number;
+  joined: number;
+  matched: number;
+  unmatched: number;
+  /** Key values repeated in the joined table (each would count its rows twice). */
+  duplicates: { key: string; rows: number }[];
+  repeated_keys: number;
+}
+
+export type SilverJoinHow = "left" | "right" | "inner";
+
+/** A join with the table of a file that came with this one. */
+export interface SilverJoin {
+  table: string;
+  columns: string[];
+  how: "left" | "inner";
+  ignore_case: boolean;
+  /** As the reviewer asked for it (a right join is held the other way round). */
+  asked: { left_table: string; right_table: string; how: SilverJoinHow; keys: [string, string][] };
+  stats: SilverJoinStats | Record<string, never>;
+}
+
+/** A suggested key: this table's column, the other's, and why. */
+export interface SilverKeyPair {
+  left: string;
+  right: string;
+  methods: MatchMethod[];
+  /** Share of the left column's values found in the right column. */
+  overlap: number | null;
+  /** Share of the right column's values that are distinct. */
+  unique: number | null;
+}
+
+/** Two tables of files that came together (a companion and the file it came with). */
+export interface SilverLink {
+  left_table: string;
+  right_table: string;
+  pairs: [string, string][];
+  keys: SilverKeyPair[];
+  /** A join approved before for these two tables was made again. */
+  saved: boolean;
+}
+
+/** One DRT column of a review, from the Silver side: the bronze column that loads it, or none. */
+export interface SilverPick {
+  silver_column: string;
+  bronze_column: string | null;
+  selection: MappingSelection;
+  /** The votes for the current pairing. */
+  votes: SilverVote[];
+  /** Every bronze column any method voted for this Silver column, best first. */
+  candidates: { bronze_column: string; recommended: boolean; support: number; votes: SilverVote[] }[];
 }
 
 export interface SilverTableReview {
   table_name: string;
   source_system: string | null;
   pc_id: string | null;
+  /** Every profit center the table's loads carry (each row keeps its own). */
+  pc_ids?: string[];
   loads: { ingestion_id: string; file_name: string; rows: number; period_start: string | null; period_end: string | null }[];
   quality: SilverQuality;
   mapping: SilverMappingRow[];
+  /** The same review from the Silver side: every DRT column (an aggregated table: every aggregate column). */
+  targets: SilverPick[];
+  /** The profit center's own aggregates: mapped onto silver_aggregate. */
+  aggregated: boolean;
+  spread: SilverSpread | null;
+  /** Columns totalling others: roll-ups, left out. */
+  rollups: string[];
+  /** The cleaner's sheet column (each row's sheet): lineage, never mapped. */
+  lineage: string[];
+  join: SilverJoin | null;
+  /** The table this one is joined into: it is not loaded on its own. */
+  joined_into: string | null;
+  /** The columns mapped: the table's own, then a joined table's, prefixed with its name. */
+  columns: string[];
 }
 
 export interface SilverRun {
@@ -485,25 +928,42 @@ export interface SilverRun {
   cleanup: CleanupLoad[];
   lotl_rows: number;
   blockers: string[];
-  result: { rows_loaded?: number; rows_removed?: number };
+  result: { rows_loaded?: number; rows_removed?: number; mappings_saved?: number };
   tables: SilverTableReview[];
+  /** What an aggregated table's columns can be mapped onto. */
+  aggregate_targets: { name: string; measure: boolean }[];
+  links: SilverLink[];
 }
 
-export interface SavedMapping {
-  pc_id: string;
-  bronze_table_name: string;
-  bronze_column_name: string;
-  drt_column_name: string | null;
+/** A row of the business's DRT column mapping. One source column can have two rows. */
+export interface DrtMapping {
+  /** PC0077 */
+  profit_center: string;
+  /** The source column as the file writes it. */
+  pc_column: string;
+  /** The business's DRT label for the Silver column; null when the business has none for it. */
+  drt_column: string | null;
+  /** null: a DRT label that names no Silver column. Ignores are never saved. */
   silver_column_name: string | null;
 }
 
-export interface SilverSummaryRow {
-  pc_id: string;
+/** A silver_aggregate row: every column of the business's aggregate schema. */
+export interface SilverAggregateRow {
+  source_system: string | null;
   profit_center_number: string | null;
   profit_center_name: string | null;
-  accounting_month: string | null;
-  row_count: number;
-  premium_total: number | null;
+  record_grain: string | null;
+  reporting_period: string | null;
+  reporting_year: number | null;
+  reporting_month: number | null;
+  premium: number | null;
+  policy_fees: number | null;
+  gross_commission_amount: number | null;
+  producer_commission_amount: number | null;
+  revenue: number | null;
+  policy_count: number | null;
+  file_date: string | null;
+  [column: string]: string | number | boolean | null;
 }
 
 /* ---- Sign-in, users and job history ---- */

@@ -61,7 +61,7 @@ Every statement of the scenario document, where it is implemented, and the test 
 | B7 | **Scenario 1, case 1:** identical names, order and count: append | `schema_compare.compare` gives IDENTICAL, so **APPEND** | `schema_compare.py` | `test_case_1_identical`, `test_july_identical_appends` |
 | B8 | **Case 2:** same names and count, different order: reorder, then append | REORDERED, so **REORDER**. Rows are written in the table's own column order (`COPY` with the table's column list). | `schema_compare.py`, `bronze_service._load` | `test_july_reordered_reorders_then_appends` |
 | B9 | **Case 3:** same names and order, different count: schema evolution, then append | EVOLVED when one column list is the other with columns added or left out, in the same order. **EVOLVE** runs `ALTER TABLE ADD COLUMN` for new ones; columns missing from the file load as NULL. **Confirmed.** | `schema_compare.compare`, `_in_order` | `test_case_3_…`, `test_july_extra_column_evolves_and_needs_confirmation` |
-| B10 | **Case 4:** different schema: a separate table with only the July data | DIFFERENT, so **NEW_TABLE** `…_2026_07`. **Confirmed.** | `planner._new_table` | `test_case_4_different_schema`, `test_july_different_schema_goes_to_its_own_table` |
+| B10 | **Case 4:** different schema: a separate table with only the July data | DIFFERENT (columns both added and missing), so another table of the same source the file fits, else **NEW_TABLE** `…_v2` (never a date in the name). **Confirmed.** Reordered *and* added columns evolve instead. | `planner._new_table`, `schema_compare.compare` | `test_case_4_different_schema`, `test_july_different_schema_goes_to_its_own_table`, `test_a_second_report_reuses_its_own_table_next_month`, `test_reordered_columns_with_a_new_one_evolve` |
 | B11 | **Scenario 2:** the second file is Jan–Jul. Confirmation required; the old Jan–Jun file is discarded and the new one ingested. | Jan–Jul overlaps Jan–Jun, so **REPLACE**. If it replaces every load in the table, the table is rebuilt with the new file's columns. **Confirmed**, with a final "Replace existing data?" dialog. | `planner._existing` (`rebuild`) | `test_jan_jul_file_replaces_jan_jun`, `test_bronze_db` |
 
 ### Bronze table naming
@@ -69,9 +69,21 @@ Every statement of the scenario document, where it is implemented, and the test 
 | # | Requirement | How it is solved | Code | Test |
 |---|---|---|---|---|
 | B12 | `ext_[source_system]_[sheet_name]`, e.g. `ext_pc0515_arr` | `naming.table_name`. The source system code is dropped from the sheet part if repeated (a CSV's only "sheet" is its file name). | `ahi_bronze/naming.py` | `test_table_names_follow_the_convention` |
-| B13 | The source system is added by the team as a suffix to the file name | `source_system_from_filename` takes the last `letters + digits` token of the file stem (`ARR_pc0515.xlsx` → `pc0515`, `pc_002_x.xlsx` → `pc002`). The regex is configurable. **The reviewer can edit it.** | `naming.py`, `AHI_SOURCE_SYSTEM_PATTERN` | `test_source_system_comes_from_the_file_name_suffix` |
+| B13 | The source system is added by the team as a suffix to the file name | The file name's one `PC` token gives both `pc_id` and the source system, zero-padded (`ARR_PC515.xlsx` → `PC0515`, `pc0515`). Two different PC tokens are left for the reviewer. Without one, `source_system_from_filename` takes the last `letters + digits` token that is not a period or a version (`fy2025`, `jun2025`, `v12` are skipped); the regex is configurable. **The reviewer can edit it.** | `file_meta.pc_tokens`, `naming.py`, `AHI_SOURCE_SYSTEM_PATTERN` | `test_source_system_comes_from_the_file_name_suffix`, `test_a_period_or_version_is_not_a_source_system` |
 | B14 | A sheet named after a date or month (Jan, Feb, June) uses a generic name: `ext_[source_system]_data` | `has_period` recognises month names, `2024-07`, `07-2024`, `07/31/2024`, quarters, `FY24` and years, whole-word only (`Market` is not March). Several stacked sheets also get `_data`. | `naming.has_period` | `test_table_names_follow_the_convention` |
 | B15 | "Alternatively, use another suitable generic name" | **The reviewer can rename any table** in the plan. Names must start with `ext_` and are cut to Postgres's 63-character limit with a hash suffix. | `bronze_service.update_item`, `naming.identifier` | `test_reviewer_table_name_is_used` |
+
+### The business's bronze columns (`assets/bronze_table_schema_example.xlsx`)
+
+Besides the file's own columns, every bronze table carries five more. `pc_id` comes first, and the other four follow the file's columns.
+
+| # | Column | How it is filled | Code | Test |
+|---|---|---|---|---|
+| B16 | `pc_id` (text) | `PC` plus the four-digit profit center, from the first `PC…` token of the file name: `PC796_2026-06 796 TPI - AJG Data Submission_796 TPI` gives `PC0796`; a sub-office `PC069_01` gives `PC0069_01`. A name without one falls back to its source system (`ARR_pc0515` gives `PC0515`). **The reviewer enters or corrects it**, and approval is blocked while it is missing. | `file_meta.pc_id_from_filename`, `normalize_pc_id` | `test_pc_id_and_file_date_come_from_the_file_name`, `test_pc_ids_are_normalized` |
+| B17 | `file_date` (date) | From the file name, after removing the profit-center token so `PC2024` is never a year. Accepted forms: `2026-06` (first of the month), `2026-06-15`, `202606`, `06-2026`, or a month word and a year (`Jun 2026`; with several months, `JanJun_2026`, the last). A year alone is not a date. **The reviewer enters it** when the name has none; approval is blocked until then. | `file_meta.file_date_from_filename`, `bronze_service._parse_file_date` | same; `test_bronze_db` |
+| B18 | `division_name` (text) | Looked up in `division_mapping` (`assets/division_table_details.xlsx`) by the four-digit profit center. Duplicate rows collapse. When a profit center is listed under two divisions (0673), **the reviewer picks**, and approval waits. When it is not listed, the column stays empty unless the reviewer chooses one. | `file_meta.divisions_for`, `bronze_service._lookup_division` | `test_division_lookup_returns_every_distinct_division`, `test_bronze_db` |
+| B19 | `file_name` (text) | The exact uploaded file name. | `bronze_service._load` | `test_bronze_db` |
+| B20 | `processing_date` (timestamptz) | The load time, taken per load and strictly increasing within a plan. It is not `now()`, which is one value per transaction. It is also stored in `ingestion.processing_date`, and Silver uses it as `ingestion_timestamp`. | `bronze_service._execute` | `test_bronze_db` (distinct per load, equal on rows and audit) |
 
 ### What the document implies but doesn't spell out
 
@@ -89,7 +101,7 @@ Every statement of the scenario document, where it is implemented, and the test 
 ```mermaid
 flowchart LR
     subgraph UI["Browser: step 4 Ingest"]
-        F[Files: source system, period]
+        F[Files: pc_id, file date, division, source system, period]
         P[Plan: table, action, schema diff]
         C[Confirm + Reviewed by]
     end
@@ -133,6 +145,8 @@ flowchart LR
 | Column | Meaning |
 |---|---|
 | *(the file's columns)* | **All `text`.** Bronze is the raw landing zone, so a later file can never conflict on type; typing is Silver's job. |
+| `pc_id` | First column: `PC` + four-digit profit center (B16) |
+| `file_date`, `division_name`, `file_name`, `processing_date` | After the file's columns (B17-B20). Reserved: a file column with one of these names is renamed (`file_name_2`). Kept out of the registry's column list, so they never count as schema drift. Tables created earlier gain them on their next load. |
 | `_ingestion_id` | Which load wrote the row. A replace deletes by it. |
 | `_source_file`, `_source_sheet` | Lineage (`_source_sheet` is taken from `source_sheet` for stacked month sheets, even if renamed) |
 | `_ingested_at` | When |
@@ -144,6 +158,9 @@ flowchart LR
 | `bronze_table` | Registry: each table's columns **in order**, with the cleaner's datatype, and its source system |
 | `ingestion` | **The ingestion audit table:** one row per file loaded or skipped. It holds the table, file, SHA-256, source sheets, period, action, schema diff, rows loaded, status (`ingested` / `superseded` / `skipped`), what superseded it, and the reviewer. Silver reads its eligibility from here. |
 | `ingest_plan` | Every approved plan, as the reviewer saw it, and whether it succeeded |
+| `division_mapping` | The business's division lookup (`division, international_office, profit_center`), loaded from `assets/` when empty (migration `003_reference.sql`) |
+
+Migration `003_reference.sql` also adds `pc_id`, `file_date`, `division_name` and `processing_date` to `ingestion`.
 
 ---
 
@@ -208,11 +225,12 @@ flowchart TD
 1. **Configure:** upload the workbooks and pick the sheets.
 2. **Run:** clean them.
 3. **Results:** optionally rename headers.
-4. **Ingest:**
-   - check each file's **source system** and **period**;
+4. **Validate:** check the mapping of the file's columns to the required Bronze columns (using saved DRT rules, exact matching, semantic/AI). A missing required column means the file is rejected; of an either/or pair (`one_of` in `bronze_required_columns.csv`: CommissionPct or GrossCommissionAmount, ProducerCommissionAmount or ProducerCommissionPct) one is enough. A sheet missing the required columns is left out on its own; any other rejected sheet rejects every sheet of its file, and a file is staged whole: one control row per sheet's table, with `sheet_name` beside `file_name`. Correct the reporting dates if needed (or pick the date column: AED, then TED, then PED decides, and the picked or matched column is the control table's `date_detail`). A monthly file is appended into the profit center's table after its earlier months, with its columns compared; a month already loaded is flagged and rejected; a file of exactly a loaded file's dates is a revision (naming the file it replaces) or a companion (a list that came with it, checked together and joined in Silver). Aggregated files (a summary the profit center made) are flagged in the control table (`is_aggregated`), staged as `<table>_agg_stg` and loaded into `<table>_agg`.
+5. **Ingest:**
+   - check each file's **source system**, **division**, and **file received date**;
    - review the **plan**: each target table, its action badge, its schema diff, and the reasons;
-   - tick the confirmations for risky items, enter **Reviewed by**, and click **Ingest**.
-5. **Bronze tables tab:** every table with its columns, row count, period coverage and full load history, including superseded and skipped loads.
+   - tick the confirmations for risky items and click **Ingest**.
+6. **Bronze tables tab:** every table with its columns, row count, period coverage and full load history, including superseded and skipped loads.
 
 ---
 

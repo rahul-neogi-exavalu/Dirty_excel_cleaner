@@ -3,10 +3,12 @@ import { AppShell } from "./components/layout/Layout";
 import { ConfigurationPage } from "./pages/ConfigurationPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { IngestPage } from "./pages/IngestPage";
+import { PreviewPage } from "./pages/PreviewPage";
 import { ResultsPage } from "./pages/ResultsPage";
 import { RunPage } from "./pages/RunPage";
 import { SilverPage } from "./pages/SilverPage";
 import { UsersPage } from "./pages/UsersPage";
+import { ValidatePage } from "./pages/ValidatePage";
 import { useAuth } from "./state/auth";
 import { NavContext, usePage } from "./state/workflow";
 
@@ -24,8 +26,10 @@ export default function App() {
     <NavContext.Provider value={navigate}>
       <AppShell page={forbidden ? "configuration" : page} onNavigate={navigate}>
         {(page === "configuration" || forbidden) && <ConfigurationPage />}
+        {page === "preview" && <PreviewPage />}
         {page === "run" && <RunPage />}
         {page === "results" && <ResultsPage />}
+        {page === "validate" && <ValidatePage />}
         {page === "ingest" && <IngestPage />}
         {page === "silver" && <SilverPage />}
         {page === "history" && <HistoryPage />}

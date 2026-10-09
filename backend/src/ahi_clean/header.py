@@ -21,6 +21,8 @@ SEARCH_DEPTH = 20
 HEADER_THRESHOLD = 0.55
 SECOND_ROW_THRESHOLD = 0.55
 SECOND_ROW_CONTRAST = 0.5
+# Share of a second header row's cells that must be text (labels, not figures).
+SECOND_ROW_TEXTNESS = 0.5
 EMPHASIS_BONUS = 0.15
 
 # Content signals sum to 1.0 so that a file with no formatting is still fully scored.
@@ -43,6 +45,9 @@ class HeaderResult:
     scores: list[dict] = field(default_factory=list)
     multi_row: bool = False
     notes: list[str] = field(default_factory=list)
+    # Each column's header as the sheet wrote it (two label rows joined with a space);
+    # None where the header cell is blank or there is no header row.
+    labels: list[str | None] = field(default_factory=list)
 
 
 def score_row(rows, index: int, width: int, styles=None, context=None) -> tuple[float, dict]:
@@ -110,6 +115,7 @@ def find_header(rows, width: int, styles=None) -> HeaderResult:
         )
 
     labels = list(rows[best_index])
+    written = _written_labels(labels)
     multi_row = False
     notes: list[str] = []
 
@@ -123,11 +129,15 @@ def find_header(rows, width: int, styles=None) -> HeaderResult:
         # which would swallow the first record of every such file. A real second
         # header row also *contrasts* with the data beneath it -- labels above numbers
         # and dates -- while a data row looks exactly like its neighbours.
+        # And it is labels: a row that is mostly numbers (a record of zeros under its
+        # name, common in summaries) is data, however much it contrasts.
         if (
             second_score >= SECOND_ROW_THRESHOLD
             and second_parts.get("contrast", 0.0) >= SECOND_ROW_CONTRAST
+            and signals.textness(rows[best_index + 1]) >= SECOND_ROW_TEXTNESS
         ):
             labels = _merge_label_rows(labels, rows[best_index + 1])
+            written = _written_labels(rows[best_index], rows[best_index + 1])
             multi_row = True
             notes.append("two-row header merged")
 
@@ -139,7 +149,17 @@ def find_header(rows, width: int, styles=None) -> HeaderResult:
         scores=scores,
         multi_row=multi_row,
         notes=notes,
+        labels=written,
     )
+
+
+def _written_labels(top, bottom=()) -> list[str | None]:
+    """The header cells as written, one per column; a second label row joined with a space."""
+    written = []
+    for index in range(max(len(top), len(bottom))):
+        parts = [str(row[index]).strip() for row in (top, bottom) if index < len(row) and not is_blank(row[index])]
+        written.append(" ".join(parts) if parts else None)
+    return written
 
 
 def _below_context(rows, width):

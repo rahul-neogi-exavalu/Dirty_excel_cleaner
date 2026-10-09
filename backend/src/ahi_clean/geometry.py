@@ -130,10 +130,25 @@ def _belongs_to_previous(anchor_rows, candidate_rows, width) -> bool:
     return _join_decision(anchor_rows, candidate_rows, width)[0]
 
 
+def _heads(line, profile) -> bool:
+    """Whether a lone row is the header of the rows below it, with blank rows between:
+    short text labels over exactly the columns those rows fill, and unlike them in type.
+    Alignment decides, never the gap -- a report that spaces its header from its records
+    (and its records from each other) is still one table."""
+    labels = [cell for cell in line if not is_blank(cell)]
+    if len(labels) < 2 or signals.textness(line) < 1.0 or signals.brevity(line) < 1.0:
+        return False
+    if {index for index, cell in enumerate(line) if not is_blank(cell)} != _columns_used(profile):
+        return False
+    return signals.type_contrast(line, profile) >= 0.5
+
+
 def _join_decision(anchor_rows, candidate_rows, width) -> tuple[bool, str | None]:
     """Whether a run continues the region before it, and a note if that was close."""
     anchor_profile = signals.type_profile(_profile_rows(anchor_rows), width)
     candidate_profile = signals.type_profile(_profile_rows(candidate_rows), width)
+    if len(anchor_rows) == 1 and _heads(anchor_rows[0], candidate_profile):
+        return True, None
     anchor_fill = signals.modal_fill(anchor_rows)
     candidate_fill = signals.modal_fill(candidate_rows)
 
