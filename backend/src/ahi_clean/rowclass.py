@@ -74,8 +74,9 @@ def classify_rows(body, header_names=None, header_row=None) -> list[RowVerdict]:
 
     reference = signals.sampled(body)
     modal = signals.modal_fill(reference)
-    threshold = max(modal * SPARSE_RATIO, 2) if modal else 0
     width = max((len(row) for row in body), default=0)
+    # A one-column list has one value per record; two is the floor everywhere else.
+    threshold = max(modal * SPARSE_RATIO, 2 if width > 1 else 1) if modal else 0
     profile = signals.type_profile(reference, width)
 
     # Normalised once rather than per row: the header does not change between rows.

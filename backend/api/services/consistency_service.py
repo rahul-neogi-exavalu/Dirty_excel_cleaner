@@ -155,7 +155,7 @@ def _header_lines(result) -> int:
     header = result.trace.get("header") or {}
     if header.get("row_index") is None:
         return 0
-    return 2 if header.get("multi_row") else 1
+    return header.get("depth") or (2 if header.get("multi_row") else 1)
 
 
 def _kept_source_lines(result) -> int:

@@ -96,7 +96,7 @@ def _row_conservation(result) -> list[Violation]:
 
     header_index = header.get("row_index")
     if header_index is not None:
-        header_rows = 2 if header.get("multi_row") else 1
+        header_rows = header.get("depth") or (2 if header.get("multi_row") else 1)
         body = region[0] - header_index - header_rows
     else:
         # No header row in this region -- every row of it is body. This covers a genuinely
