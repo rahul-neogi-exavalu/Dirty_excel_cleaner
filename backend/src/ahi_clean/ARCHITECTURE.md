@@ -210,11 +210,15 @@ flowchart TD
   or fewer. Always flagged.
 - Mostly parseable dates → a date column, written `YYYY-MM-DD`. Ambiguous day/month is
   read month-first and flagged.
-- `$1,234`, `(500)`, `12%` → numbers, with what was removed flagged.
+- `$1,234`, `(500)`, `12%` → numbers, with what was removed flagged. A thousands mark
+  must group threes: `$1,000,0` is not read as 10000, and `2.500,75` in a US column is
+  not read as 2.50075. Such a value fails, and the column stays text (below).
 
-**Can a real value be blanked by typing?** Only missing markers (`NULL`, `N/A`, a `0`
-standing for "no date") may become empty. A blanked value containing a digit is a
-contract violation (`value_nulled`).
+**Can a real value be blanked by typing?** No. Only missing markers (`NULL`, `N/A`, a `0`
+standing for "no date") may become empty. If reading a column as numbers or dates would
+blank any value containing a digit (group policy `9906-78-32` that looks like a date, an
+amount cut to `$1,000,0` by a PDF conversion), the whole column is kept as text and
+flagged. The `value_nulled` contract checks this holds.
 
 ### Outputs
 

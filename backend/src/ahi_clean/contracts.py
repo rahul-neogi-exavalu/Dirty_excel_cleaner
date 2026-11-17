@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .coerce import loses_data
+
 ROW_CONSERVATION = "row_conservation"
 EMPTY_KEY_COLUMN = "empty_key_column"
 UNEXPLAINED_EMPTY_COLUMN = "unexplained_empty_column"
@@ -60,8 +62,7 @@ def _no_value_nulled(result) -> list[Violation]:
     """
     lost = [
         failure for failure in result.trace.get("coercion_failures", [])
-        if any(ch.isdigit() for ch in str(failure.get("value", "")))
-        and str(failure.get("value", "")).strip().strip("0") != ""
+        if loses_data(failure.get("value", ""))
     ]
     if not lost:
         return []
