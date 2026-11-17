@@ -153,3 +153,40 @@ def test_a_delimited_export_inside_column_a_is_split_back():
 def test_prose_in_column_a_is_not_unpacked():
     rows = [[f"Note {i}: commissions, fees and adjustments are provisional"] for i in range(8)]
     assert delimited.unpack_column(rows) is None
+
+
+# --- headings broken over lines (PDF converted to Excel) --------------------------------
+
+
+def test_a_heading_broken_over_three_lines_is_joined():
+    rows = [["Applicant", "Policy", "Face", "Close/"],
+            ["Name", "Number", "Amoun", "Placed"],
+            [None, None, "t", "Date"]]
+    rows += [[f"Name {i}", f"P{1000 + i}", 250000 + i, f"2026-07-{i + 1:02d}"] for i in range(8)]
+    result = one(rows)
+    assert list(result.frame.columns) == ["applicant_name", "policy_number", "face_amount", "close_placed_date"]
+    assert len(result.frame) == 8
+
+
+def test_an_all_text_table_keeps_its_first_record():
+    rows = [["Name", "Carrier", "Status", "Agent"]] + [
+        [f"Client {i}", "Banner", "In Force", f"Agent {i}"] for i in range(8)]
+    result = one(rows)
+    assert len(result.frame) == 8
+    assert result.frame["name"][0] == "Client 0"
+
+
+# --- one-column lists and notes ----------------------------------------------------------
+
+
+def test_a_column_of_dates_alone_is_a_list_not_banners():
+    import datetime
+    rows = [[datetime.datetime(2026, 7, day)] for day in range(1, 21)]
+    result = one(rows)
+    assert result.frame.shape == (20, 1)
+
+
+def test_a_sheet_of_code_comments_is_not_a_table():
+    rows = [["Non Tricare", "Tricare Checks", "Tricare EFT"],
+            ["--Remittance query, updated", None, "--Updated 2026-07-01 by ops"]]
+    assert all(result.frame.is_empty() for result in sheet(rows))

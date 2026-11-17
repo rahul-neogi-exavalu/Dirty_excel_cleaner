@@ -147,6 +147,12 @@ The highest score wins if it reaches **0.55**. Ties go to the topmost row.
 `Name` → `profit_center_name`) only if it scores ≥0.55 *and* contrasts with the data
 (≥0.5). The contrast gate stops the first record of an all-text table being swallowed.
 
+**A heading broken over three or four lines (PDF converted to Excel)?** Rows under the
+header join it when they hold **no digit at all**, have at least two cells, and the
+records below carry digits in at least two number, date or id columns. Then no record can
+pass for a heading piece, and an all-text table is never touched. Pieces join per column
+with a space, and a word cut mid-way is glued back: `Face` + `Amoun` + `t` → `face_amount`.
+
 **How are names made?** Lower case, non-alphanumerics → `_`. A blank label over a column
 with data → `column_<n>`. Duplicates → `name`, `name_2`. A number → `col_2024`. The label
 as written is kept for downstream reporting.
@@ -226,6 +232,9 @@ flagged. The `value_nulled` contract checks this holds.
 order). Seven of eight names in common ships two CSVs. `--no-append` turns appending off.
 Tables are never joined.
 
+**A sheet of notes (SQL comments, long sentences)?** Not a table: when every value under
+the first row starts with `--` or runs past 80 characters, nothing is shipped.
+
 **What do I get per table?** A CSV with the file's own column names, a metadata CSV (type,
 counts, nulls, min/max/sum, flags) and, per input, an audit JSON.
 
@@ -249,9 +258,10 @@ classified (`corrupt`, `encrypted`, `unsupported_format`, `too_large`, `missing`
 ## 3. Known limits
 
 - PDF and `.msg` are not read. Neither are fixed-width (space-aligned) text files.
-- Headers broken over three or more lines (common in PDF→Excel conversions) are not
-  rebuilt. Two rows are merged, as above.
-- A one-column list (a sheet holding only a column of dates) is not treated as a table.
+- A heading the PDF conversion placed over two columns names only the first of them; the
+  second is positional (`column_5`).
+- A one-column list is a table only when nine in ten of its values are one non-text type
+  (dates, numbers, ids); a column of words stays banners.
 - A sideways table that is also tiny (two records) is decided by shape and flagged
   `confident: false`.
 - Report-parameter sheets ("Parameter Page") are dropped as banners, not kept as metadata.

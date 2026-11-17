@@ -45,6 +45,9 @@ class HeaderResult:
     scores: list[dict] = field(default_factory=list)
     multi_row: bool = False
     notes: list[str] = field(default_factory=list)
+    # Sheet rows the header occupies from ``row_index`` down: 1, 2, or more when a heading
+    # was broken over lines (see ``_fragment_rows``).
+    depth: int = 1
     # Each column's header as the sheet wrote it (two label rows joined with a space);
     # None where the header cell is blank or there is no header row.
     labels: list[str | None] = field(default_factory=list)
@@ -101,7 +104,11 @@ def find_header(rows, width: int, styles=None) -> HeaderResult:
         if score > best_score:
             best_index, best_score, best_parts = index, score, parts
 
-    if best_score < HEADER_THRESHOLD or best_index is None:
+    # A one-column list is headed by a word or not at all: its first date is a value.
+    single_value = (
+        width == 1 and best_index is not None and not isinstance(rows[best_index][0], str)
+    )
+    if best_score < HEADER_THRESHOLD or best_index is None or single_value:
         names = positional_names(width)
         return HeaderResult(
             row_index=None,
@@ -141,6 +148,15 @@ def find_header(rows, width: int, styles=None) -> HeaderResult:
             multi_row = True
             notes.append("two-row header merged")
 
+    depth = 2 if multi_row else 1
+    extra = _fragment_rows(rows, best_index + depth, width)
+    if extra:
+        depth += extra
+        stack = rows[best_index: best_index + depth]
+        labels = written = _join_fragments(stack)
+        multi_row = True
+        notes.append(f"{depth}-row header joined: a heading broken over lines")
+
     return HeaderResult(
         row_index=best_index,
         names=build_names(labels),
@@ -150,7 +166,65 @@ def find_header(rows, width: int, styles=None) -> HeaderResult:
         multi_row=multi_row,
         notes=notes,
         labels=written,
+        depth=depth,
     )
+
+
+MAX_HEADER_DEPTH = 4
+FRAGMENT_SAMPLE = 20
+
+
+def _fragment_rows(rows, start: int, width: int) -> int:
+    """How many rows from ``start`` down are more pieces of the heading above them.
+
+    A PDF converted to Excel breaks each heading over lines ("Applicant" / "Name",
+    "Face" / "Amoun" / "t"). A piece is a row with **no digit anywhere**, at least two
+    cells, and only text (or nothing) in every column where the records hold numbers,
+    dates or ids. Every record of such a table has digits in those columns, so none can
+    pass; a table with fewer than two such columns (all text) is never touched, which is
+    what keeps an all-text table's first record from being swallowed.
+    """
+    count = 0
+    while count + 2 <= MAX_HEADER_DEPTH and start + count + 1 < len(rows):
+        row = rows[start + count]
+        filled = [cell for cell in row if not is_blank(cell)]
+        if len(filled) < 2 or any(any(ch.isdigit() for ch in str(cell)) for cell in filled):
+            break
+        if not all(isinstance(cell, str) for cell in filled):
+            break
+        count += 1
+    if not count:
+        return 0
+    data = rows[start + count: start + count + FRAGMENT_SAMPLE]
+    profile = signals.type_profile(data, width)
+    typed = [i for i, kind in enumerate(profile) if kind not in ("empty", "text")]
+    if len(typed) < 2:
+        return 0
+    # Every record must carry a digit in the typed columns; otherwise these rows could be
+    # records too and are left alone.
+    if not all(any(any(ch.isdigit() for ch in str(row[i])) for i in typed if i < len(row) and not is_blank(row[i]))
+               for row in data if any(not is_blank(cell) for cell in row)):
+        return 0
+    return count
+
+
+def _join_fragments(stack) -> list[str | None]:
+    """Each column's pieces top to bottom, with a space -- except a word broken mid-way
+    (a short lower-case piece, ``Amoun`` + ``t``) or a piece ending ``/`` or ``-``."""
+    joined = []
+    for index in range(max(len(row) for row in stack)):
+        text = ""
+        for row in stack:
+            cell = row[index] if index < len(row) else None
+            if is_blank(cell):
+                continue
+            piece = str(cell).strip()
+            glue = bool(text) and (
+                (piece.isalpha() and piece.islower() and len(piece) <= 2) or text.endswith(("/", "-"))
+            )
+            text = f"{text}{piece}" if glue else (f"{text} {piece}" if text else piece)
+        joined.append(text or None)
+    return joined
 
 
 def _written_labels(top, bottom=()) -> list[str | None]:

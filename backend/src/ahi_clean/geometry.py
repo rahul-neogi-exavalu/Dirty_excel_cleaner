@@ -84,7 +84,37 @@ def _is_table(region: Region) -> bool:
     """
     if region.height < MIN_TABLE_ROWS:
         return False
-    return signals.modal_fill(region.rows) >= 2
+    if _only_comments(region.rows):
+        return False
+    return signals.modal_fill(region.rows) >= 2 or _is_list(region.rows)
+
+
+LIST_MIN_ROWS = 10
+LIST_SHARE = 0.9
+COMMENT_LENGTH = 80
+
+
+def _is_list(rows) -> bool:
+    """One column, ten or more values, nine in ten of one type that is not text.
+
+    A column of dates or numbers on its own is a list of values, not a stack of titles;
+    titles and notes are text, so they keep being treated as banners.
+    """
+    values = [cell for row in rows for cell in row if not is_blank(cell)]
+    if len(values) < LIST_MIN_ROWS or any(sum(not is_blank(c) for c in row) > 1 for row in rows):
+        return False
+    kinds = [signals.infer_type(value) for value in values]
+    kind = max(set(kinds), key=kinds.count)
+    return kind not in (EMPTY, "text") and kinds.count(kind) >= LIST_SHARE * len(kinds)
+
+
+def _only_comments(rows) -> bool:
+    """Every value under the first row is a code comment (``--``) or a long sentence: notes."""
+    body = [cell for row in rows[1:] for cell in row if not is_blank(cell)]
+    return bool(body) and all(
+        isinstance(cell, str) and (cell.strip().startswith("--") or len(cell) > COMMENT_LENGTH)
+        for cell in body
+    )
 
 
 # --------------------------------------------------------------------------- #

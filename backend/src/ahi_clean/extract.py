@@ -313,15 +313,16 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
         "detected": found.detected,
         "score": found.score,
         "multi_row": found.multi_row,
+        "depth": found.depth,
         "scores": found.scores[:10],
     }
     trace["notes"].extend(found.notes)
 
-    body_start = 0 if not found.detected else found.row_index + (2 if found.multi_row else 1)
+    body_start = 0 if not found.detected else found.row_index + found.depth
     header_row = rows[found.row_index] if found.detected else None
 
     # Rows above the header are decoration by position, whatever they say.
-    for offset in range(0, body_start - (2 if found.multi_row else 1) if found.detected else 0):
+    for offset in range(0, body_start - found.depth if found.detected else 0):
         if not all(is_blank(cell) for cell in rows[offset]):
             _record_drop(trace, region, offset, rowclass.BANNER, rows[offset], "sits above the header")
 
@@ -405,7 +406,7 @@ def _flag_structure(names, found, trace, grid=None, region=None) -> None:
                 ))
         if found.multi_row:
             flag_text.add_to_all(trace, names, flag_text.info(
-                "the header spanned two rows; the two labels were joined"
+                f"the header spanned {found.depth} rows; the labels were joined"
             ))
 
     if trace.get("realigned"):
