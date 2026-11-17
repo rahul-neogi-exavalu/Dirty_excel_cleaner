@@ -174,7 +174,45 @@ def sample(values):
     return values[:SAMPLE_HEAD] + values[SAMPLE_HEAD::stride][: SAMPLE_CAP - SAMPLE_HEAD]
 
 
+def loses_data(value) -> bool:
+    """Whether blanking this source value would lose data.
+
+    ``NULL``, ``N/A`` and a ``0`` standing for "no date" are missing markers. Anything
+    with a digit in it -- ``9906-78-32``, ``$1,000,0`` -- is data, however malformed.
+    """
+    text = str(value).strip()
+    return any(ch.isdigit() for ch in text) and text.strip("0") != ""
+
+
 def coerce_column(name: str, values: list, label=None) -> Coerced:
+    """Type a column, never at the price of a value.
+
+    The typing rules pick a number or date column by its majority. If converting would
+    blank even one value that carries digits -- a group policy ``9906-78-32`` that looked
+    like a date, an amount the PDF conversion cut to ``$1,000,0`` -- the column stays text
+    with every value intact, and is flagged so a person can see why.
+    """
+    result = _coerce_column(name, values, label)
+    lost = [failure["value"] for failure in result.failures if loses_data(failure["value"])]
+    if not lost:
+        return result
+    dated = result.kind in (typing_utils.DATE, typing_utils.DATETIME, typing_utils.DATE_STRING)
+    what = "dates" if dated else "numbers"
+    result.notes.append(
+        f"column '{name}' kept as text: reading it as {what} would blank {len(lost)} value(s)"
+    )
+    return Coerced(
+        _as_text(name, values),
+        typing_utils.ID_STRING if what == "numbers" else typing_utils.TEXT,
+        notes=result.notes,
+        flags=[flag_text.check(
+            f"mostly {what}, but {len(lost)} value(s) do not read as {what} "
+            f"({flag_text.example(lost)}); whole column kept as text (String) so none is lost"
+        )],
+    )
+
+
+def _coerce_column(name: str, values: list, label=None) -> Coerced:
     """Decide what a column is, then convert all of it in one pass.
 
     ``label`` is the header exactly as the sheet wrote it (``CreatedAt``, ``Txn Dt``). It

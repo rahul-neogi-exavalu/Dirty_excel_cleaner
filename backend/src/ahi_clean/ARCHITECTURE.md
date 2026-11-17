@@ -212,9 +212,11 @@ flowchart TD
   read month-first and flagged.
 - `$1,234`, `(500)`, `12%` → numbers, with what was removed flagged.
 
-**Can a real value be blanked by typing?** Only missing markers (`NULL`, `N/A`, a `0`
-standing for "no date") may become empty. A blanked value containing a digit is a
-contract violation (`value_nulled`).
+**Can a real value be blanked by typing?** No. Only missing markers (`NULL`, `N/A`, a `0`
+standing for "no date") may become empty. If reading a column as numbers or dates would
+blank any value containing a digit (group policy `9906-78-32` that looks like a date, an
+amount cut to `$1,000,0` by a PDF conversion), the whole column is kept as text and
+flagged. The `value_nulled` contract checks this holds.
 
 ### Outputs
 

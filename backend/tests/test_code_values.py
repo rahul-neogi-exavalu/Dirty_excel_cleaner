@@ -27,6 +27,20 @@ def test_ordinary_numbers_are_still_numbers(values):
     assert coerce.coerce_column("amount", values).series.dtype in (pl.Int64, pl.Float64)
 
 
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["9906-78-32", "9906-78-32", "9906-79-21", "620756", "9906-79-21"],  # ids shaped like dates
+        ["$250,000", "$1,000,0", "$500,000", "$1,500,0", "$750,000"],          # amounts cut short
+    ],
+)
+def test_a_column_is_kept_as_text_rather_than_blank_a_value(values):
+    result = coerce.coerce_column("c", values)
+    assert result.series.dtype == pl.String
+    assert result.series.to_list() == values
+    assert not result.failures
+
+
 def test_a_missing_marker_may_still_be_blanked():
     result = coerce.coerce_column("amount", ["10.5", "NULL", "20.25", "3.5"])
     assert result.series.dtype == pl.Float64
