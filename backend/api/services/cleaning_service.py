@@ -432,27 +432,8 @@ def _clean_sheets(job: Job, source):
 
 
 def _plan(results, stem: str, append: bool):
-    """Append identical-header tables, or ship every table on its own.
-
-    With append on this is exactly the CLI's ``plan_workbook``. With it off, each table
-    is planned alone, so the exact-header grouping never has two tables to stack; sibling
-    header adoption still runs first, because naming a headerless continuation sheet is
-    part of cleaning it, not part of appending it.
-    """
-    if append:
-        return orchestrate.plan_workbook(results, stem)
-
-    adoptions = orchestrate.adopt_sibling_headers(results)
-    live = [result for result in results if not result.frame.is_empty()]
-    outputs, roles = [], []
-    for result in live:
-        planned, report = orchestrate.plan_workbook([result], stem)
-        roles.extend(report["table_roles"])
-        for output in planned:
-            if len(live) > 1:
-                output.name = f"{stem}_{orchestrate._slug(result.label)}"
-            outputs.append(output)
-    return outputs, {"table_roles": roles, "relationships": [], "header_adoptions": adoptions}
+    """Append identical-header tables, or ship every table on its own (shared with the CLI)."""
+    return orchestrate.plan_outputs(results, stem, append)
 
 
 def _write(job: Job, source, stem: str, outputs) -> list[OutputRecord]:

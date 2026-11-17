@@ -90,6 +90,53 @@ def sniff_delimiter_detail(text: str) -> tuple[str, list[str]]:
     return best, ties
 
 
+# A sheet is a delimited file in disguise when nearly every line keeps its text in the
+# first column and that text splits into the same number of fields.
+PACKED_SHARE = 0.9
+PACKED_MIN_LINES = 5
+
+
+def unpack_column(rows) -> tuple[list[list], str] | None:
+    """A delimited export pasted into column A, split back into its fields.
+
+    Opening a pipe- or semicolon-delimited file in Excel can leave every record as one
+    string in column A -- and Excel may also have cut some lines on their commas, spilling
+    the rest into B and C. Such a sheet has one populated column of text, no table shape,
+    and every line dropped as a banner. Re-joining each line's cells with the comma Excel
+    consumed and splitting on the separator the text actually uses restores the records.
+
+    Returns ``(rows, delimiter)``, or None when the sheet is not one of these. The comma is
+    never the answer: a comma inside column A text is ordinary prose.
+    """
+    lines = [row for row in rows if any(not _blank(cell) for cell in row)]
+    if len(lines) < PACKED_MIN_LINES:
+        return None
+    first_only = [row for row in lines if isinstance(row[0], str)]
+    if len(first_only) < PACKED_SHARE * len(lines):
+        return None
+    def join(row) -> str:
+        return ",".join("" if _blank(cell) else str(cell) for cell in row).rstrip(",")
+
+    joined = [join(row) for row in lines]
+    for delimiter in (d for d in DELIMITERS if d != ","):
+        counts = [line.count(delimiter) for line in joined]
+        modal = max(set(counts), key=counts.count)
+        if modal >= 2 and counts.count(modal) >= PACKED_SHARE * len(joined):
+            # Every row, blank ones included, so each keeps its sheet position.
+            parsed = [
+                [value.strip() or None for value in next(csv.reader([join(row)], delimiter=delimiter), [])]
+                or [None]
+                for row in rows
+            ]
+            width = max(len(fields) for fields in parsed)
+            return [fields + [None] * (width - len(fields)) for fields in parsed], delimiter
+    return None
+
+
+def _blank(cell) -> bool:
+    return cell is None or (isinstance(cell, str) and not cell.strip())
+
+
 def read_delimited(path, max_cells: int, sheet_too_large) -> list:
     """Read a delimited file into one grid, shaped exactly like a read sheet."""
     from .reader import SheetGrid

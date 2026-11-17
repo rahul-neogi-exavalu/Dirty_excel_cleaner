@@ -88,9 +88,111 @@ def classify_rows(body, header_names=None, header_row=None) -> list[RowVerdict]:
         )
 
     _confirm_totals(body, verdicts)
+    _confirm_dense_total(body, verdicts)
     _resolve_unconfirmed(body, verdicts)
     _mark_group_labels(body, verdicts)
+    _keep_interleaved_labels(body, verdicts)
     return verdicts
+
+
+def _confirm_dense_total(body, verdicts) -> None:
+    """Catch a grand total that is *not* sparse: the last data row, if it sums the rest.
+
+    The sparse path never sees a total that is the fullest row on the sheet -- a ledger
+    whose records each fill one month while the total fills all twelve. So the last DATA
+    row is tested too, under a stricter rule than the sparse path: *every* number in it
+    must equal its column's sum over the data rows above (an empty column sums to 0),
+    and on top of that either two or more of those numbers are non-zero, or the row
+    carries fewer labels than every record above it (a total has a word where a record
+    has its names and codes). One matching column alone is not enough: a last record of
+    30 under records of 10 and 20 is just a record.
+
+    Records include the sparse rows still pending (a carrier with one month filled in);
+    the candidate itself must be a full DATA row, the sparse path having had its turn.
+    """
+    kept = [v for v in verdicts if v.classification in (DATA, SPARSE_KEPT)]
+    if len(kept) < 2 or kept[-1].classification != DATA:
+        return
+    last, above = kept[-1], [verdict.index for verdict in kept[:-1]]
+    row = body[last.index]
+    numbers = [(position, _as_number(cell)) for position, cell in enumerate(row)]
+    numbers = [(position, value) for position, value in numbers if value is not None]
+    if not numbers:
+        return
+
+    def label_count(cells) -> int:
+        return sum(1 for cell in cells if not is_blank(cell) and _as_number(cell) is None)
+
+    fewer_labels = label_count(row) < min(label_count(body[index]) for index in above)
+    matched, missed = 0, 0
+    for position, target in numbers:
+        column = [_as_number(body[index][position]) if position < len(body[index]) else None
+                  for index in above]
+        total = sum(value for value in column if value is not None)
+        if abs(total - target) <= max(SUM_TOLERANCE, abs(target) * 1e-9):
+            matched += target != 0
+        else:
+            missed += 1
+    # Two or more exact column sums settle it, with one column allowed to disagree: a
+    # total row carries a ratio (average commission rate) that is not a sum. Otherwise
+    # every number must match and the row must read like a total, not a record.
+    if not ((matched >= 2 and missed <= 1 and len(above) >= 2)
+            or (matched >= 1 and missed == 0 and fewer_labels)):
+        return
+    last.classification = GRAND_TOTAL
+    last.reason = (
+        f"every number in the last row equals its column's sum over the {len(above)} "
+        "data rows above"
+    )
+
+
+def _keep_interleaved_labels(body, verdicts) -> None:
+    """A label-only row *between* records is a record with empty measures, not a footer.
+
+    "Single cell, no numbers" reads as a footer at the foot of a table. Between data rows
+    -- a carrier listed with no business this month, sitting in its alphabetical place --
+    it is a record whose figures happen to be blank, and dropping it loses the carrier.
+    Only when its one value is in the table's first column, and that column holds text.
+    """
+    data_rows = [verdict.index for verdict in verdicts if verdict.classification == DATA]
+    if not data_rows:
+        return
+    key = min(
+        (next((p for p, cell in enumerate(body[i]) if not is_blank(cell)), 0) for i in data_rows),
+        default=0,
+    )
+
+    def keyed(index) -> bool:
+        row = body[index]
+        return key < len(row) and isinstance(row[key], str) and not is_blank(row[key])
+
+    # The mirror case: after the last record, a sparse row with no number in it is the
+    # report's own footer (its grouping and filter criteria), not a record.
+    for verdict in verdicts:
+        if (verdict.classification == SPARSE_KEPT and verdict.index > data_rows[-1]
+                and not any(_as_number(cell) is not None for cell in body[verdict.index])):
+            verdict.classification = FOOTER
+            verdict.reason = "sparse text after the last record, no numbers: report footer"
+
+    for verdict in verdicts:
+        if verdict.classification != FOOTER:
+            continue
+        before = [index for index in data_rows if index < verdict.index]
+        after = [index for index in data_rows if index > verdict.index]
+        # Between two records that both fill the key column -- not above the first
+        # record (a note under the header) and not over records that leave it blank
+        # (a group label, settled already).
+        if not before or not after or not (keyed(before[-1]) and keyed(after[0])):
+            continue
+        row = body[verdict.index]
+        filled = [position for position, cell in enumerate(row) if not is_blank(cell)]
+        if filled != [key] or not isinstance(row[key], str) or _FOOTER_HINT.search(row[key]):
+            continue
+        if _TOTAL_HINT.search(row[key]):
+            continue
+        verdict.classification = SPARSE_KEPT
+        verdict.confidence = 0.5
+        verdict.reason = "label-only row between records: kept as a record with empty measures"
 
 
 def _initial_verdict(index, row, threshold, header_row, profile, header_norm=None) -> RowVerdict:

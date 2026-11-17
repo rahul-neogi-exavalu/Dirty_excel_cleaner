@@ -503,14 +503,22 @@ def _emphasis(cell) -> dict:
 
 
 def _propagate_merged_values(merged_ranges: list[str], rows: list[list]) -> None:
-    """Fill a merged range with its top-left value so the grid stays rectangular.
+    """Fill a one-column merged range down with its top-left value.
 
-    A range reaching past the used extent (a merged banner wider than the table) is
-    filled only as far as the grid goes.
+    A vertical merge is a value shared by the records it spans (a carrier written once
+    beside its policies), so every row gets it. A range spanning several columns is
+    layout -- a title, a group band over its fields, a label boxed across a report's
+    criteria -- and stays a single cell. Copying it across used to fill the blank columns
+    between side-by-side tables (hiding the gap that separates them) and to make a band
+    row look like a perfectly homogeneous record, which turned whole sheets on their side.
+
+    A range reaching past the used extent is filled only as far as the grid goes.
     """
     height = len(rows)
     for merged in merged_ranges:
         min_col, min_row, max_col, max_row = range_boundaries(merged)
+        if max_col > min_col:
+            continue
         if min_row > height or min_col > len(rows[min_row - 1]):
             continue
         top_left = rows[min_row - 1][min_col - 1]

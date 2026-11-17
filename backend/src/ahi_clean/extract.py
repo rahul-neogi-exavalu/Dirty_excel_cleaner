@@ -7,6 +7,7 @@ records why every decision went the way it did.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
 import re
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ import polars as pl
 from . import flags as flag_text
 from . import (
     coerce,
+    delimited,
     geometry,
     header as header_mod,
     pivot as pivot_mod,
@@ -44,6 +46,23 @@ class SheetResult:
 
 def extract_sheet(grid) -> list[SheetResult]:
     """Extract every table region on a sheet. Returns one result per region."""
+    unpacked = None
+    if not str(getattr(grid, "source_format", "xlsx")).startswith("delimited"):
+        unpacked = delimited.unpack_column(grid.rows)
+        if unpacked:
+            # Styles no longer line up with the split cells; emphasis is simply unavailable.
+            grid = dataclasses.replace(grid, rows=unpacked[0], styles=[])
+    results = _extract_tables(grid)
+    if unpacked:
+        for result in results:
+            result.trace.setdefault("notes", []).append(
+                f"every line was one '{unpacked[1]}'-delimited string in the first column "
+                "(a text export opened in Excel); split back into its fields"
+            )
+    return results
+
+
+def _extract_tables(grid) -> list[SheetResult]:
     rows, flipped = _orient_sheet(grid.rows)
     regions = geometry.find_regions(rows)
     if not regions:
@@ -153,7 +172,31 @@ def _orient_sheet(rows):
     row_score, column_score = _orientation_scores(body, columns)
     if column_score - row_score < ORIENTATION_MARGIN:
         return rows, False
+    # The vote leans sideways, but read as written the sheet opens with a clear row of
+    # labels over its columns. A wide report with mostly empty fields (a data-request
+    # template, a month not yet filled in) votes sideways on its empty cells alone; the
+    # header it already has is the stronger evidence -- unless turning it over also gives
+    # a header (a genuinely sideways table has its field names down the first column),
+    # in which case the vote stands. This guard only ever keeps a sheet upright.
+    if _upright_header_is_clear(body, HEADER_LOW_CONFIDENCE, depth=2) and not (
+        _upright_header_is_clear(columns, HEADER_LOW_CONFIDENCE, depth=2)
+        and _holds_records(columns)
+    ):
+        return rows, False
     return columns, True
+
+
+def _holds_records(lines) -> bool:
+    """Whether any line after the first carries a value past its label and a band cell.
+
+    A label with nothing beside it is not a record. Turned over, an empty template
+    (carriers down the side, PIF and premium not filled in yet) is all such lines -- at
+    most a label and the band above it -- so the carrier names it puts on top are no
+    header of anything. Its total formulas evaluate to 0, so a zero is not evidence.
+    """
+    return any(
+        any(not is_blank(cell) and cell != 0 for cell in line[2:]) for line in lines[1:]
+    )
 
 
 def _upright_header_is_clear(rows, minimum: float, depth: int, records: int = 1) -> bool:
@@ -511,6 +554,18 @@ def _orient(region, grid, trace):
         # from being read as a header.
         transposed = False
         decided_by = "content_sign_and_header"
+    elif (
+        margin < ORIENTATION_MARGIN
+        and _upright_header_is_clear(rows, HEADER_LOW_CONFIDENCE, depth=3)
+        and not _upright_header_is_clear(columns, HEADER_LOW_CONFIDENCE, depth=3)
+    ):
+        # Close and leaning sideways, but only one reading has a header: as written, a
+        # clear row of labels; turned over, none. A short report (two policies, sixteen
+        # fields) is wider than tall and still upright. When *both* readings offer a
+        # header -- a lookup whose first column of names reads like labels -- this does
+        # not apply and shape decides, as before.
+        transposed = False
+        decided_by = "header_one_way"
     elif margin < ORIENTATION_MARGIN:
         # Too close to call on homogeneity and uniqueness alone -- a near-square table
         # looks plausible either way. Ask which reading produces a better *header*:

@@ -3,6 +3,9 @@
 
     python clean.py                          # every sample in backend/sample_files_uncleaned
     python clean.py "path/to/*.xlsx"         # your own files, relative to where you run it
+    python clean.py Test_data -r --dry-run   # a folder tree, decisions only, nothing written
+
+Every option is documented in backend/src/ahi_clean/README.md.
 
 The cleaner lives in backend/src. Its own defaults (sample folder, cleaned/, audit/) are
 relative to the working directory, so when an input or an output folder is not given
@@ -18,7 +21,7 @@ sys.path.insert(0, str(BACKEND / "src"))
 from ahi_clean.cli import main  # noqa: E402
 
 # Options whose next token is a value rather than an input path.
-_VALUED = {"--out", "--audit", "--workers", "--executor", "--max-cells"}
+_VALUED = {"--out", "--audit", "--workers", "--executor", "--max-cells", "--exclude", "--sheet"}
 
 
 def _with_backend_defaults(argv: list[str]) -> list[str]:
@@ -40,8 +43,7 @@ def _with_backend_defaults(argv: list[str]) -> list[str]:
     if "--audit" not in given:
         args += ["--audit", str(BACKEND / "audit")]
     if not positional and not ({"-h", "--help"} & set(argv)):
-        samples = BACKEND / "sample_files_uncleaned"
-        args += [str(samples / "*.xlsx"), str(samples / "*.csv"), str(samples / "*.tsv")]
+        args.append(str(BACKEND / "sample_files_uncleaned"))
     return args
 
 
