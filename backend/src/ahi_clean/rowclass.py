@@ -37,10 +37,13 @@ GRAND_TOTAL = "GRAND_TOTAL"
 REPEATED_HEADER = "REPEATED_HEADER"
 UNVERIFIED_TOTAL = "UNVERIFIED_TOTAL"
 SPARSE_KEPT = "SPARSE_KEPT"
+# A label alone in the first column over rows that leave that column blank: the sheet's way of
+# saying "everything below belongs to this payee". Not a record, but its text is data.
+GROUP_LABEL = "GROUP_LABEL"
 # A line of the sheet that held nothing but Excel error values (#VALUE!, #REF! ...).
 EXCEL_ERROR = "EXCEL_ERROR"
 
-DROPPED = {BANNER, FOOTER, SUBTOTAL, GRAND_TOTAL, REPEATED_HEADER, UNVERIFIED_TOTAL}
+DROPPED = {BANNER, FOOTER, SUBTOTAL, GRAND_TOTAL, REPEATED_HEADER, UNVERIFIED_TOTAL, GROUP_LABEL}
 
 HEADER_CONTRAST = 0.6
 HEADER_TEXTNESS = 0.8
@@ -86,6 +89,7 @@ def classify_rows(body, header_names=None, header_row=None) -> list[RowVerdict]:
 
     _confirm_totals(body, verdicts)
     _resolve_unconfirmed(body, verdicts)
+    _mark_group_labels(body, verdicts)
     return verdicts
 
 
@@ -123,6 +127,65 @@ def _initial_verdict(index, row, threshold, header_row, profile, header_norm=Non
 
     # Sparse and numeric: a total until arithmetic says otherwise.
     return RowVerdict(index, SPARSE_KEPT, f"sparse (fill {fill}) pending arithmetic check")
+
+
+# Of the data rows, at least this share must leave the first column blank for it to be read as
+# a column of group labels rather than a column that is merely patchy.
+GROUP_BLANK_SHARE = 0.5
+
+
+def _mark_group_labels(body, verdicts) -> None:
+    """Recognise group labels: one cell, in the first column, heading rows that leave it blank.
+
+    ``Gallagher Benefit`` on a line of its own, then records whose first cell is empty because
+    the label above stands for them. Left alone the label is dropped as a footer and the
+    records lose the one thing that says whose they are. A label is only recognised when a
+    data row follows it with the first column blank, and when most data rows do leave that
+    column blank -- a lone line at the bottom of a sheet, or a title over a table whose first
+    column is filled, is still just a footer or a banner.
+    """
+    data = [verdict.index for verdict in verdicts if verdict.classification == DATA]
+    if not data:
+        return
+    blank_first = sum(1 for index in data if is_blank(body[index][0]) if body[index])
+    if blank_first / len(data) < GROUP_BLANK_SHARE:
+        return
+    for verdict in verdicts:
+        if verdict.classification not in (FOOTER, BANNER):
+            continue
+        row = body[verdict.index]
+        if signals.fill_count(row) != 1 or is_blank(row[0]):
+            continue
+        following = verdicts[verdict.index + 1] if verdict.index + 1 < len(verdicts) else None
+        if (
+            following is not None
+            and following.classification == DATA
+            and is_blank(body[following.index][0])
+        ):
+            verdict.classification = GROUP_LABEL
+            verdict.reason = (
+                "a label alone in the first column over rows that leave it blank; "
+                "carried into those rows"
+            )
+
+
+def carry_group_labels(body, verdicts) -> tuple[list, bool]:
+    """The body with every group label filled down into the first column beneath it.
+
+    Returns the rows (copies where changed) and whether anything was carried. A row whose
+    first cell is filled keeps its own value; only blanks inherit the label above.
+    """
+    current = None
+    carried = False
+    out = []
+    for verdict, row in zip(verdicts, body):
+        if verdict.classification == GROUP_LABEL:
+            current = row[0]
+        elif current is not None and not verdict.dropped and row and is_blank(row[0]):
+            row = [current] + list(row[1:])
+            carried = True
+        out.append(row)
+    return out, carried
 
 
 def _norm_cells(cells) -> list[str]:

@@ -164,6 +164,21 @@ def looks_pivoted(rows) -> bool:
     return False
 
 
+def looks_period_axis(rows) -> bool:
+    """Whether a block has months across the top, whether or not the grid is filled in.
+
+    :func:`detect` only accepts a matrix that is almost completely full, because only a full
+    one can be melted without losing the meaning of a blank. A month-by-month ledger with a
+    few entries is just as obviously upright -- its fields are the months -- but fails that
+    fullness test and would be left to the shape tiebreak, which turns a short one on its
+    side. This is the cheaper question, asked only to hold the orientation vote back; the
+    block is read as written, not melted.
+    """
+    from . import coerce  # imported here, as in _all_parse_as_dates: coerce is heavy and not needed at import
+
+    return any(coerce.looks_like_month_names(row) for row in rows[:6])
+
+
 def melt(
     frame: pl.DataFrame, pivot: Pivot, names: list[str], labels: list | None = None
 ) -> tuple[pl.DataFrame, dict]:

@@ -146,11 +146,36 @@ def _orient_sheet(rows):
     # table on its side. Recognise it before orientation gets the chance.
     if pivot_mod.looks_pivoted(body):
         return rows, False
+    # Months across the top is a ledger, upright, even when too sparse to be a pivot.
+    if pivot_mod.looks_period_axis(body):
+        return rows, False
 
     row_score, column_score = _orientation_scores(body, columns)
     if column_score - row_score < ORIENTATION_MARGIN:
         return rows, False
     return columns, True
+
+
+def _upright_header_is_clear(rows, minimum: float, depth: int, records: int = 1) -> bool:
+    """Whether reading ``rows`` as written gives a convincing header row near the top.
+
+    Used only to *protect* an upright reading from a vote that is close or that rests on
+    very little data. It never turns anything over, so it cannot make the cleaner flip a
+    table it would otherwise have left alone.
+    """
+    if len(rows) < records + 1:
+        return False
+    width = max((len(row) for row in rows), default=0)
+    if width < 2:
+        return False
+    found = header_mod.find_header(rows, width, None)
+    return (
+        found.detected
+        and found.score >= minimum
+        and found.row_index is not None
+        and found.row_index <= depth
+        and len(rows) - found.row_index - 1 >= records
+    )
 
 
 def _bounded(rows):
@@ -179,7 +204,16 @@ def _orientation_scores(rows, columns):
     Measured on a sample. Which way up a block is, is a property of its whole shape,
     and scanning a million rows to decide it costs as much as everything else put
     together while changing no answer.
+
+    Title and banner rows above the table take no part in the vote (see
+    ``signals.strip_leading_decoration``). The sheet-level call strips them already; the
+    per-region call did not, so a merged title over a small table could still flip it.
     """
+    body = signals.strip_leading_decoration(rows)
+    if len(body) != len(rows) and len(body) >= 2:
+        stripped = [list(column) for column in zip(*body)]
+        if len(stripped) >= 2:
+            rows, columns = body, stripped
     sampled_rows = signals.sampled(rows[1:] or rows)
     sampled_columns = [signals.sampled(column) for column in (columns[1:] or columns)]
     row_score = typing_utils.mean_homogeneity(sampled_columns) + signals.uniqueness(rows[0])
@@ -261,6 +295,7 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
     names, body, width = _realign_gutters(names, found, rows, body, width, trace)
 
     verdicts = rowclass.classify_rows(body, header_names=names, header_row=header_row)
+    body, labels_carried = rowclass.carry_group_labels(body, verdicts)
     kept = []
     for verdict in verdicts:
         if verdict.dropped:
@@ -281,6 +316,11 @@ def _extract_region(grid, region, index, total, sheet_flipped=False) -> SheetRes
                 )
 
     _flag_structure(names, found, trace, grid, region)
+    if labels_carried and names:
+        flag_text.add(trace, names[0], flag_text.info(
+            "labels printed alone above their rows were carried down into this column, so "
+            "every row says which group it belongs to"
+        ))
     frame = _typed_frame([_fit_row(row, width) for row in kept], names, trace, labels)
     _validate(frame, trace)
 
@@ -443,12 +483,35 @@ def _orient(region, grid, trace):
         )
         return rows, _region_styles(region, grid)
 
+    # Months across the top: a ledger whose fields are the months, however few cells are
+    # filled in. Too sparse for `detect` to call it a pivot, so it is only kept upright.
+    if pivot_mod.looks_period_axis(rows):
+        trace["orientation"] = {
+            "orientation": "normal",
+            "confident": True,
+            "decided_by": "period_axis",
+        }
+        return rows, _region_styles(region, grid)
+
     row_score, column_score = _orientation_scores(rows, columns)
     margin = abs(row_score - column_score)
     transposed = column_score > row_score
 
     decided_by = "content_scores"
-    if margin < ORIENTATION_MARGIN:
+    if (
+        margin < ORIENTATION_MARGIN
+        and row_score >= column_score
+        and _upright_header_is_clear(rows, HEADER_LOW_CONFIDENCE, depth=3)
+    ):
+        # Close, but the content already leans upright and the upright reading has a clear
+        # row of labels over the columns. Shape must not overrule both: a table with two
+        # records and twenty-four fields is wider than it is tall and still not sideways.
+        # Only an upright verdict is confirmed this way; a lean towards sideways still goes
+        # to the shape tiebreak below, which is what keeps a lookup table of entity names
+        # from being read as a header.
+        transposed = False
+        decided_by = "content_sign_and_header"
+    elif margin < ORIENTATION_MARGIN:
         # Too close to call on homogeneity and uniqueness alone -- a near-square table
         # looks plausible either way. Ask which reading produces a better *header*:
         # the axis that yields a row of labels sitting above unlike columns is the
