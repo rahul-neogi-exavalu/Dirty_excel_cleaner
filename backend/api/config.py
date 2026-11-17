@@ -83,11 +83,13 @@ PARALLEL_MIN_BYTES = int(os.environ.get("AHI_PARALLEL_MIN_BYTES", str(256 * 1024
 # or written, and lets a batch of single-sheet files use more than one core.
 BATCH_FILE_CONCURRENCY = max(1, int(os.environ.get("AHI_BATCH_FILE_CONCURRENCY", "2")))
 
-# What the reader can open. Workbooks go through openpyxl, the rest through the
-# delimited reader, which treats the file as a single sheet.
+# What the reader can open. Workbooks go through openpyxl, a legacy .xls through xlrd, a
+# binary .xlsb through calamine, and the rest through the delimited reader, which treats the file as a single sheet.
 WORKBOOK_SUFFIXES = {".xlsx", ".xlsm"}
+LEGACY_EXCEL_SUFFIXES = {".xls"}
+BINARY_EXCEL_SUFFIXES = {".xlsb"}
 DELIMITED_SUFFIXES = {".csv", ".tsv", ".txt"}
-ALLOWED_SUFFIXES = WORKBOOK_SUFFIXES | DELIMITED_SUFFIXES
+ALLOWED_SUFFIXES = WORKBOOK_SUFFIXES | LEGACY_EXCEL_SUFFIXES | BINARY_EXCEL_SUFFIXES | DELIMITED_SUFFIXES
 
 MAX_HEADER_LENGTH = 128
 PREVIEW_MAX_LIMIT = 100

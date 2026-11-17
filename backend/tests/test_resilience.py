@@ -60,7 +60,7 @@ def test_every_kind_of_bad_file_is_classified_distinctly(batch):
     kinds = {failure.source.name: failure.kind for failure in failed}
     assert kinds["a_corrupt.xlsx"] == failures.CORRUPT
     assert kinds["b_encrypted.xlsx"] == failures.ENCRYPTED
-    assert kinds["c_legacy.xls"] == failures.UNSUPPORTED_FORMAT
+    assert kinds["c_legacy.xls"] == failures.CORRUPT  # an .xls is read now; this one is not a real one
     assert "z_good.xlsx" not in kinds
 
 
@@ -292,4 +292,4 @@ def test_a_bad_file_does_not_stop_a_parallel_batch(batch):
     assert len(outcomes) == 1
     kinds = {failure.source.name: failure.kind for failure in failed}
     assert kinds["a_corrupt.xlsx"] == failures.CORRUPT
-    assert kinds["c_legacy.xls"] == failures.UNSUPPORTED_FORMAT
+    assert kinds["c_legacy.xls"] == failures.CORRUPT  # an .xls is read now; this one is not a real one

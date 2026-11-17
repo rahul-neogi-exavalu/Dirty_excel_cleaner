@@ -23,17 +23,15 @@ UNEXPECTED = "unexpected"
 # Formats that are legitimately spreadsheets but that openpyxl cannot open. Worth naming
 # individually so the message can say what to convert from, rather than "unreadable".
 _FOREIGN_SUFFIXES = {
-    ".xls": "legacy Excel 97-2003",
-    ".xlsb": "binary Excel",
     ".ods": "OpenDocument",
 }
 
 _ADVICE = {
-    CORRUPT: "the file is not a readable .xlsx (truncated download, or renamed from another format)",
+    CORRUPT: "the file is not a readable spreadsheet (truncated download, or renamed from another format)",
     ENCRYPTED: "the file is password-protected; it must be opened and re-saved without a password",
-    UNSUPPORTED_FORMAT: "this format cannot be read directly; re-save it as .xlsx",
+    UNSUPPORTED_FORMAT: "this format cannot be read directly; re-save it as .xlsx, .xls or .csv",
     MISSING: "the file no longer exists",
-    NO_TABLE: "the workbook opened but held nothing table-shaped",
+    NO_TABLE: "the file opened but held nothing table-shaped",
     TOO_LARGE: "the sheet exceeds the configured cell ceiling",
     UNEXPECTED: "unexpected internal error; see the traceback written beside the audit reports",
 }
@@ -82,12 +80,18 @@ def classify(source: Path, error: BaseException) -> Failure:
             f"{_FOREIGN_SUFFIXES[suffix]} ({suffix}) is not supported",
         )
 
+    name = type(error).__name__
+    # The legacy .xls (xlrd) and .xlsb (calamine) readers raise their own exception types.
+    if type(error).__module__.split(".")[0] in ("xlrd", "python_calamine"):  # XLRDError, CompDocError, CalamineError ...
+        if "encrypted" in str(error).lower() or "password" in str(error).lower():
+            return Failure(source, ENCRYPTED, str(error))
+        return Failure(source, CORRUPT, str(error))
+
     if isinstance(error, zipfile.BadZipFile):
         if _is_ole_container(source):
             return Failure(source, ENCRYPTED, "file is an OLE container, typical of password protection")
         return Failure(source, CORRUPT, str(error))
 
-    name = type(error).__name__
     if name == "SheetTooLarge":
         return Failure(source, TOO_LARGE, str(error))
     if "InvalidFile" in name:

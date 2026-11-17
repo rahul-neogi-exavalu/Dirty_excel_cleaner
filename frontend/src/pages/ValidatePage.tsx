@@ -60,7 +60,8 @@ const VERDICT: Record<Verdict, { label: string; tone: Tone; icon: JSX.Element }>
 const ACTION_TONE: Record<string, Tone> = { INSERT: "brand", APPEND: "success", REJECTED: "danger", DECIDE: "warning" };
 
 const METHOD_LABEL: Record<string, string> = {
-  saved: "Saved", exact: "Exact", fuzzy: "Fuzzy", semantic: "Semantic", ai: "AI", reviewer: "Reviewer",
+  saved: "Saved", exact: "Exact", fuzzy: "Fuzzy", semantic: "Semantic", ai: "AI", regex: "Regex",
+  reviewer: "Reviewer",
 };
 
 const ROLE_LABEL: Record<DateRole, string> = {

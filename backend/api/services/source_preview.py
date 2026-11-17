@@ -23,7 +23,7 @@ from decimal import Decimal
 
 from openpyxl.utils import get_column_letter, range_boundaries
 
-from ahi_clean import delimited, failures, reader
+from ahi_clean import binary_excel, delimited, failures, legacy_excel, reader
 
 from .. import config
 from ..errors import ApiError, not_found
@@ -126,6 +126,16 @@ def _read(upload: Upload, name: str) -> RawSheet:
     try:
         if upload.kind == "delimited":
             return _read_delimited(upload)
+        if upload.kind == "xlsb":
+            sheet = _collect(binary_excel.raw_rows(upload.path, name))
+            sheet.source_format = "xlsb"
+            return sheet
+        if upload.kind == "xls":
+            rows, merged = legacy_excel.raw_rows(upload.path, name)
+            sheet = _collect(rows)
+            sheet.merged = [tuple(span) for span in merged]
+            sheet.source_format = "xls"
+            return sheet
         with reader.raw_sheet(upload.path, name) as (rows, merged):
             sheet = _collect(rows)
         sheet.merged = [range_boundaries(ref) for ref in merged]

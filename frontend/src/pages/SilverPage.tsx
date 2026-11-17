@@ -58,7 +58,8 @@ import { formatNumber, humanize, plural } from "../lib/format";
 import { useAuth } from "../state/auth";
 
 const METHOD: Record<MatchMethod, string> = {
-  saved: "Saved", exact: "Exact", fuzzy: "Fuzzy", semantic: "Semantic", ai: "AI", overlap: "Shared values",
+  saved: "Saved", exact: "Exact", fuzzy: "Fuzzy", semantic: "Semantic", ai: "AI", regex: "Regex",
+  overlap: "Shared values",
 };
 const DOT: Record<MatchMethod, string> = {
   saved: "bg-ink-500",
@@ -66,10 +67,11 @@ const DOT: Record<MatchMethod, string> = {
   fuzzy: "bg-sky-400",
   semantic: "bg-sky-700",
   ai: "bg-brand-600",
+  regex: "bg-violet-500",
   overlap: "bg-amber-500",
 };
 // Saved and exact votes are certain by definition; the others carry a score.
-const SCORED = new Set<MatchMethod>(["fuzzy", "semantic", "ai"]);
+const SCORED = new Set<MatchMethod>(["fuzzy", "semantic", "ai", "regex"]);
 const pct = (score: number) => `${Math.round(score * 100)}%`;
 const POLL_MS = 700;
 const toError = (error: unknown) => (error instanceof ApiError ? error : new ApiError(0, { code: "unknown", message: String(error) }));

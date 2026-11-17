@@ -44,8 +44,9 @@ EXACT = "exact"
 FUZZY = "fuzzy"
 SEMANTIC = "semantic"
 AI = "ai"
+REGEX = "regex"
 OVERLAP = "overlap"
-METHODS = (SAVED, EXACT, FUZZY, SEMANTIC, AI, OVERLAP)
+METHODS = (SAVED, EXACT, FUZZY, SEMANTIC, AI, REGEX, OVERLAP)
 
 # How the current choice was made.
 RECOMMENDED = "recommended"  # pre-selected from the votes
@@ -53,7 +54,7 @@ MANUAL = "manual"  # set by the reviewer
 NONE = "none"  # nothing chosen yet
 
 # How far each method's score is trusted when two candidates have as many votes.
-WEIGHT = {SAVED: 1.0, EXACT: 1.0, OVERLAP: 0.95, AI: 0.9, SEMANTIC: 0.85, FUZZY: 0.8}
+WEIGHT = {SAVED: 1.0, EXACT: 1.0, OVERLAP: 0.95, AI: 0.9, SEMANTIC: 0.85, FUZZY: 0.8, REGEX: 0.75}
 
 
 @dataclass
@@ -147,16 +148,20 @@ class Suggestion:
 LlmMatcher = Callable[[dict[str, list[str]], list[SilverColumn]], dict[str, tuple]]
 # word2vec: (words, words) -> cosine or None
 Similarity = Callable[[tuple[str, ...], tuple[str, ...]], float | None]
+# Regex: (source words, target words) -> score in [0, 1], or None when no structured regex
+# rule fits the candidate.
+RegexMatcher = Callable[[tuple[str, ...], tuple[str, ...]], float | None]
 # Told how far each method has got: (method, columns done, columns in all). Each method
 # reports 0 when it starts and every column when it ends; fuzzy and semantic report each
 # column as they go.
 Progress = Callable[[str, int, int], None]
 
 
-def methods_run(similarity: Similarity | None, llm: LlmMatcher | None) -> list[str]:
+def methods_run(similarity: Similarity | None, llm: LlmMatcher | None, regex: bool = True) -> list[str]:
     """The methods ``suggest`` runs with these matchers, in order."""
     return [method for method, available in ((SAVED, True), (EXACT, True), (FUZZY, process is not None),
-                                              (SEMANTIC, similarity is not None), (AI, llm is not None))
+                                              (SEMANTIC, similarity is not None), (AI, llm is not None),
+                                              (REGEX, regex))
             if available]
 
 
@@ -333,6 +338,55 @@ def _ai_votes(columns, catalog, by_name, votes, samples, llm, notes) -> None:
             votes[column].append(Vote(AI, alternative, 0.0, "The AI's second choice", second_choice=True))
 
 
+def _regex_meaningful(words: tuple[str, ...]) -> tuple[str, ...]:
+    """Distinctive tokens only: generic words and value-shape words are not evidence."""
+    return tuple(dict.fromkeys(word for word in words if word and word not in GENERIC and not word.isdigit()))
+
+
+def _regex_score(source: tuple[str, ...], target: tuple[str, ...]) -> float | None:
+    """A conservative regex-style structural match: same non-generic stem(s), different from exact equality."""
+    source_terms = _regex_meaningful(source)
+    target_terms = _regex_meaningful(target)
+    if not source_terms or not target_terms:
+        return None
+    common = set(source_terms) & set(target_terms)
+    if not common:
+        return None
+    score = len(common) / max(len(set(source_terms)), len(set(target_terms)))
+    return round(0.6 + 0.4 * score, 3) if score >= 0.5 else None
+
+
+def _regex_votes(columns, catalog, votes, minimum, margin, progress: Progress = _quiet, matcher: RegexMatcher | None = None) -> None:
+    for index, column in enumerate(columns):
+        if index:
+            progress(REGEX, index, len(columns))
+        source = normalize.words(column)
+        scored = []
+        for silver in catalog:
+            if not _kinds_agree(source, silver):
+                continue
+            phrases = [silver.name, silver.drt_name]
+            for text in phrases:
+                if not text:
+                    continue
+                if matcher is not None:
+                    score = matcher(source, normalize.words(text))
+                    if score is None:
+                        continue
+                    score = round(max(0.0, min(1.0, float(score))), 3)
+                else:
+                    score = _regex_score(source, normalize.words(text))
+                if score is not None:
+                    scored.append((score, silver.name))
+        if not scored:
+            continue
+        scored.sort(reverse=True)
+        score, target = scored[0]
+        runner_up = scored[1][0] if len(scored) > 1 else 0.0
+        if score >= minimum and score - runner_up >= margin:
+            votes[column].append(Vote(REGEX, target, score, f"Pattern match ({score:.2f})"))
+
+
 # --- pooling and recommending -----------------------------------------------------
 
 
@@ -345,7 +399,8 @@ def _candidates(votes: list[Vote]) -> list[Candidate]:
     return sorted(by_name, key=lambda c: (c.rank(), c.silver_column is not None), reverse=True)
 
 
-LABELS = {SAVED: "Saved", EXACT: "Exact", FUZZY: "Fuzzy", SEMANTIC: "Semantic", AI: "AI", OVERLAP: "Shared values"}
+LABELS = {SAVED: "Saved", EXACT: "Exact", FUZZY: "Fuzzy", SEMANTIC: "Semantic", AI: "AI",
+          REGEX: "Regex", OVERLAP: "Shared values"}
 
 
 def _label(candidate: Candidate) -> str:
@@ -369,6 +424,9 @@ def suggest(
     progress: Progress | None = None,
     drt_only: bool = True,
     labels: dict[str, str] | None = None,
+    regex: RegexMatcher | None = None,
+    regex_min: float = 0.6,
+    regex_margin: float = 0.05,
 ) -> tuple[list[Suggestion], list[str]]:
     """One suggestion per bronze column, with every method's vote, plus notes on methods
     that could not run.

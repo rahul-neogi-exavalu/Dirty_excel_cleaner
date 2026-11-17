@@ -91,12 +91,57 @@ class SheetTooLarge(Exception):
 
 
 DELIMITED_SUFFIXES = {".csv", ".tsv", ".txt"}
+LEGACY_EXCEL_SUFFIXES = {".xls"}
+BINARY_EXCEL_SUFFIXES = {".xlsb"}
+
+# The ways a file can be read. Everything but ``XLSX`` yields the same SheetGrid by a
+# reader of its own, so nothing downstream knows which one a grid came from.
+XLSX, XLS, XLSB, DELIMITED = "xlsx", "xls", "xlsb", "delimited"
+
+_OLE_MAGIC = bytes.fromhex("d0cf11e0a1b11ae1")
+_ZIP_MAGIC = b"PK" + bytes([3, 4])
+
+
+def file_format(path) -> str:
+    """Which reader opens ``path``: ``xlsx``, ``xls``, ``xlsb`` or ``delimited``.
+
+    A text suffix decides at once -- text has no signature to sniff. For the rest the
+    first bytes win over the name, so a zip saved under the wrong extension is still read as
+    what it is. An .xlsx and an .xlsb are both zips, so the suffix tells those two apart.
+    An OLE container is the other ambiguous case: a genuine ``.xls`` is one, but so is a
+    password-protected ``.xlsx``, which must keep failing through the xlsx path so it is
+    reported as locked rather than corrupt.
+    """
+    suffix = Path(path).suffix.lower()
+    if suffix in DELIMITED_SUFFIXES:
+        return DELIMITED
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(8)
+    except OSError:
+        head = b""
+    if head.startswith(_ZIP_MAGIC):
+        return XLSB if suffix in BINARY_EXCEL_SUFFIXES else XLSX
+    if head.startswith(_OLE_MAGIC):
+        return XLS if suffix in LEGACY_EXCEL_SUFFIXES else XLSX
+    if suffix in LEGACY_EXCEL_SUFFIXES:
+        return XLS
+    if suffix in BINARY_EXCEL_SUFFIXES:
+        return XLSB
+    return XLSX
 
 
 def sheet_names(path) -> list[str]:
     """The worksheets of ``path`` in workbook order, without reading any cells."""
-    if Path(path).suffix.lower() in DELIMITED_SUFFIXES:
+    kind = file_format(path)
+    if kind == DELIMITED:
         return [Path(path).stem]
+    if kind == XLS:
+        from . import legacy_excel
+        return legacy_excel.sheet_names(path)
+    if kind == XLSB:
+        from . import binary_excel
+        return binary_excel.sheet_names(path)
     with open_workbook(path) as workbook:
         return [worksheet.title for worksheet in workbook.worksheets]
 
@@ -104,12 +149,19 @@ def sheet_names(path) -> list[str]:
 def read_workbook(path, max_cells: int = DEFAULT_MAX_CELLS, only=None) -> list[SheetGrid]:
     """Load the sheets of ``path`` into :class:`SheetGrid` s -- every sheet, or ``only`` these.
 
-    A delimited file is one sheet by definition and takes a different reader, but yields
-    the same grid -- which is the point of the grid being a list of lists. Nothing
-    downstream needs to know where the cells came from.
+    A delimited file is one sheet by definition and takes a different reader, as do a
+    legacy .xls and a binary .xlsb, but all yield the same grid -- which is the point of the
+    grid being a list of lists. Nothing downstream needs to know where the cells came from.
     """
-    if Path(path).suffix.lower() in DELIMITED_SUFFIXES:
+    kind = file_format(path)
+    if kind == DELIMITED:
         return delimited.read_delimited(path, max_cells, SheetTooLarge)
+    if kind == XLS:
+        from . import legacy_excel
+        return legacy_excel.read_sheets(path, max_cells, SheetTooLarge, only)
+    if kind == XLSB:
+        from . import binary_excel
+        return binary_excel.read_sheets(path, max_cells, SheetTooLarge, only)
     with _Source(path) as source:
         return [source.sheet(name, max_cells) for name in source.names if only is None or name in only]
 
@@ -122,8 +174,14 @@ def read_sheet(path, name: str, max_cells: int = DEFAULT_MAX_CELLS, reuse: bool 
     sheet of the same file -- for a worker process, which reads one sheet at a time from
     a single thread. Not for use from several threads at once.
     """
-    if Path(path).suffix.lower() in DELIMITED_SUFFIXES:
+    kind = file_format(path)
+    if kind == DELIMITED:
         return delimited.read_delimited(path, max_cells, SheetTooLarge)[0]
+    if kind in (XLS, XLSB):
+        grids = read_workbook(path, max_cells, only=[name])
+        if not grids:
+            raise KeyError(name)
+        return grids[0]
     with _Source(path, reuse=reuse) as source:
         return source.sheet(name, max_cells)
 
@@ -335,8 +393,8 @@ def count_embedded_images(path) -> int:
     They never affect extraction; this is recorded for the audit log so a reviewer
     can see why the top of that sheet looked blank.
     """
-    # A delimited file is not a zip and cannot carry a drawing layer at all.
-    if Path(path).suffix.lower() in DELIMITED_SUFFIXES:
+    # Only an .xlsx is a zip with a drawing layer; text and .xls have none to count.
+    if file_format(path) != XLSX:
         return 0
     with zipfile.ZipFile(path) as archive:
         return sum(1 for name in archive.namelist() if name.startswith("xl/media/"))

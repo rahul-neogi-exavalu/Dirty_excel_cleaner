@@ -35,7 +35,7 @@ import { Select } from "../components/ui/Select";
 import { formatBytes, formatNumber, plural } from "../lib/format";
 import { effectiveAppend, MAX_FILES, useNavigate, useWorkflow, type FileEntry } from "../state/workflow";
 
-const ACCEPT = [".xlsx", ".csv", ".tsv", ".txt"];
+const ACCEPT = [".xlsx", ".xls", ".xlsb", ".csv", ".tsv", ".txt"];
 const MAX_MB = 500;
 /** Uploads sent at the same time; the rest wait their turn. */
 const PARALLEL_UPLOADS = 3;
@@ -102,9 +102,10 @@ export function ConfigurationPage() {
 
 function rejectReason(file: File): { message: string; advice: string } | null {
   const suffix = file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).toLowerCase() : "";
-  if (suffix === ".xls" || suffix === ".xlsb" || suffix === ".ods")
+  if (suffix === ".ods")
     return { message: `${file.name}: unsupported format`, advice: "Re-save as .xlsx and retry." };
-  if (!ACCEPT.includes(suffix)) return { message: `${file.name}: unsupported file type`, advice: "Use .xlsx, .csv or .tsv." };
+  if (!ACCEPT.includes(suffix))
+    return { message: `${file.name}: unsupported file type`, advice: "Use .xlsx, .xls, .xlsb, .csv, .tsv or .txt." };
   if (file.size > MAX_MB * 1024 * 1024)
     return { message: `${file.name}: over ${MAX_MB} MB`, advice: "Split the workbook or remove unused sheets." };
   if (file.size === 0) return { message: `${file.name}: empty file`, advice: "Check the file and retry." };
@@ -237,7 +238,7 @@ function UploadSection({ onNext }: { onNext: () => void }) {
       title="Upload"
       actions={
         <span className="num hidden rounded-full bg-ink-100 px-2.5 py-0.5 text-caption text-ink-600 md:inline">
-          .xlsx · .csv · {MAX_MB} MB · {MAX_FILES} files max
+          .xlsx · .xls · .xlsb · .csv · .txt · {MAX_MB} MB · {MAX_FILES} files max
         </span>
       }
     >

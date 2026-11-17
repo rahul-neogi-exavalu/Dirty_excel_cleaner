@@ -62,8 +62,15 @@ def test_upload_lists_sheet_names_only(client):
     assert set(body["sheets"][0]) == {"name", "hidden", "has_content"}
 
 
-def test_rejects_legacy_xls_with_advice(client):
+def test_a_garbage_xls_is_reported_as_corrupt_not_unsupported(client):
+    # .xls is read now (see test_new_formats.py); only a file that is not one is refused.
     response = client.post("/api/workbooks", files={"file": ("old.xls", io.BytesIO(b"abc"))})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "corrupt"
+
+
+def test_rejects_opendocument_with_advice(client):
+    response = client.post("/api/workbooks", files={"file": ("old.ods", io.BytesIO(b"abc"))})
     assert response.status_code == 415
     assert "re-save" in response.json()["error"]["advice"]
 
