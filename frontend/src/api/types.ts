@@ -8,7 +8,7 @@ export interface Workbook {
   id: string;
   filename: string;
   size: number;
-  kind: "workbook" | "delimited";
+  kind: "workbook" | "delimited" | "xls" | "xlsb";
   sheets: SheetInfo[];
   uploaded_at: number;
 }
@@ -722,7 +722,7 @@ export interface ControlRow {
 /* ---- Silver ---------------------------------------------------------------- */
 
 /** A matching method; each one votes independently on every bronze column. */
-export type MatchMethod = "saved" | "exact" | "fuzzy" | "semantic" | "ai" | "overlap";
+export type MatchMethod = "saved" | "exact" | "fuzzy" | "semantic" | "ai" | "regex" | "overlap";
 /** How the current choice was made: pre-selected from the votes, by the reviewer, or not yet. */
 export type MappingSelection = "recommended" | "manual" | "none";
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import UploadFile
 from fastapi.concurrency import run_in_threadpool
 
-from ahi_clean import failures, reader
+from ahi_clean import binary_excel, failures, legacy_excel, reader
 
 from .. import config
 from ..errors import ApiError, conflict
@@ -30,12 +30,12 @@ _CONTENT_PROBE_ROWS = 2000
 def _safe_name(filename: str) -> str:
     name = Path(filename or "").name.strip()
     cleaned = "".join(ch for ch in name if ch not in '<>:"/\\|?*' and ord(ch) >= 32)
-    return cleaned or "workbook.xlsx"
+    return cleaned or "upload.xlsx"
 
 
 def validate_filename(filename: str | None) -> str:
     if not filename:
-        raise ApiError(400, "missing_file", "No file was received.", "Choose an Excel workbook to upload.")
+        raise ApiError(400, "missing_file", "No file was received.", "Choose an Excel workbook, CSV or text file to upload.")
     name = _safe_name(filename)
     suffix = Path(name).suffix.lower()
     if suffix in config.ALLOWED_SUFFIXES:
@@ -49,7 +49,7 @@ def validate_filename(filename: str | None) -> str:
         415,
         failures.UNSUPPORTED_FORMAT,
         f"{name} is not a supported file type.",
-        "Upload an .xlsx workbook, or a .csv / .tsv file.",
+        "Upload an .xlsx, .xls or .xlsb workbook, or a .csv / .tsv / .txt file.",
     )
 
 
@@ -83,7 +83,8 @@ async def save_upload(file: UploadFile) -> Upload:
         shutil.rmtree(folder, ignore_errors=True)
         raise
 
-    kind = "delimited" if path.suffix.lower() in config.DELIMITED_SUFFIXES else "workbook"
+    kind = {reader.DELIMITED: "delimited", reader.XLS: "xls", reader.XLSB: "xlsb"}.get(
+        reader.file_format(path), "workbook")
     upload = Upload(upload_id, name, path, size, kind, sheets, sha256=digest.hexdigest())
     store.add_upload(upload)
     # A run usually follows an upload: start the cleaning workers now, off the clock --
@@ -95,9 +96,19 @@ async def save_upload(file: UploadFile) -> Upload:
 
 def inspect(path: Path) -> list[dict]:
     """List the sheets, classifying an unreadable file the way the cleaner would."""
-    if path.suffix.lower() in config.DELIMITED_SUFFIXES:
+    kind = reader.file_format(path)
+    if kind == reader.DELIMITED:
         # The delimited reader names its single sheet after the file.
         return [{"name": path.stem, "hidden": False, "has_content": True}]
+    if kind in (reader.XLS, reader.XLSB):
+        try:
+            sheets = (legacy_excel if kind == reader.XLS else binary_excel).inspect_sheets(path)
+        except Exception as error:  # noqa: BLE001 - classified below
+            raise _unreadable(path.name, failures.classify(path, error)) from error
+        if not sheets:
+            raise ApiError(422, failures.NO_TABLE, f"{path.name} has nothing to clean.",
+                           "Upload a file that contains at least one sheet.")
+        return sheets
 
     if not zipfile.is_zipfile(path):
         failure = failures.classify(path, zipfile.BadZipFile("File is not a zip file"))

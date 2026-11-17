@@ -262,12 +262,13 @@ PHASES = (
 )
 # What matching one column costs each method, relative to the others. Saved and exact
 # are lookups; fuzzy and word2vec compare against the whole catalog; the AI reads the
-# table in one network call, the slowest by far.
+# table in one network call, the slowest by far. Regex is a lightweight pattern check
+# over the catalog's naming conventions.
 METHOD_COST = {matching.SAVED: 0.05, matching.EXACT: 0.05, matching.FUZZY: 0.5, matching.SEMANTIC: 2.0,
-               matching.AI: 10.0}
+               matching.AI: 10.0, matching.REGEX: 0.25}
 METHOD_DOING = {matching.SAVED: "looking up saved mappings", matching.EXACT: "comparing exact names",
                 matching.FUZZY: "comparing spellings", matching.SEMANTIC: "comparing meanings (word2vec)",
-                matching.AI: "asking the AI"}
+                matching.AI: "asking the AI", matching.REGEX: "checking name patterns"}
 # The units the word2vec file is worth while it is read (first use only): most of its phase.
 VECTOR_UNITS = 4.0
 # Checking a table costs its rows (dates are parsed on each) plus a fixed part for the rules.
