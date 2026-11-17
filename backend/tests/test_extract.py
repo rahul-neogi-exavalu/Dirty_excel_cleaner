@@ -601,3 +601,117 @@ def test_a_two_row_header_is_kept_joined_with_a_space():
     headers = result.trace["source_headers"]
     assert headers["profit_center_name"] == "Profit Center Name"
     assert headers["premium"] == "Premium" and headers[result.frame.columns[-1]] == "Commission %"
+
+
+# --------------------------------------------------------------------------- #
+# Orientation: titles above a table, small tables, and month-by-month grids
+#
+# Each of these was read sideways -- fields down the sheet, a handful of "records" across
+# -- keeping two rows of several hundred columns instead of the table that was there.
+# --------------------------------------------------------------------------- #
+
+CARRIERS_LIST = ["Travelers", "Safeco", "NYCentral", "Progressive", "ForeMost", "Plymouth",
+                 "Preferred", "Mercury", "Hartford", "Chubb", "Berkley", "Markel"]
+MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
+          "September", "October", "November", "December"]
+
+
+def orientation(result):
+    return result.trace["orientation"]["orientation"]
+
+
+def test_a_merged_title_over_a_small_table_does_not_turn_it_sideways():
+    # A merged title repeats one value across the row, which is as type-homogeneous as a
+    # column of an upright table and used to outvote the three real records beneath it.
+    result = one([["Monthly report"] * 8, HEADER] + records(3))
+    assert orientation(result) == "normal"
+    assert list(result.frame.columns) == NAMES and len(result.frame) == 3
+
+
+def test_a_one_cell_title_over_a_small_table_does_not_turn_it_sideways():
+    result = one([["Monthly report"] + [None] * 7, HEADER] + records(3))
+    assert orientation(result) == "normal"
+    assert len(result.frame) == 3
+
+
+def test_a_title_over_a_three_column_table_leaves_it_upright():
+    rows = [[None, "NB as of 7/31", "NB as of 7/31"], ["CARRIER", "PIF", "PREMIUM"]]
+    rows += [[name, 20 + index, 1000.5 * (index + 1)] for index, name in enumerate(CARRIERS_LIST)]
+    result = one(rows)
+    assert orientation(result) == "normal"
+    assert list(result.frame.columns) == ["carrier", "pif", "premium"]
+    assert len(result.frame) == len(CARRIERS_LIST)
+
+
+def test_a_sheet_half_of_whose_rows_hold_one_cell_is_still_upright():
+    # Half the carriers have no figures yet. Two fills tie (one cell, three cells); the
+    # tie must go to the fuller one or the title is never recognised as decoration.
+    rows = [[None, "NB as of 8/31", "NB as of 8/31"], ["CARRIER", "PIF", "PREMIUM"]]
+    for index, name in enumerate(CARRIERS_LIST + CARRIERS_LIST):
+        rows.append([name, 20 + index, 1000.5 * (index + 1)] if index % 2 == 0 else [name, None, None])
+    result = one(rows)
+    assert orientation(result) == "normal"
+    assert list(result.frame.columns) == ["carrier", "pif", "premium"]
+
+
+def test_two_records_under_twenty_four_labels_are_not_a_sideways_table():
+    # Wider than tall, so shape alone says "sideways"; the labels over the columns say not.
+    labels = [f"Field {chr(65 + index)}{index}" for index in range(24)]
+
+    def values(k):
+        return [
+            f"SID{194961 + k}" if index == 0 else
+            f"2026-07-{k + 1:02d}" if index == 1 else
+            f"Name {k} {index}" if index % 3 == 0 else
+            k * 100 + index if index % 3 == 1 else float(k) + index / 10
+            for index in range(24)
+        ]
+
+    result = one([labels, values(0), values(1)])
+    assert orientation(result) == "normal"
+    assert len(result.frame) == 2 and len(result.frame.columns) == 24
+    assert result.trace["orientation"]["decided_by"] == "content_sign_and_header"
+
+
+def test_five_records_under_eleven_labels_are_not_a_sideways_table():
+    labels = ["Applicant Name", "Carrier", "Plan", "Plan Type", "Policy Number", "Status",
+              "Face Amount", "Premium", "Mode", "Agent", "Date"]
+    rows = [labels] + [
+        [f"Person {k}", "Banner", "OPTerm30", "30 Year Term", f"50014{k:05d}", "In Force",
+         1000000, 656.88 + k, "Monthly", f"AGT{k}", f"2026-07-{k + 1:02d}"]
+        for k in range(5)
+    ]
+    result = one(rows)
+    assert orientation(result) == "normal"
+    assert len(result.frame) == 5 and len(result.frame.columns) == 11
+
+
+def test_a_sparse_month_by_month_grid_is_upright():
+    # Months across the top, one carrier with a single figure: far too empty to be a
+    # pivot, and a short, wide block that shape alone would turn on its side.
+    rows = [
+        ["Washington Rein"] + [None] * 14,
+        ["Carriers", "AM Best", "Billing Co"] + MONTHS,
+        ["Munich Re", "000149", "APEX", None, None, 270090] + [None] * 9,
+    ]
+    result = one(rows)
+    assert orientation(result) == "normal"
+    assert result.trace["orientation"]["decided_by"] == "period_axis"
+    assert len(result.frame) == 1 and len(result.frame.columns) == 15
+
+
+def test_payee_labels_between_rows_are_carried_into_the_rows_they_head():
+    # A grouped report: the payee sits alone on a line, its rows leave that column blank.
+    header = ["Payee", "Policy", "Renewal", "State", "Premium"]
+    rows = [header,
+            ["Gallagher Benefit", None, None, None, None],
+            [None, "GL-0235", "Yes", "NJ", 100.0],
+            ["One80 (Vista)", None, None, None, None],
+            [None, "GL-0069", "Yes", "IN", 200.0],
+            [None, "GL-0347", "No", "IL", 300.0]]
+    result = one(rows)
+    assert list(result.frame["payee"]) == ["Gallagher Benefit", "One80 (Vista)", "One80 (Vista)"]
+    assert len(result.frame) == 3
+    assert rowclass.GROUP_LABEL in kinds(result)
+    assert any(flag.startswith("INFO:") and "carried down" in flag
+               for flag in result.trace["flags"]["payee"])

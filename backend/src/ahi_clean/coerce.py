@@ -585,6 +585,29 @@ def _as_number(name, values, notes) -> Coerced:
     return Coerced(parsed, typing_utils.FLOAT, failures, notes, flags)
 
 
+_MONTH_NAMES = frozenset(
+    "january february march april may june july august september october november december "
+    "jan feb mar apr jun jul aug sep sept oct nov dec".split()
+)
+
+
+def looks_like_month_names(labels, minimum: int = 3) -> bool:
+    """Whether a line of labels is, in the main, calendar months: ``January | February | ...``.
+
+    Kept apart from :func:`looks_like_periods` on purpose. That one decides what a pivot's
+    axis *means* and names the melted column from it; a bare month is not a point in time
+    there, and changing that would rename the key of every pivot that happens to use them.
+    This one answers only whether a header is a run of months, which is evidence a sheet is
+    a grid with months across the top -- however many of its cells are blank.
+
+    At least ``minimum`` labels must be month names and they must be at least half of what
+    the line holds, so a heading that merely contains "May" or "Mar" does not qualify.
+    """
+    texts = [str(label).strip().lower().rstrip(".") for label in labels if label is not None and str(label).strip()]
+    months = sum(1 for text in texts if text in _MONTH_NAMES)
+    return months >= minimum and months * 2 >= len(texts)
+
+
 def looks_like_periods(labels) -> bool:
     """Whether every label names a point in time -- a full date or a month.
 

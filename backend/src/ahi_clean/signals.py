@@ -77,7 +77,34 @@ def modal_fill(lines) -> int:
     counts = [effective_fill(line) for line in lines if fill_count(line) > 0]
     if not counts:
         return 0
-    return Counter(counts).most_common(1)[0][0]
+    tally = Counter(counts)
+    top = max(tally.values())
+    # A tie goes to the larger fill. `most_common` would hand it to whichever count was
+    # seen first, so a sheet half of whose rows carry one cell (a title, a carrier name
+    # with no figures yet) and half a full record read as "one cell is normal", and the
+    # decoration rules that only apply above a baseline of two were switched off.
+    return max(count for count, seen in tally.items() if seen == top)
+
+
+def strip_leading_decoration(lines) -> list:
+    """The lines with any title or banner rows above the table taken off the top.
+
+    A leading line holding one value -- a one-cell title, or a merged banner repeating one
+    value across every column -- is decoration, not data. It must not take part in a vote
+    on which way up the table is: a merged banner is perfectly type-homogeneous, which is
+    exactly what a column of an upright table looks like, and it drags the block towards
+    "sideways". Only *leading* lines go. A sparse line further down is a record with
+    figures missing, and stays.
+    """
+    lines = list(lines)
+    start = 0
+    while (
+        start < len(lines) - 1
+        and effective_fill(lines[start]) <= 1
+        and any(effective_fill(line) > 1 for line in lines[start + 1 :])
+    ):
+        start += 1
+    return lines[start:]
 
 
 def uniqueness(cells) -> float:
