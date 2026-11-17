@@ -361,6 +361,30 @@ def _flags(results) -> dict[str, str]:
     }
 
 
+def plan_outputs(results, stem: str, append: bool = True) -> tuple[list[Output], dict]:
+    """Append identical-header tables, or ship every table on its own.
+
+    With append on this is exactly ``plan_workbook``. With it off, each table is planned
+    alone, so the exact-header grouping never has two tables to stack; sibling header
+    adoption still runs first, because naming a headerless continuation sheet is part of
+    cleaning it, not part of appending it. Used by both the CLI and the web app.
+    """
+    if append:
+        return plan_workbook(results, stem)
+
+    adoptions = adopt_sibling_headers(results)
+    live = [result for result in results if not result.frame.is_empty()]
+    outputs, roles = [], []
+    for result in live:
+        planned, report = plan_workbook([result], stem)
+        roles.extend(report["table_roles"])
+        for output in planned:
+            if len(live) > 1:
+                output.name = f"{stem}_{_slug(result.label)}"
+            outputs.append(output)
+    return outputs, {"table_roles": roles, "relationships": [], "header_adoptions": adoptions}
+
+
 def name_files(outputs: list[Output], job_id: str) -> None:
     """One job id names every file of a run: ``{name}_{job_id}.csv`` and its metadata.
 

@@ -11,6 +11,7 @@ by row extent for columns.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from . import signals
@@ -138,7 +139,11 @@ def _heads(line, profile) -> bool:
     labels = [cell for cell in line if not is_blank(cell)]
     if len(labels) < 2 or signals.textness(line) < 1.0 or signals.brevity(line) < 1.0:
         return False
-    if {index for index, cell in enumerate(line) if not is_blank(cell)} != _columns_used(profile):
+    # Every column the records fill has a label. The header may also name fields that are
+    # empty in this extract (a quarter of them at most), as a full export template does.
+    labelled = {index for index, cell in enumerate(line) if not is_blank(cell)}
+    used = _columns_used(profile)
+    if not used <= labelled or len(labelled - used) > len(labelled) // 4:
         return False
     return signals.type_contrast(line, profile) >= 0.5
 
@@ -265,6 +270,23 @@ def _extents_match(left, right) -> bool:
     return overlap / max(left_span, right_span) >= EXTENT_MATCH_THRESHOLD
 
 
+def _first_labels(rows, columns) -> set[str]:
+    """The text labels of the first line holding two or more text cells in ``columns``."""
+    for row in rows:
+        cells = [row[index] for index in columns if index < len(row)]
+        texts = [cell for cell in cells if isinstance(cell, str) and cell.strip()]
+        if len(texts) >= 2:
+            return {re.sub(r"[^a-z0-9]", "", text.lower()) for text in texts} - {""}
+    return set()
+
+
+def _repeats_labels(rows, group, run) -> bool:
+    """Whether the header over ``run`` repeats at least two labels of the header over ``group``."""
+    left = _first_labels(rows, [index for start, end in group for index in range(start, end)])
+    right = _first_labels(rows, range(*run))
+    return len(left & right) >= 2
+
+
 def _segment_columns(region: Region) -> list[Region]:
     """Split a row region where blank columns separate genuinely different tables.
 
@@ -292,6 +314,15 @@ def _segment_columns(region: Region) -> list[Region]:
         same_rows = left is not None and left == right
         extents = _extents_match(left, right)
         gutter = same_rows or (gap <= GUTTER_MAX_WIDTH and extents)
+        if gutter and _repeats_labels(region.rows, groups[-1], run):
+            # Same rows, but the right side's header restates the left side's labels
+            # (Agent | Premium | Revenue  ·  Carrier | Premium | Revenue): two summaries
+            # of one measure by different keys, placed side by side -- not one table.
+            gutter = False
+            column_notes.append(
+                "a blank column was read as a boundary: the header labels on its right "
+                "repeat those on its left"
+            )
         if gutter:
             groups[-1].append(run)
             if not same_rows:

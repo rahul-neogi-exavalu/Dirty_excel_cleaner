@@ -29,7 +29,7 @@ from ahi_clean import contracts  # noqa: E402
 from ahi_clean.extract import extract_sheet  # noqa: E402
 from ahi_clean.reader import read_workbook  # noqa: E402
 
-SUFFIXES = {".xlsx", ".xlsm", ".xls", ".xlsb"}
+SUFFIXES = {".xlsx", ".xlsm", ".xls", ".xlsb", ".csv", ".tsv", ".txt"}
 
 
 def snapshot_workbook(path: Path) -> dict:

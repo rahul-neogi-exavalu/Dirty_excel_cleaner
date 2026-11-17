@@ -129,4 +129,5 @@ def test_merged_range_below_the_data_does_not_crash(tmp_path):
     sheet.merge_cells("A3:B5")
     workbook.save(path)
     grid = read_sheet(path, sheet.title)
-    assert grid.height == 3 and grid.rows[2] == ["note", "note"]
+    # A merge spanning columns is layout: it stays one cell rather than being copied across.
+    assert grid.height == 3 and grid.rows[2] == ["note", None]

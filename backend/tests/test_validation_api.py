@@ -302,7 +302,9 @@ def test_a_summary_the_profit_center_aggregated_is_detected_and_dated_by_its_she
                              _summary_book())
     assert output["aggregated"] is True
     found = output["grain"]
-    assert found["total_column"] == "totals" and found["total_rows"] == 2 and found["dimensions"] == [
+    # The TOTALS rows are proven by arithmetic and dropped by the cleaner (logged as
+    # GRAND_TOTAL in the audit), so none reaches bronze; the TOTALS column still marks it.
+    assert found["total_column"] == "totals" and found["total_rows"] == 0 and found["dimensions"] == [
         "delegated_authority_partner"]
     # Not held to the transaction columns; dated by the month each sheet names.
     assert output["missing"] == [] and output["origin"] == "sheets" and output["date_detail"] is None

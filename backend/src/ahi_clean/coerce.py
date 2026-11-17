@@ -316,8 +316,12 @@ def _decide_kind(name, present, header=None) -> tuple[str, list[str], list[str]]
         mixed = alphanumeric_values(present)
         if mixed:
             notes.append(f"column '{name}' kept as text: it holds alphanumeric values")
+            how = (
+                "mix letters and digits" if any(c.isalpha() for c in mixed[0])
+                else "are digit groups joined by - / or space"
+            )
             return typing_utils.ID_STRING, notes, [flag_text.check(
-                f"mostly numbers, but {len(mixed)} value(s) mix letters and digits "
+                f"mostly numbers, but {len(mixed)} value(s) {how} "
                 f"({flag_text.example(mixed)}); whole column kept as text (String)"
             )]
 
@@ -422,14 +426,19 @@ def _formatting_flags(texts) -> list[str]:
 
 
 def alphanumeric_values(values) -> list[str]:
-    """Every value that mixes letters and digits, like ``12AB`` or ``A7``.
+    """Every value that is a code and not a number: ``12AB``, ``A7``, ``59808-1658``.
+
+    Letters mixed with digits, or digit groups joined by ``-``, ``/`` or a space (ZIP+4,
+    ``12-345``). Either would be nulled by a numeric read, so one is enough to keep the
+    column as text. ``1 234`` (space as thousands mark) is still a number.
 
     Vectorised, because it runs over the whole column rather than a sample. Month-name
     dates never reach it: it only guards the paths that would make a column a number.
     """
-    texts = pl.Series("v", _texts(values), dtype=pl.String)
-    mask = texts.str.contains(r"[A-Za-z]") & texts.str.contains(r"\d")
-    return texts.filter(mask.fill_null(False)).to_list()
+    texts = pl.Series("v", _texts(values), dtype=pl.String).str.strip_chars()
+    letters = texts.str.contains(r"[A-Za-z]") & texts.str.contains(r"\d")
+    joined = texts.str.contains(r"^\d+(?:[-/ ]\d+)+$") & ~texts.str.contains(r"^\d{1,3}(?: \d{3})+$")
+    return texts.filter((letters | joined).fill_null(False)).to_list()
 
 
 LEADING_ZERO = "leading_zero"

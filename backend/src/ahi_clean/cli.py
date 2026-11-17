@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import glob
 import os
 import sys
@@ -24,17 +25,33 @@ EXIT_PROBLEMS = 2
 EXIT_CONTRACT_VIOLATION = 3
 
 
-def clean_workbook(source: Path, out_dir: Path, audit_dir: Path, max_cells: int = DEFAULT_MAX_CELLS) -> dict:
+SUPPORTED_SUFFIXES = {".xlsx", ".xlsm", ".xls", ".xlsb", ".csv", ".tsv", ".txt"}
+
+
+def clean_workbook(
+    source: Path,
+    out_dir: Path,
+    audit_dir: Path,
+    max_cells: int = DEFAULT_MAX_CELLS,
+    *,
+    sheets=None,
+    append: bool = True,
+    write: bool = True,
+) -> dict:
     """Clean one workbook: write its CSVs and its audit report.
+
+    ``sheets`` limits a workbook to the named sheets (a delimited file has only one).
+    ``append`` off ships every table on its own even when headers match exactly.
+    ``write`` off is a dry run: everything is read, decided and checked, nothing written.
 
     Raises on an unreadable workbook. Callers processing a batch are expected to catch
     and classify -- see :func:`clean_batch`.
     """
     stem = source.stem
-    grids = read_workbook(source, max_cells)
+    grids = read_workbook(source, max_cells, only=set(sheets) if sheets else None)
     results = [result for grid in grids for result in extract_sheet(grid)]
 
-    outputs, workbook_report = orchestrate.plan_workbook(results, stem)
+    outputs, workbook_report = orchestrate.plan_outputs(results, stem, append)
 
     # Checked before anything is written, so a violation is reported alongside the file
     # rather than discovered downstream. The CSV is still produced -- withholding it
@@ -42,11 +59,15 @@ def clean_workbook(source: Path, out_dir: Path, audit_dir: Path, max_cells: int 
     violations = contracts.check_all(results)
     workbook_report["contract_violations"] = [item.as_dict() for item in violations]
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    written, blocked = [], []
     # One job id per workbook, fixed before anything is written, so every CSV, its
     # metadata and the audit carry the final names -- nothing is renamed afterwards.
     orchestrate.name_files(outputs, str(uuid.uuid4()))
+    if not write:
+        return {"source": source, "written": [], "blocked": [], "report": None,
+                "outputs": outputs, "violations": violations, "results": results}
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written, blocked = [], []
     for output in outputs:
         path = out_dir / output.file
         if not _write(output.frame, path, blocked):
@@ -83,6 +104,7 @@ def clean_workbook(source: Path, out_dir: Path, audit_dir: Path, max_cells: int 
         "report": report_path,
         "outputs": outputs,
         "violations": violations,
+        "results": results,
     }
 
 
@@ -126,9 +148,9 @@ def _clean_one(args) -> tuple[Path, dict | None, tuple[str, str] | None]:
     always survive being sent back across a process boundary, and its traceback never
     does.
     """
-    source, out_dir, audit_dir, max_cells = args
+    source, out_dir, audit_dir, max_cells, options = args
     try:
-        return source, clean_workbook(source, out_dir, audit_dir, max_cells), None
+        return source, clean_workbook(source, out_dir, audit_dir, max_cells, **options), None
     except Exception as error:  # noqa: BLE001 - a batch must survive any single file
         return source, None, (type(error).__name__, str(error))
 
@@ -140,6 +162,7 @@ def clean_batch(
     max_cells: int = DEFAULT_MAX_CELLS,
     workers: int = 1,
     executor: str = "thread",
+    **options,
 ) -> tuple[list[dict], list[Failure]]:
     """Clean every workbook, surviving the ones that cannot be read.
 
@@ -159,7 +182,8 @@ def clean_batch(
     startup dwarfs the work. Processes remain available for batches of genuinely large
     files, where the startup is amortised.
     """
-    jobs = [(source, out_dir, audit_dir, max_cells) for source in paths]
+    # options: sheets, append, write -- passed through to clean_workbook unchanged.
+    jobs = [(source, out_dir, audit_dir, max_cells, options) for source in paths]
     if workers <= 1 or len(jobs) <= 1:
         results = [_clean_one(job) for job in jobs]
     else:
@@ -220,28 +244,70 @@ def _write_note(audit_dir: Path, source: Path, error) -> None:
         pass  # reporting the failure matters more than recording it
 
 
-def resolve_inputs(patterns) -> list[Path]:
-    """Expand globs and literal paths into a sorted, de-duplicated list of workbooks."""
+def resolve_inputs(patterns, recursive: bool = False, exclude=()) -> list[Path]:
+    """Expand globs, folders and literal paths into a sorted, de-duplicated list of files.
+
+    A folder contributes every supported file in it (and below, with ``recursive``).
+    A file named explicitly is kept whatever its type, so an unsupported one is reported
+    rather than silently skipped. Excel's own lock files (``~$Book.xlsx``) never count,
+    and names matching an ``exclude`` pattern (``*donotingest*``) are left out.
+    """
     paths: list[Path] = []
     for pattern in patterns:
-        matches = [Path(match) for match in glob.glob(pattern)]
-        paths.extend(matches or ([Path(pattern)] if Path(pattern).exists() else []))
-    return sorted(set(paths))
+        matches = [Path(match) for match in glob.glob(pattern, recursive=recursive)]
+        if not matches and Path(pattern).exists():
+            matches = [Path(pattern)]
+        for match in matches:
+            if match.is_dir():
+                found = match.rglob("*") if recursive else match.iterdir()
+                paths.extend(p for p in found if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES)
+            elif match.is_file():
+                paths.append(match)
+    return sorted({
+        path for path in paths
+        if not path.name.startswith("~$")
+        and not any(fnmatch.fnmatch(path.name.lower(), rule.lower()) for rule in exclude)
+    })
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        prog="ahi_clean", description="Clean report-shaped Excel files into table-ready CSVs."
+        prog="ahi_clean",
+        description=(
+            "Clean report-shaped Excel and text exports (.xlsx .xlsm .xls .xlsb .csv .tsv "
+            ".txt) into table-ready CSVs, with a metadata file per CSV and an audit report "
+            "per input explaining every decision."
+        ),
+        epilog=(
+            "exit codes: 0 all clean; 1 no input matched; 2 a file could not be read or "
+            "written; 3 an output contract was violated (the CSV is still written)"
+        ),
     )
     parser.add_argument(
         "inputs",
         nargs="*",
-        default=[
-            "sample_files_uncleaned/*.xlsx",
-            "sample_files_uncleaned/*.csv",
-            "sample_files_uncleaned/*.tsv",
-        ],
-        help="Workbook or delimited-file paths, or glob patterns (default: the samples).",
+        default=["sample_files_uncleaned"],
+        help="Files, folders or glob patterns (default: the sample folder).",
+    )
+    parser.add_argument(
+        "-r", "--recursive", action="store_true",
+        help="Also look in sub-folders of a folder input; '**' in a pattern matches folders.",
+    )
+    parser.add_argument(
+        "--exclude", action="append", default=[], metavar="PATTERN",
+        help="Skip files whose name matches this pattern, e.g. '*donotingest*' (repeatable).",
+    )
+    parser.add_argument(
+        "--sheet", dest="sheets", action="append", default=[], metavar="NAME",
+        help="Clean only this sheet of each workbook (repeatable; default: every sheet).",
+    )
+    parser.add_argument(
+        "--no-append", dest="append", action="store_false",
+        help="Ship every table as its own CSV, even when two tables' headers match exactly.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Read, decide and check everything, print the outcome, write nothing.",
     )
     parser.add_argument("--out", default="cleaned", help="Directory for cleaned CSVs.")
     parser.add_argument("--audit", default="audit", help="Directory for audit reports.")
@@ -269,7 +335,7 @@ def main(argv=None) -> int:
     )
     args = parser.parse_args(argv)
 
-    paths = resolve_inputs(args.inputs)
+    paths = resolve_inputs(args.inputs, args.recursive, args.exclude)
     if not paths:
         print("no input workbooks matched", file=sys.stderr)
         return EXIT_NO_INPUT
@@ -277,7 +343,8 @@ def main(argv=None) -> int:
     out_dir, audit_dir = Path(args.out), Path(args.audit)
     workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
     outcomes, failed = clean_batch(
-        paths, out_dir, audit_dir, args.max_cells, workers, args.executor
+        paths, out_dir, audit_dir, args.max_cells, workers, args.executor,
+        sheets=args.sheets or None, append=args.append, write=not args.dry_run,
     )
 
     blocked: list[Path] = []
@@ -286,13 +353,36 @@ def main(argv=None) -> int:
         blocked.extend(outcome["blocked"])
         violations.extend(outcome["violations"])
         print(f"{outcome['source'].name}")
+        if args.dry_run:
+            _print_tables(outcome["results"])
         for output in outcome["outputs"]:
             sheets = ", ".join(output.sheets)
-            print(f"  -> {output.file}  [{output.kind}] {len(output.frame)} rows  (from {sheets})")
-            print(f"     {output.metadata_file}")
-        print(f"  -> {outcome['report'].name}")
+            print(f"  -> {output.file}  [{output.kind}] {len(output.frame)} rows x "
+                  f"{output.frame.width} cols  (from {sheets})")
+            if not args.dry_run:
+                print(f"     {output.metadata_file}")
+        if outcome["report"] is not None:
+            print(f"  -> {outcome['report'].name}")
+    if args.dry_run:
+        print("(dry run: nothing was written)")
 
     return _report_problems(len(paths), len(outcomes), blocked, failed, violations)
+
+
+def _print_tables(results) -> None:
+    """One line per table found: shape, orientation, header and what was dropped."""
+    for result in results:
+        trace = result.trace
+        dropped: dict[str, int] = {}
+        for row in trace.get("dropped_rows", []):
+            dropped[row["classification"]] = dropped.get(row["classification"], 0) + 1
+        orientation = (trace.get("orientation") or {}).get("orientation") or "-"
+        header = trace.get("header") or {}
+        found = (f"header on table row {header['row_index'] + 1}" if header.get("detected")
+                 else "no header (positional names)")
+        removed = ", ".join(f"{count} {kind.lower()}" for kind, count in sorted(dropped.items()))
+        print(f"   table {result.label}: {len(result.frame)} x {result.frame.width}, "
+              f"{orientation}, {found}" + (f"; dropped {removed}" if removed else ""))
 
 
 def _report_problems(total, cleaned, blocked, failed, violations) -> int:

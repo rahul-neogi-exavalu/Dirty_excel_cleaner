@@ -19,6 +19,7 @@ EMPTY_KEY_COLUMN = "empty_key_column"
 UNEXPLAINED_EMPTY_COLUMN = "unexplained_empty_column"
 TOTAL_RECONCILIATION = "total_reconciliation"
 DUPLICATE_COLUMNS = "duplicate_columns"
+VALUE_NULLED = "value_nulled"
 
 SUM_TOLERANCE = 0.01
 
@@ -44,9 +45,32 @@ def check_result(result) -> list[Violation]:
         _key_columns_not_empty,
         _empty_columns_explained,
         _totals_reconcile,
+        _no_value_nulled,
     ):
         violations.extend(check(result))
     return violations
+
+
+def _no_value_nulled(result) -> list[Violation]:
+    """A value carrying digits must not be blanked by a type conversion.
+
+    ``NULL``, ``N/A`` and a ``0`` standing for "no date" are missing markers and may go.
+    Anything else with a digit in it -- ``59808-1658`` in a ZIP column -- was data, and a
+    numeric or date read that drops it ships a plausible column with holes in it.
+    """
+    lost = [
+        failure for failure in result.trace.get("coercion_failures", [])
+        if any(ch.isdigit() for ch in str(failure.get("value", "")))
+        and str(failure.get("value", "")).strip().strip("0") != ""
+    ]
+    if not lost:
+        return []
+    columns = sorted({str(failure.get("column")) for failure in lost})
+    return [Violation(
+        result.label, VALUE_NULLED,
+        f"{len(lost)} value(s) with digits were blanked converting {', '.join(columns)} "
+        f"(e.g. {lost[0].get('value')!r})",
+    )]
 
 
 def check_all(results) -> list[Violation]:
