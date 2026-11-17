@@ -146,6 +146,9 @@ _TRAILING_MINUS = re.compile(r"\d-$")
 _US_ONLY = re.compile(r"^-?(\d{1,3}(,\d{3})+\.\d+|\d{1,3}(,\d{3}){2,}|\d*\.(\d{1,2}|\d{4,}))$")
 _EU_ONLY = re.compile(r"^-?(\d{1,3}(\.\d{3})+,\d+|\d{1,3}(\.\d{3}){2,}|\d*,(\d{1,2}|\d{4,}))$")
 _EITHER = re.compile(r"^-?\d{1,3}[.,]\d{3}$")
+# A value written with a thousands mark, grouped correctly (threes after the first group).
+_US_GROUPED = re.compile(r"^\d{1,3}(,\d{3})+(\.\d+)?$")
+_EU_GROUPED = re.compile(r"^\d{1,3}(\.\d{3})+(,\d+)?$")
 US, EU = "us", "eu"
 
 
@@ -208,7 +211,7 @@ def coerce_column(name: str, values: list, label=None) -> Coerced:
         flags=[flag_text.check(
             f"mostly {what}, but {len(lost)} value(s) do not read as {what} "
             f"({flag_text.example(lost)}); whole column kept as text (String) so none is lost"
-        )],
+        )] + [flag for flag in result.flags if "left empty" not in flag],
     )
 
 
@@ -604,6 +607,17 @@ def _as_number(name, values, notes) -> Coerced:
     convention, flags = _decimal_convention(texts)
     cleaned = _clean_numeric(pl.Series(name, texts, dtype=pl.String), convention)
     parsed = cleaned.cast(pl.Float64, strict=False)
+    # A thousands mark must group threes. ``$1,000,0`` (an amount cut short) stripped of
+    # its commas reads 10000 -- a plausible number, silently wrong -- so it fails instead.
+    grouping = _US_GROUPED if convention == US else _EU_GROUPED
+    mark = "," if convention == US else "."
+    malformed = pl.Series([
+        text is not None and mark in text and not grouping.match(re.sub(r"[^\d.,]", "", text))
+        for text in texts
+    ], dtype=pl.Boolean)
+    if malformed.any():
+        parsed = pl.Series(name, [None if bad else value for bad, value in zip(malformed, parsed)],
+                           dtype=pl.Float64)
 
     failures = [
         {"column": name, "value": str(text)[:80], "reason": "not numeric"}
