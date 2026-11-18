@@ -39,7 +39,8 @@ def events(session_id: str) -> StreamingResponse:
 async def update_file(session_id: str, job_id: str, request: ValidationFileUpdate) -> dict:
     session = await run_in_threadpool(
         validation_service.update_file, session_id, job_id, request.model_fields_set,
-        request.pc_id, request.file_received_date, request.division_name,
+        request.pc_id, request.file_received_date, request.division_name, request.scope,
+        request.date_basis, request.reporting_file_type, request.data_collection_period,
     )
     return validation_service.session_out(session)
 

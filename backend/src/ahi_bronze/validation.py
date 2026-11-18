@@ -50,6 +50,13 @@ DECIDE = "DECIDE"
 REJECT, REPLACE, REPLACE_MONTH = "reject", "replace", "replace_month"
 # A revised file replacing the one the reviewer names; a companion kept beside its primary.
 REVISE, COMPANION = "revise", "companion"
+# Which required columns apply to a file's profit center (ahi_bronze.required_column_by_scope).
+SCOPE_VALUES = ("AJG", "APD", "BOTH")
+# Whether a file is one year-to-date (cumulative) report or one month's new rows (incremental).
+INCREMENTAL, CUMULATIVE = "INCREMENTAL", "CUMULATIVE"
+FILE_TYPE_VALUES = (INCREMENTAL, CUMULATIVE)
+# The date basis is always one of AED / TED / PED, the same set as DATE_ORDER.
+DATE_BASIS_VALUES = DATE_ORDER
 
 
 @dataclass(frozen=True)
@@ -215,6 +222,60 @@ def classify(start: date, end: date) -> tuple[str | None, str | None]:
                   "Enter this file's reporting dates, or it is rejected.")
 
 
+def reporting_range(file_type: str, period: date) -> tuple[date, date]:
+    """The declared reporting period: CUMULATIVE is January of that year through the
+    month's end; INCREMENTAL is that month alone."""
+    end = month_end(period)
+    start = date(period.year, 1, 1) if file_type == CUMULATIVE else month_start(period)
+    return start, end
+
+
+def computed_period_type(file_type: str) -> str:
+    """YTD or MONTHLY -- always one of the two, since ``reporting_range`` is clean by
+    construction and never needs ``classify``."""
+    return YTD if file_type == CUMULATIVE else MONTHLY
+
+
+def actual_period_type(file_type: str, start: date, end: date) -> tuple[str | None, str | None, bool]:
+    """The date basis column's real scanned range, classified for display only -- never
+    what decides INSERT/APPEND/REPLACE, which uses the declared, computed range instead.
+    (period_type, note, blocking). CUMULATIVE is always YTD, never inspected: a cumulative
+    file's wrong shape is caught by ``mismatch`` instead. INCREMENTAL: one calendar month ->
+    MONTHLY; several months of one year -> (None, note, False), the business's "Invalid
+    YTD" -- noted, but not rejected; different years -> (None, note, True), still rejected:
+    a much stronger sign of the wrong date basis or the wrong file than a few stray months,
+    and incremental files have no cross-check of their own the way CUMULATIVE does."""
+    if file_type == CUMULATIVE:
+        return YTD, None, False
+    if (start.year, start.month) == (end.year, end.month):
+        return MONTHLY, None, False
+    if start.year != end.year:
+        return None, (f"The date basis column runs from {start:%b %Y} to {end:%b %Y}, across years -- check the "
+                      "date basis and the data collection period, or this file is rejected."), True
+    return None, (f"The date basis column runs {start:%b}–{end:%b %Y}, more than this incremental file's "
+                  "one month. Check the date basis and the data collection period."), False
+
+
+def in_range(parsed: pl.Series, start: date, end: date) -> pl.Series:
+    """Rows whose parsed date falls in [start, end] -- the file may carry rows outside the
+    declared reporting period, which never load."""
+    return parsed.is_not_null() & (parsed >= start) & (parsed <= end)
+
+
+def mismatch(new_count: int, old_count: int, threshold: float = 0.10) -> str | None:
+    """None when ``new_count`` is within ``threshold`` of ``old_count``; otherwise a
+    reviewer-facing message. Nothing to compare against (``old_count`` 0 or less) always
+    passes."""
+    if old_count <= 0:
+        return None
+    change = abs(new_count - old_count) / old_count
+    if change <= threshold:
+        return None
+    return (f"has {new_count} row(s) where Bronze currently has {old_count} ({change:+.0%}). A cumulative file "
+            "should carry roughly the same rows for a month it already has; this file might actually be "
+            "incremental. Check the date basis and reporting file type, or correct the data.")
+
+
 def row_months(frame: pl.DataFrame, column: str | None, fixed: str | None = None,
                sheets: tuple[str, dict[str, str]] | None = None) -> pl.Series:
     """Each row's month (YYYY-MM): from ``column``'s dates, from the month its sheet is
@@ -290,6 +351,10 @@ class Loaded:
     # whether it holds the profit center's own aggregates rather than transactions.
     column_names: tuple = field(default=(), compare=False)
     aggregated: bool = field(default=False, compare=False)
+    # Its physical bronze table and profit center: for comparing a cumulative file's rows
+    # against what Bronze currently holds for the same PC and month.
+    bronze_table: str | None = field(default=None, compare=False)
+    pc_id: str | None = field(default=None, compare=False)
 
     def label(self) -> str:
         return f"{self.file_name} ({_span(self.start, self.end)})"
@@ -400,8 +465,8 @@ def business_action(*, missing: list[str], flag: str | None, period_type: str | 
         return Decision(INSERT, [f"First file of {end.year} for this profit center."])
     reasons = [f"Adds {start:%b %Y} to {end.year}'s files: appended in the same bronze table as "
                f"{', '.join(item.file_name for item in same_year)}."]
-    covered = {key for item in same_year for key in _months_between(item.start, item.end)}
-    gap = [key for key in _months_between(date(end.year, 1, 1), month_start(start)) if key not in covered and key != month]
+    covered = {key for item in same_year for key in months_between(item.start, item.end)}
+    gap = [key for key in months_between(date(end.year, 1, 1), month_start(start)) if key not in covered and key != month]
     if gap:
         reasons.append(f"Not received yet: {', '.join(_month_label(key) for key in gap)}.")
     return Decision(APPEND, reasons, appends=same_year)
@@ -415,7 +480,7 @@ def rejected_with_file(unfit: dict[str, str]) -> Decision:
                                f"{named} {'is' if len(unfit) == 1 else 'are'} not."])
 
 
-def _months_between(start: date, end: date) -> list[str]:
+def months_between(start: date, end: date) -> list[str]:
     keys, year, month = [], start.year, start.month
     while (year, month) <= (end.year, end.month):
         keys.append(f"{year:04d}-{month:02d}")

@@ -24,14 +24,14 @@ def test_the_required_columns_are_the_business_list():
     from api import config
 
     required = v.load_required(config.BRONZE_REQUIRED_COLUMNS_FILE)
-    assert len(required) == 14
+    assert len(required) == 11
     roles = {item.date_role: item.name for item in required if item.date_role}
     assert roles == {"AED": "accounting_effective_date", "PED": "policy_effective_date",
                      "TED": "transaction_effective_date"}
-    assert {item.label for item in required} >= {"Producer/Agency Name", "InsuranceCompany Name", "Revenue"}
+    assert {item.label for item in required} >= {"Producer/Agency Name", "InsuranceCompany Name", "Premium"}
     pairs = [tuple(item.label for item in group) for group in v.requirements(required) if len(group) > 1]
     assert pairs == [("CommissionPct", "GrossCommissionAmount"), ("ProducerCommissionAmount", "ProducerCommissionPct")]
-    assert len(v.requirements(required)) == 12
+    assert len(v.requirements(required)) == 9
 
 
 def test_one_of_a_group_of_alternatives_is_enough():

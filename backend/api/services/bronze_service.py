@@ -165,10 +165,10 @@ def _registry(conn=None):
     ]
     history = [
         planner.Ingested(row[0], row[1], row[2], row[3], Period.parse(row[4], row[5]), tuple(row[6] or ()),
-                         tuple(row[7] or ()))
+                         tuple(row[7] or ()), pc_id=row[8])
         for row in conn.execute(sql.SQL(
-            "SELECT id, table_name, file_name, file_sha256, period_start, period_end, source_sheets, source_regions "
-            "FROM {}.ingestion WHERE status = 'ingested'").format(control))
+            "SELECT id, table_name, file_name, file_sha256, period_start, period_end, source_sheets, source_regions, "
+            "pc_id FROM {}.ingestion WHERE status = 'ingested'").format(control))
     ]
     return tables, history
 
@@ -372,6 +372,7 @@ def _planned(plan: Plan, conn=None) -> list[planner.PlanItem]:
             aggregated=file.is_aggregated,
             home_ids=file.home_ids,
             keep_ids=file.keep_ids,
+            pc_id=file.pc_id,
         ))
     return planner.plan(candidates, tables, history)
 
@@ -731,12 +732,15 @@ def ingested_columns(record: OutputRecord) -> list[tuple[str, str]]:
             if original not in record.excluded]
 
 
-def _as_text(record: OutputRecord) -> pl.DataFrame:
+def _as_text(record: OutputRecord, rows: pl.Series | None = None) -> pl.DataFrame:
     """The cleaned table as the reviewer saw it -- renamed headers, left-out columns
-    dropped, values as text."""
+    dropped, values as text. ``rows``: keep only these (the file's rows outside its
+    declared reporting period, say), else every row."""
     with record.lock:
         kept = ingested_columns(record)
         frame = record.frame.select([pl.col(original).alias(name) for original, name in kept])
+    if rows is not None:
+        frame = frame.filter(rows)
     columns = []
     for name, dtype in frame.schema.items():
         column = pl.col(name)

@@ -86,6 +86,9 @@ class Candidate:
     # never replace (the file a companion came with).
     home_ids: tuple[str, ...] = ()
     keep_ids: tuple[str, ...] = ()
+    # The profit center this file is for: an overlapping load of a *different* one is
+    # never silently replaced, even if a table override made them share a table.
+    pc_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,7 @@ class Ingested:
     source_sheets: tuple[str, ...] = ()
     # The table regions it came from (newer loads); tells two tables of one sheet apart.
     source_regions: tuple[str, ...] = ()
+    pc_id: str | None = None
 
 
 @dataclass
@@ -175,8 +179,8 @@ class PlanItem:
 class _Table:
     columns: list[str]
     in_database: bool
-    # (ingestion id or plan key, file name, period, from this plan?)
-    loads: list[tuple[str, str, Period | None, bool]]
+    # (ingestion id or plan key, file name, period, from this plan?, profit center)
+    loads: list[tuple[str, str, Period | None, bool, str | None]]
     headers: dict[str, str] = field(default_factory=dict)
     provenance: set[str] = field(default_factory=set)
 
@@ -187,7 +191,7 @@ def plan(candidates: list[Candidate], tables: list[TableState], history: list[In
     }
     for past in history:
         state.setdefault(past.table_name, _Table([], True, [])).loads.append(
-            (past.id, past.file_name, past.period, False)
+            (past.id, past.file_name, past.period, False, past.pc_id)
         )
     by_hash: dict[str, list[Ingested]] = {}
     for past in history:
@@ -403,6 +407,15 @@ def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Tab
     if c.replace_month:
         # The reviewer chose to replace this month in the loads holding it: they stay.
         overlapping = [load for load in overlapping if load[0] not in c.month_replace_ids]
+    # A table override (or a stray schema fit) could put two profit centers in one table:
+    # an overlapping load of a *different* one is never silently replaced or rebuilt over.
+    cross_pc = [load for load in overlapping if load[4] and c.pc_id and load[4] != c.pc_id]
+    if cross_pc:
+        overlapping = [load for load in overlapping if load not in cross_pc]
+        for load in cross_pc:
+            item.blockers.append(f"{load[1]} ({load[2].label()}) is {load[4]}'s, not {c.pc_id}'s: it is not "
+                                 "replaced or appended into automatically. Rename the table, or correct the "
+                                 "profit center.")
     from_db = [load for load in overlapping if not load[3]]
     from_plan = [load for load in overlapping if load[3]]
     if c.provenance and c.provenance not in table.columns:
@@ -574,7 +587,7 @@ def _record(item: PlanItem, c: Candidate, state: dict[str, _Table]) -> None:
         table.headers.setdefault(item.column_map.get(name, name), header)
     if c.provenance:
         table.provenance.add(c.provenance)
-    table.loads.append((c.key, c.file_name, c.period, True))
+    table.loads.append((c.key, c.file_name, c.period, True, c.pc_id))
 
 
 def approvable(items: list[PlanItem], confirmed: set[str]) -> list[str]:

@@ -208,6 +208,19 @@ def test_jan_jul_file_replaces_jan_jun():
     assert item.action == planner.REPLACE and [r["id"] for r in item.replaces] == ["ing-1"]
 
 
+def test_an_overlapping_load_of_a_different_profit_center_is_never_silently_replaced():
+    # A table override could put two profit centers' loads in one table; an overlapping
+    # load of a *different* one from the candidate's is never rebuilt or replaced over.
+    tables = [TableState("ext_pc0515_arr", list(COLS))]
+    history = [Ingested("ing-1", "ext_pc0515_arr", "ARR_pc0515_v1.xlsx", "old", H1, pc_id="pc0515")]
+    item = only(planner.plan(
+        [candidate(sha="other", src="pc0999", period=JAN_JUL, table_override="ext_pc0515_arr", pc_id="pc0999")],
+        tables, history))
+    assert item.replaces == [] and not item.rebuild
+    assert item.blockers and "pc0515" in item.blockers[0] and "pc0999" in item.blockers[0]
+    assert planner.approvable([item], set())
+
+
 def test_the_same_file_again_is_skipped_unless_reingested():
     tables, history = _loaded()
     skipped = only(planner.plan([candidate(sha="old", period=JULY)], tables, history))

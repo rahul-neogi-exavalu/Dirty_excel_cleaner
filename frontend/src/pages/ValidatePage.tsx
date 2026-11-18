@@ -740,8 +740,10 @@ const input = "h-9 w-full rounded border bg-white px-2.5 text-body outline-none 
 function FileDetails({ file, busy, onChange }: { file: ValidationFile; busy: boolean; onChange: (change: FileChange) => void }) {
   const [pc, setPc] = useState(file.pc_id ?? "");
   const [received, setReceived] = useState(file.file_received_date ?? "");
+  const [period, setPeriod] = useState(file.data_collection_period ?? "");
   useEffect(() => setPc(file.pc_id ?? ""), [file.pc_id]);
   useEffect(() => setReceived(file.file_received_date ?? ""), [file.file_received_date]);
+  useEffect(() => setPeriod(file.data_collection_period ?? ""), [file.data_collection_period]);
   const divisionNeeded = file.division_matches.length > 1 && !file.division_name;
   return (
     <section aria-labelledby={`file-${file.job_id}`}>
@@ -776,8 +778,41 @@ function FileDetails({ file, busy, onChange }: { file: ValidationFile; busy: boo
             </select>
           )}
         </label>
+        <label className="block">
+          <span className="mb-1 block text-caption font-medium text-ink-600">Scope</span>
+          <select value={file.scope ?? ""} disabled={busy} onChange={(event) => onChange({ scope: event.target.value || null })}
+            className={clsx(input, "pr-1", file.scope ? "border-ink-200" : "border-amber-400")}>
+            <option value="">Choose…</option>
+            {file.scope_options.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-caption font-medium text-ink-600">Date basis</span>
+          <select value={file.date_basis ?? ""} disabled={busy} onChange={(event) => onChange({ date_basis: event.target.value || null })}
+            className={clsx(input, "pr-1", file.date_basis ? "border-ink-200" : "border-amber-400")}>
+            <option value="">Choose…</option>
+            {file.date_basis_options.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-caption font-medium text-ink-600">Reporting file type</span>
+          <select value={file.reporting_file_type ?? ""} disabled={busy} onChange={(event) => onChange({ reporting_file_type: event.target.value || null })}
+            className={clsx(input, "pr-1", file.reporting_file_type ? "border-ink-200" : "border-amber-400")}>
+            <option value="">Choose…</option>
+            {file.reporting_file_type_options.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-caption font-medium text-ink-600">Data collection period</span>
+          <input type="month" value={period} disabled={busy} onChange={(event) => setPeriod(event.target.value)}
+            onBlur={() => period !== (file.data_collection_period ?? "") && onChange({ data_collection_period: period || null })}
+            className={clsx(input, "num", file.data_collection_period ? "border-ink-200" : "border-amber-400")} />
+        </label>
       </div>
       <div className="mt-2 space-y-0.5">
+        {file.detected_scope && (
+          <p className="text-caption text-ink-500">From the control table: {file.detected_scope}.</p>
+        )}
         {file.detected_received_date && (
           <p className="text-caption text-ink-500">From the file name: {dayLabel(file.detected_received_date)}{file.received_note ? ` · ${file.received_note}` : ""}</p>
         )}
@@ -839,6 +874,16 @@ function RequiredColumns({ output, busy, onChange }: { output: ValidationOutput;
         );
       }),
     );
+  if (output.required.length === 0) {
+    return (
+      <section aria-labelledby={`required-${output.key}`}>
+        <h3 id={`required-${output.key}`} className="mb-3 flex items-center gap-2 text-card text-ink-900"><Columns3 className="h-4 w-4 text-ink-500" aria-hidden />Required columns</h3>
+        <p className="rounded-lg border border-dashed border-ink-200 bg-ink-50/60 px-3 py-4 text-center text-caption text-ink-500">
+          Choose the scope above to see its required columns.
+        </p>
+      </section>
+    );
+  }
   return (
     <section ref={ref} aria-labelledby={`required-${output.key}`}>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
@@ -1009,7 +1054,9 @@ function ReportingDates({ output, busy, onChange }: { output: ValidationOutput; 
     if (!nextStart && !nextEnd) return;
     onChange({ reporting_start_date: nextStart || nextEnd, reporting_end_date: nextEnd || nextStart });
   };
-  const editable = !output.date_detail || output.flag || output.entered || output.use_control_dates || output.date_role;
+  // Transactional: the file-level reporting file type and data collection period always
+  // decide, computed -- these inputs are read-only, just showing the result.
+  const editable = output.aggregated && (!output.date_detail || output.flag || output.entered || output.use_control_dates || output.date_role);
   // The column deciding the dates: picked by the reviewer, or the priority's own.
   const deciding = output.origin === "picked" || DATE_ROLES.includes(output.origin as DateRole) ? output.date_detail : null;
   return (
@@ -1105,12 +1152,12 @@ function ReportingDates({ output, busy, onChange }: { output: ValidationOutput; 
       </p>
       {output.flag && <Alert tone="warning" className="mt-3" title="Neither year-to-date nor monthly">{output.flag}</Alert>}
       <div className="mt-3 flex flex-wrap gap-2">
-        {output.listed && !output.use_control_dates && (
+        {output.aggregated && output.listed && !output.use_control_dates && (
           <Button size="sm" disabled={busy} onClick={() => onChange({ use_control_dates: true })}>
             Use the control table's {monthLabel(output.listed.start)} – {monthLabel(output.listed.end)}
           </Button>
         )}
-        {(output.entered || output.use_control_dates || output.date_role) && (
+        {output.aggregated && (output.entered || output.use_control_dates || output.date_role) && (
           <Button size="sm" variant="ghost" icon={<RefreshCw />} disabled={busy}
             onClick={() => onChange(output.date_role ? { date_role: null } : output.use_control_dates ? { use_control_dates: false } : { reporting_start_date: null, reporting_end_date: null })}>
             Back to the data's dates
