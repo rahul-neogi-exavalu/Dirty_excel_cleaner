@@ -85,6 +85,22 @@ def required_for(session: Session, scope: str | None) -> tuple[rules.Required, .
     return session.scope_required.get(scope, ()) if scope else ()
 
 
+def date_role_items() -> tuple[rules.Required, ...]:
+    """The date-role columns (AED / PED / TED): always matching targets, whatever the
+    scope's own required columns are -- the date basis is global, not scope-specific, so
+    a scope (APD) that does not itself require one of these must still get the chance to
+    find it in the file."""
+    return tuple(item for item in required() if item.date_role)
+
+
+def matching_targets(session: Session, scope: str | None) -> tuple[rules.Required, ...]:
+    """The scope's required columns, plus whichever date-role columns it does not already
+    require: everything column matching should attempt for this file."""
+    scoped = required_for(session, scope)
+    names = {item.name for item in scoped}
+    return scoped + tuple(item for item in date_role_items() if item.name not in names)
+
+
 def source_system_for(pc_id: str | None) -> str | None:
     """The control table's source system: EXT_ and the profit center (EXT_PC0796)."""
     return f"EXT_{pc_id}" if pc_id else None
@@ -457,7 +473,7 @@ def _build(session: Session, jobs: list) -> None:
             reached[method] = units
 
         mapping, votes, options, found_notes = _match(record, file.pc_id, rows, catalog_columns, similarity, llm,
-                                                      on_method, required_for(session, file.scope))
+                                                      on_method, matching_targets(session, file.scope))
         notes.extend(found_notes)
         session.outputs.append(OutputCheck(
             key=f"{job.id}.{record.id}", job_id=job.id, output_id=record.id, name=record.name,
@@ -639,7 +655,7 @@ def _rematch_file(session: Session, file: FileCheck) -> None:
     catalog_columns = silver_service.catalog()
     similarity, llm, notes = column_matching.matchers(column_matching.precedents(session.mapping_rows, file.pc_id))
     session.notes = list(dict.fromkeys(session.notes + notes))
-    wanted_items = required_for(session, file.scope)
+    wanted_items = matching_targets(session, file.scope)
     for output in outputs:
         previous_mapping, previous_votes = output.mapping, output.votes
         record = _record(output)
@@ -711,7 +727,9 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     # A column left out on Results matters only when nothing else meets its requirement.
     left_out = [item.label for group in rules.requirements(required_items) if not any(item.name in present for item in group)
                 for item in group if output.mapping.get(item.name) in excluded]
-    roles = {item.date_role: output.mapping.get(item.name) for item in required_items if item.date_role}
+    # Always every date-role column, whatever the scope itself requires: the date basis
+    # is global, so _match() (matching_targets) already tried to map these regardless.
+    roles = {item.date_role: output.mapping.get(item.name) for item in date_role_items()}
     stats = rules.date_stats(frame, roles)
     source = rules.reporting_source(stats)
     listed = ((control["drt_reporting_start_date"], control["drt_reporting_end_date"])
