@@ -221,7 +221,7 @@ _CONTROL_FIELDS = ("control_id", "source_system", "file_name", "sheet_name", "re
                    "is_aggregated", "scope", "date_basis", "reporting_file_type", "data_collection_period")
 
 
-READ_STEPS = 7
+READ_STEPS = 8
 
 
 def _read(file_names: list[str], conn=None, tracker: progress.Tracker | None = None) -> Context:
@@ -254,6 +254,17 @@ def _read(file_names: list[str], conn=None, tracker: progress.Tracker | None = N
             "SELECT profit_center, file_columns, silver_column_name FROM {}.{} ORDER BY profit_center, file_columns")
             .format(sql.Identifier(config.BRONZE_SCHEMA), sql.Identifier(reference_service.MAPPING_TABLE)))
     ]
+    done("Reading the Silver DRT column mapping")
+    if conn.execute("SELECT to_regclass(%s)", [f'"{config.SILVER_SCHEMA}"."drt_column_mapping"']).fetchone()[0] is not None:
+        # Global (the same for every profit center): a weaker, cross-table vote here too,
+        # the same way it already stands in for a column approved for another table in
+        # Silver -- so a header variation the business approved there (Pol_Ef_Dt's many
+        # spellings) also helps Bronze find the column, not just an exact saved mapping.
+        context.mapping_rows += [
+            (None, row[0], row[1], row[2]) for row in conn.execute(sql.SQL(
+                "SELECT pc_column, drt_column, silver_column_name FROM {}.{} WHERE silver_column_name IS NOT NULL")
+                .format(sql.Identifier(config.SILVER_SCHEMA), sql.Identifier("drt_column_mapping")))
+        ]
     done("Reading the required columns by scope")
     catalog = {item.name: item for item in required()}
     context.scope_required = {
