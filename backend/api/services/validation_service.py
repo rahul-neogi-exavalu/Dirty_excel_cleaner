@@ -873,9 +873,11 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
         needs.append(PC_NEEDED)
     if not file.scope:
         needs.append(SCOPE_NEEDED)
-    if not aggregated and primary is None:
+    if not aggregated and primary is None and not missing and output.choice != rules.REJECT:
         # A companion inherits its dates from the file it came with: it never needs its
-        # own date basis, file type or period.
+        # own date basis, file type or period. Nor does a file already missing a required
+        # column, or one the reviewer is rejecting outright -- it is rejected either way,
+        # whatever these three say, so they are never why it is held back.
         if not file.date_basis:
             needs.append(DATE_BASIS_NEEDED)
         if not file.reporting_file_type:
