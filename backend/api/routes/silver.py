@@ -40,10 +40,9 @@ class MappingEdit(BaseModel):
 
 
 class SavedMappingRow(BaseModel):
-    """One DRT column mapping row, found by all four of its values (a source column can
-    have two rows; the four together name exactly one)."""
+    """One DRT column mapping row, found by all three of its values (a source column can
+    have two rows; the three together name exactly one)."""
 
-    profit_center: str
     pc_column: str
     drt_column: str | None = None
     silver_column_name: str | None = None
@@ -280,7 +279,7 @@ async def saved_mapping() -> list[dict]:
 @router.patch("/mapping")
 async def edit_saved_mapping(request: SavedMappingEdit) -> dict:
     return await run_in_threadpool(
-        silver_service.edit_saved_mapping, request.profit_center, request.pc_column, request.drt_column,
+        silver_service.edit_saved_mapping, request.pc_column, request.drt_column,
         request.silver_column_name, request.new_silver_column_name,
     )
 
@@ -288,7 +287,7 @@ async def edit_saved_mapping(request: SavedMappingEdit) -> dict:
 @router.delete("/mapping", status_code=204, response_class=Response)
 async def delete_saved_mapping(request: SavedMappingRow) -> None:
     await run_in_threadpool(
-        silver_service.delete_saved_mapping, request.profit_center, request.pc_column, request.drt_column,
+        silver_service.delete_saved_mapping, request.pc_column, request.drt_column,
         request.silver_column_name,
     )
 

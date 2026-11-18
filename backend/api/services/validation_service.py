@@ -64,13 +64,41 @@ SAMPLE_ROWS = 200
 CHOICES = (rules.REJECT, rules.REPLACE, rules.REPLACE_MONTH, rules.REVISE, rules.COMPANION)
 # Even a rejected file needs it: the control table records its source system.
 PC_NEEDED = "Enter the profit center."
+SCOPE_NEEDED = "Choose the scope."
+DATE_BASIS_NEEDED = "Choose the date basis (AED, TED or PED)."
+FILE_TYPE_NEEDED = "Choose incremental or cumulative."
+PERIOD_NEEDED = "Enter the data collection period."
 
 log = logging.getLogger("ahi.validation")
 
 
 @lru_cache(maxsize=1)
 def required() -> tuple[rules.Required, ...]:
+    """Every column the business ever requires, with its label, date role and one_of group.
+    What applies to one file is a scope's subset of these (``required_for``)."""
     return tuple(rules.load_required(config.BRONZE_REQUIRED_COLUMNS_FILE))
+
+
+def required_for(session: Session, scope: str | None) -> tuple[rules.Required, ...]:
+    """The required columns for a scope (AJG / APD / BOTH): (), until the reviewer chooses
+    one, so the required-columns section has nothing to match until then."""
+    return session.scope_required.get(scope, ()) if scope else ()
+
+
+def date_role_items() -> tuple[rules.Required, ...]:
+    """The date-role columns (AED / PED / TED): always matching targets, whatever the
+    scope's own required columns are -- the date basis is global, not scope-specific, so
+    a scope (APD) that does not itself require one of these must still get the chance to
+    find it in the file."""
+    return tuple(item for item in required() if item.date_role)
+
+
+def matching_targets(session: Session, scope: str | None) -> tuple[rules.Required, ...]:
+    """The scope's required columns, plus whichever date-role columns it does not already
+    require: everything column matching should attempt for this file."""
+    scoped = required_for(session, scope)
+    names = {item.name for item in scoped}
+    return scoped + tuple(item for item in date_role_items() if item.name not in names)
 
 
 def source_system_for(pc_id: str | None) -> str | None:
@@ -90,6 +118,16 @@ class FileCheck:
     received_note: str | None = None
     division_matches: list[str] = field(default_factory=list)
     division_name: str | None = None
+    # AJG / APD / BOTH: which required columns apply. Detected from this profit center's
+    # control-table rows; the reviewer picks it when none is found.
+    scope: str | None = None
+    detected_scope: str | None = None
+    # AED / TED / PED: the date column rows are filtered by. INCREMENTAL / CUMULATIVE, and
+    # the year and month this file reports: together they compute the reporting dates.
+    # Always the reviewer's own pick -- never detected.
+    date_basis: str | None = None
+    reporting_file_type: str | None = None
+    data_collection_period: date | None = None  # always the 1st of the month
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -144,6 +182,15 @@ class Session:
     pending: list[dict] = field(default_factory=list, repr=False)
     # source_system -> its files in Bronze (control rows loaded and active)
     loaded: dict[str, list[Loaded]] = field(default_factory=dict, repr=False)
+    # scope -> its required columns; profit_center -> its detected scope.
+    scope_required: dict[str, tuple[rules.Required, ...]] = field(default_factory=dict, repr=False)
+    scope_by_pc: dict[str, str] = field(default_factory=dict, repr=False)
+    # pc_id -> month (YYYY-MM) -> rows currently in Bronze: for a cumulative file's
+    # mismatch check, against the month it is about to replace.
+    bronze_counts: dict[str, dict[str, int]] = field(default_factory=dict, repr=False)
+    # The bronze column mapping's rows, kept for rematching a file whose scope changes
+    # after the session was built (a pc_id entered or corrected later).
+    mapping_rows: list[tuple] = field(default_factory=list, repr=False)
     created_at: float = field(default_factory=time.time)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # How far building the session has got; finished once it can be reviewed.
@@ -176,6 +223,9 @@ class Context:
     mapping_rows: list[tuple] = field(default_factory=list)
     pending: list[dict] = field(default_factory=list)
     loaded: dict[str, list[Loaded]] = field(default_factory=dict)
+    scope_required: dict[str, tuple[rules.Required, ...]] = field(default_factory=dict)
+    scope_by_pc: dict[str, str] = field(default_factory=dict)
+    bronze_counts: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 _CONTROL_FIELDS = ("control_id", "source_system", "file_name", "sheet_name", "reporting_period_type",
@@ -183,17 +233,18 @@ _CONTROL_FIELDS = ("control_id", "source_system", "file_name", "sheet_name", "re
                    "drt_reporting_end_date",
                    "date_detail", "file_replaced", "is_active", "pc_id", "division_name", "job_id", "output_id",
                    "staging_table", "ingestion_id", "rejection_reason", "validation", "replace_month",
-                   "created_by", "created_at", "staged_at", "loaded_at", "bronze_table", "companion_of", "is_aggregated")
+                   "created_by", "created_at", "staged_at", "loaded_at", "bronze_table", "companion_of",
+                   "is_aggregated", "scope", "date_basis", "reporting_file_type", "data_collection_period")
 
 
-READ_STEPS = 4
+READ_STEPS = 8
 
 
 def _read(file_names: list[str], conn=None, tracker: progress.Tracker | None = None) -> Context:
-    """The division table, the bronze column mapping, these files' pending control rows,
-    and every profit center's files in Bronze (on ``conn`` when given). ``tracker`` is told
-    of connecting (the CONNECT phase, when there is no ``conn``) and of each of the four
-    reads (READ)."""
+    """The division table, the bronze column mapping, each scope's required columns and each
+    profit center's scope, these files' pending control rows, and every profit center's
+    files in Bronze (on ``conn`` when given). ``tracker`` is told of connecting (the CONNECT
+    phase, when there is no ``conn``) and of each of the reads (READ)."""
     if conn is None:
         if tracker is not None:
             tracker.start(CONNECT, 1, "Opening a connection" if db.prepared() else
@@ -219,6 +270,25 @@ def _read(file_names: list[str], conn=None, tracker: progress.Tracker | None = N
             "SELECT profit_center, file_columns, silver_column_name FROM {}.{} ORDER BY profit_center, file_columns")
             .format(sql.Identifier(config.BRONZE_SCHEMA), sql.Identifier(reference_service.MAPPING_TABLE)))
     ]
+    done("Reading the Silver DRT column mapping")
+    if conn.execute("SELECT to_regclass(%s)", [f'"{config.SILVER_SCHEMA}"."drt_column_mapping"']).fetchone()[0] is not None:
+        # Global (the same for every profit center): a weaker, cross-table vote here too,
+        # the same way it already stands in for a column approved for another table in
+        # Silver -- so a header variation the business approved there (Pol_Ef_Dt's many
+        # spellings) also helps Bronze find the column, not just an exact saved mapping.
+        context.mapping_rows += [
+            (None, row[0], row[1], row[2]) for row in conn.execute(sql.SQL(
+                "SELECT pc_column, drt_column, silver_column_name FROM {}.{} WHERE silver_column_name IS NOT NULL")
+                .format(sql.Identifier(config.SILVER_SCHEMA), sql.Identifier("drt_column_mapping")))
+        ]
+    done("Reading the required columns by scope")
+    catalog = {item.name: item for item in required()}
+    context.scope_required = {
+        scope: tuple(catalog[name] for name in [item.name for item in required()] if name in names)
+        for scope, names in reference_service.scope_column_names(conn).items()
+    }
+    done("Reading each profit center's scope")
+    context.scope_by_pc = reference_service.scope_by_pc(conn)
     done(f"Reading the control rows of {len(file_names)} file{'s' if len(file_names) != 1 else ''}")
     context.pending = [dict(zip(_CONTROL_FIELDS, row)) for row in conn.execute(sql.SQL(
         "SELECT {} FROM {} WHERE file_name = ANY(%s) AND bronze_load_flag = 'N' "
@@ -230,6 +300,18 @@ def _read(file_names: list[str], conn=None, tracker: progress.Tracker | None = N
             "AND drt_reporting_end_date IS NOT NULL ORDER BY control_id").format(fields, control)):
         data = dict(zip(_CONTROL_FIELDS, row))
         context.loaded.setdefault(data["source_system"], []).append(loaded_from(data))
+    done("Reading how many rows Bronze currently holds, by profit center and month")
+    tables = {(item.pc_id, item.bronze_table) for items in context.loaded.values() for item in items
+              if item.pc_id and item.bronze_table and not item.aggregated}
+    for pc_id, table in tables:
+        if conn.execute("SELECT to_regclass(%s)", [f'"{config.BRONZE_SCHEMA}"."{table}"']).fetchone()[0] is None:
+            continue
+        for month, count in conn.execute(sql.SQL(
+                "SELECT _reporting_month, count(*) FROM {}.{} WHERE pc_id = %s AND _reporting_month IS NOT NULL "
+                "GROUP BY _reporting_month").format(sql.Identifier(config.BRONZE_SCHEMA), sql.Identifier(table)),
+                [pc_id]):
+            counts = context.bronze_counts.setdefault(pc_id, {})
+            counts[month] = counts.get(month, 0) + count
     done()
     return context
 
@@ -245,6 +327,7 @@ def loaded_from(row: dict) -> Loaded:
         present=frozenset(name for name, column in (details.get("mapping") or {}).items() if column),
         column_names=tuple(column["name"] for column in details.get("columns") or []),
         aggregated=row.get("is_aggregated") == "Y",
+        bronze_table=row.get("bronze_table"), pc_id=row.get("pc_id"),
     )
 
 
@@ -324,10 +407,12 @@ def _build(session: Session, jobs: list) -> None:
     tracker = session.tracker
     context = _read([job.source_name for job in jobs], tracker=tracker)
     session.divisions, session.pending, session.loaded = context.divisions, context.pending, context.loaded
+    session.scope_required, session.scope_by_pc = context.scope_required, context.scope_by_pc
+    session.bronze_counts = context.bronze_counts
     from . import silver_service
 
     catalog_columns = silver_service.catalog()
-    rows = context.mapping_rows
+    rows = session.mapping_rows = context.mapping_rows
 
     # The matchers, per file (the AI is shown this profit center's precedents first).
     vectors = bool(config.WORD2VEC_PATH) and not semantic.loaded(config.WORD2VEC_PATH)
@@ -352,6 +437,7 @@ def _build(session: Session, jobs: list) -> None:
                          received_note=note)
         if len(tokens) > 1:
             file.warnings.append(f"The file name names {' and '.join(tokens)}: enter the profit center this file is for.")
+        _lookup_scope(session, file)
         _prefill_from_control(session, file)
         _lookup_division(session, file)
         session.files.append(file)
@@ -387,7 +473,7 @@ def _build(session: Session, jobs: list) -> None:
             reached[method] = units
 
         mapping, votes, options, found_notes = _match(record, file.pc_id, rows, catalog_columns, similarity, llm,
-                                                      on_method)
+                                                      on_method, matching_targets(session, file.scope))
         notes.extend(found_notes)
         session.outputs.append(OutputCheck(
             key=f"{job.id}.{record.id}", job_id=job.id, output_id=record.id, name=record.name,
@@ -467,10 +553,10 @@ def _columns(record: OutputRecord) -> list[dict]:
 
 
 def _match(record: OutputRecord, pc: str | None, rows: list[tuple], catalog_columns, similarity, llm,
-           on_method: matching.Progress | None = None):
+           on_method: matching.Progress | None = None, wanted_items: tuple[rules.Required, ...] = ()):
     """Every method's vote for every column against the whole Silver catalog -- so other
     targets absorb look-alikes (Policy Expiration Date is not policy_effective_date) -- and
-    from that, the column found for each required one."""
+    from that, the column found for each column ``wanted_items`` (the file's scope) requires."""
     names = naming.column_names(record.columns)
     originals = list(record.frame.columns)
     by_name = dict(zip(names, originals))
@@ -482,7 +568,7 @@ def _match(record: OutputRecord, pc: str | None, rows: list[tuple], catalog_colu
         names, catalog_columns, own, known, column_matching.samples(head, names), similarity, llm,
         fuzzy_min=config.MATCH_FUZZY_MIN, semantic_min=config.MATCH_SEMANTIC_MIN, one_to_many=one_to_many,
         progress=on_method)
-    wanted = {item.name for item in required()}
+    wanted = {item.name for item in wanted_items}
     mapping: dict[str, str | None] = {name: None for name in wanted}
     votes: dict[str, dict] = {}
     options: dict[str, list[dict]] = {name: [] for name in wanted}
@@ -547,6 +633,44 @@ def _lookup_division(session: Session, file: FileCheck) -> None:
         file.warnings.append(f"{file.pc_id} {note}: choose a division, or division_name stays empty.")
 
 
+def _lookup_scope(session: Session, file: FileCheck) -> None:
+    """This profit center's scope, from its control-table rows. Never overwrites a scope the
+    reviewer chose themselves (only one that matched what was detected before)."""
+    previous_detected = file.detected_scope
+    file.detected_scope = session.scope_by_pc.get(file.pc_id) if file.pc_id else None
+    if file.scope is None or file.scope == previous_detected:
+        file.scope = file.detected_scope
+
+
+def _rematch_file(session: Session, file: FileCheck) -> None:
+    """Re-run column matching for this file's outputs: required columns depend on scope, and
+    ``_match`` only ran once, in ``_build``, against whatever scope was known then. A scope
+    discovered or changed afterwards (a pc_id entered or corrected, or the reviewer picking a
+    different scope) would otherwise leave every output's mapping stuck at that first guess."""
+    from . import silver_service
+
+    outputs = [output for output in session.outputs if output.job_id == file.job_id and not output.staged]
+    if not outputs:
+        return
+    catalog_columns = silver_service.catalog()
+    similarity, llm, notes = column_matching.matchers(column_matching.precedents(session.mapping_rows, file.pc_id))
+    session.notes = list(dict.fromkeys(session.notes + notes))
+    wanted_items = matching_targets(session, file.scope)
+    for output in outputs:
+        previous_mapping, previous_votes = output.mapping, output.votes
+        record = _record(output)
+        mapping, votes, options, found_notes = _match(record, file.pc_id, session.mapping_rows, catalog_columns,
+                                                       similarity, llm, None, wanted_items)
+        session.notes = list(dict.fromkeys(session.notes + found_notes))
+        # The reviewer's own choices survive a rematch, for whichever targets are still wanted.
+        for target in output.reviewer & set(mapping):
+            if target in previous_mapping:
+                mapping[target] = previous_mapping[target]
+                if target in previous_votes:
+                    votes[target] = previous_votes[target]
+        output.mapping, output.votes, output.options = mapping, votes, options
+
+
 def division_options(session: Session, file: FileCheck) -> list[str]:
     if file.division_matches:
         return list(file.division_matches)
@@ -573,10 +697,11 @@ def _evaluate(session: Session, on_checked=None) -> None:
         _evaluate_file(file, [output for output in session.outputs if output.job_id == file.job_id])
 
 
-def _present(output: OutputCheck) -> set[str]:
+def _present(session: Session, output: OutputCheck) -> set[str]:
     """The required columns (Silver names) the output carries: mapped, and not left out on Results."""
     excluded = {column["original"] for column in output.columns if column["excluded"]}
-    return {item.name for item in required()
+    file = session.file(output.job_id)
+    return {item.name for item in required_for(session, file.scope)
             if output.mapping.get(item.name) is not None and output.mapping[item.name] not in excluded}
 
 
@@ -584,24 +709,27 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     record = _record(output)
     frame = record.frame
     excluded = {column["original"] for column in output.columns if column["excluded"]}
-    labels = {item.name: item.label for item in required()}
+    required_items = required_for(session, file.scope)
+    labels = {item.name: item.label for item in required_items}
     # A companion and the file it came with are checked together: what one lacks, the other
     # may carry (a broker list holds the producer details).
     primary = _primary(session, output)
     companions = [other for other in session.outputs
                   if other.choice == rules.COMPANION and other.companion_of == output.key]
-    present = _present(output)
+    present = _present(session, output)
     if primary is not None:
-        present |= set(primary.present) if isinstance(primary, Loaded) else _present(primary)
+        present |= set(primary.present) if isinstance(primary, Loaded) else _present(session, primary)
     for other in companions:
-        present |= _present(other)
+        present |= _present(session, other)
     pair = " + ".join([_label(session, output)] + ([_label(session, primary)] if primary is not None else [])
                       + [_label(session, other) for other in companions]) if primary is not None or companions else None
-    missing = rules.missing_required(required(), present)
+    missing = rules.missing_required(required_items, present) if file.scope else []
     # A column left out on Results matters only when nothing else meets its requirement.
-    left_out = [item.label for group in rules.requirements(required()) if not any(item.name in present for item in group)
+    left_out = [item.label for group in rules.requirements(required_items) if not any(item.name in present for item in group)
                 for item in group if output.mapping.get(item.name) in excluded]
-    roles = {item.date_role: output.mapping.get(item.name) for item in required() if item.date_role}
+    # Always every date-role column, whatever the scope itself requires: the date basis
+    # is global, so _match() (matching_targets) already tried to map these regardless.
+    roles = {item.date_role: output.mapping.get(item.name) for item in date_role_items()}
     stats = rules.date_stats(frame, roles)
     source = rules.reporting_source(stats)
     listed = ((control["drt_reporting_start_date"], control["drt_reporting_end_date"])
@@ -610,14 +738,15 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     # Transactions, or the profit center's own aggregates? Told by the table's shape.
     provenance = SOURCE_SHEET_COLUMN if SOURCE_SHEET_COLUMN in frame.columns else None
     own = [name for name in frame.columns if name != provenance and name not in excluded]
-    detected = grain.detect(frame, own, keyed="policy_number" in _present(output),
+    detected = grain.detect(frame, own, keyed="policy_number" in _present(session, output),
                             dated=any(stat.complete for stat in stats.values()), group=provenance)
     aggregated = output.grain == grain.AGGREGATE if output.grain else detected.aggregated
     sheet_months = None
     if aggregated:
         # Aggregates carry no transaction columns: the business's required columns are for
         # transactions. What they need is an amount; their dates come from their sheets
-        # (a month to a sheet) or the file name.
+        # (a month to a sheet) or the file name. Entirely out of scope for date_basis /
+        # reporting_file_type / data_collection_period, which are a transactional file's.
         primary, companions, pair = None, [], None
         missing = [] if detected.measures else ["an amount column"]
         left_out = []
@@ -625,41 +754,77 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
                                           else output.sheet_names)
 
     ranges = rules.role_ranges(stats)
-    start = end = None
-    detail = origin = None
+    start = end = detail = origin = None
+    kind = computed_kind = actual_kind = None
+    basis_role = basis_stat = basis_column = None
+    flag_reasons: list[str] = []
     picked = output.date_role if output.date_role in ranges else None
-    if picked:
-        (start, end), detail, origin = rules.role_range(stats[picked]), picked, "picked"
-    elif output.entered:
-        # date_detail: the date column these dates are the range of, else blank.
-        (start, end), origin = output.entered, "entered"
-        detail = rules.matching_role(stats, start, end)
-    elif output.use_control_dates and listed:
-        (start, end), origin = listed, "control"
-        detail = rules.matching_role(stats, start, end)
-    elif aggregated and sheet_months:
-        first, last = min(sheet_months.values()), max(sheet_months.values())
-        start = date(int(first[:4]), int(first[5:]), 1)
-        end = rules.month_end(date(int(last[:4]), int(last[5:]), 1))
-        origin = "sheets"
-    elif aggregated and file_meta.period_from_filename(file.file_name):
-        first, last = file_meta.period_from_filename(file.file_name)
-        start = date(int(first[:4]), int(first[5:]), 1)
-        end = rules.month_end(date(int(last[:4]), int(last[5:]), 1))
-        origin = "file_name"
-    elif source:
-        start, end = rules.role_range(source)
-        detail, origin = source.role, source.role
-    kind, flag = rules.classify(start, end) if start else (None, None)
+    if aggregated:
+        if picked:
+            (start, end), detail, origin = rules.role_range(stats[picked]), picked, "picked"
+        elif output.entered:
+            # date_detail: the date column these dates are the range of, else blank.
+            (start, end), origin = output.entered, "entered"
+            detail = rules.matching_role(stats, start, end)
+        elif output.use_control_dates and listed:
+            (start, end), origin = listed, "control"
+            detail = rules.matching_role(stats, start, end)
+        elif sheet_months:
+            first, last = min(sheet_months.values()), max(sheet_months.values())
+            start = date(int(first[:4]), int(first[5:]), 1)
+            end = rules.month_end(date(int(last[:4]), int(last[5:]), 1))
+            origin = "sheets"
+        elif file_meta.period_from_filename(file.file_name):
+            first, last = file_meta.period_from_filename(file.file_name)
+            start = date(int(first[:4]), int(first[5:]), 1)
+            end = rules.month_end(date(int(last[:4]), int(last[5:]), 1))
+            origin = "file_name"
+        elif source:
+            start, end = rules.role_range(source)
+            detail, origin = source.role, source.role
+        kind, classify_flag = rules.classify(start, end) if start else (None, None)
+        if classify_flag:
+            flag_reasons.append(classify_flag)
+    else:
+        # Manual and file-level: which date column decides, which kind of file this is, and
+        # which month it reports -- together they compute the official reporting period.
+        # The column's *actual* scanned shape (below) is a separate, descriptive check: it
+        # never decides start/end, only the persisted period_type and the mismatch flag.
+        basis_role = output.date_role or file.date_basis
+        basis_stat = stats.get(basis_role) if basis_role else None
+        basis_column = basis_stat.column if basis_stat else None
+        detail = basis_role
+        if file.reporting_file_type and file.data_collection_period:
+            start, end = rules.reporting_range(file.reporting_file_type, file.data_collection_period)
+            kind = computed_kind = rules.computed_period_type(file.reporting_file_type)
+            origin = "computed"
+        if basis_stat is not None and not basis_stat.complete:
+            flag_reasons.append(f"{basis_role} is populated on {basis_stat.populated} of {basis_stat.rows} rows: "
+                               "pick a different date basis, or complete the data.")
+        elif basis_stat is not None and basis_stat.populated and file.reporting_file_type:
+            a_start, a_end = rules.role_range(basis_stat)
+            actual_kind, note, blocking = rules.actual_period_type(file.reporting_file_type, a_start, a_end)
+            if note and blocking:
+                flag_reasons.append(note)
     primary_waiting = isinstance(primary, OutputCheck) and primary.result.get("reporting_start_date") is None
     if primary is not None:
         # A companion reports what the file it came with reports.
+        flag_reasons = []
         if isinstance(primary, Loaded):
             start, end, kind, detail = primary.start, primary.end, primary.period_type, primary.date_detail
         else:
             start, end = primary.result.get("reporting_start_date"), primary.result.get("reporting_end_date")
-            kind, detail = primary.result.get("period_type"), primary.result.get("date_detail")
-        origin, flag = "companion", None
+            kind = primary.result.get("computed_period_type") or primary.result.get("period_type")
+            detail = primary.result.get("date_detail")
+        origin = "companion"
+        # A companion simply mirrors its primary: no separate actual-vs-computed split.
+        actual_kind = computed_kind = kind
+    # A companion's or an already-loaded file's period_type might itself be the descriptive,
+    # possibly-blank kind (an "Invalid YTD" file) -- business_action always needs a clean one.
+    if start is not None and kind is None:
+        kind = rules.MONTHLY if (start.year, start.month) == (end.year, end.month) else rules.YTD
+        if primary is not None:
+            actual_kind = computed_kind = kind
 
     # Each row's month: from the deciding date column, or the one month a monthly file is.
     month_column = stats[detail].column if detail else None
@@ -672,6 +837,21 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     if by_sheet:
         month_column = fixed = None
     months = rules.month_stats(frame, rules.row_months(frame, month_column, fixed, by_sheet), roles)
+
+    # A cumulative file's rows for a month Bronze already has, against what is there right
+    # now: a mismatch is a strong sign the file is mislabeled (really incremental).
+    if (primary is None and not aggregated and file.reporting_file_type == rules.CUMULATIVE
+            and start and end and file.pc_id):
+        old_counts = session.bronze_counts.get(file.pc_id, {})
+        for month_key in rules.months_between(start, end):
+            old_count = old_counts.get(month_key, 0)
+            if old_count <= 0:
+                continue
+            new_count = (months.get(month_key) or {}).get("rows", 0)
+            note = rules.mismatch(new_count, old_count)
+            if note:
+                flag_reasons.append(f"{month_key}: {note}")
+    flag = "; ".join(flag_reasons) if flag_reasons else None
 
     # This profit center's files in Bronze of the same kind: aggregates against aggregates.
     loaded = [item for item in session.loaded.get(file.source_system or "", []) if item.aggregated == aggregated]
@@ -704,9 +884,14 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     if output.choice == rules.REVISE and output.replaces_file and revises is None:
         warnings.append(f"{output.replaces_file} is no longer a loaded file of these reporting dates: name the file "
                         "this one revises again.")
-    if output.date_role and not picked:
+    if aggregated and output.date_role and not picked:
         warnings.append(f"{output.date_role} is no longer populated on every row, so it cannot decide the "
                         "reporting dates.")
+    if not aggregated and actual_kind is None and basis_stat is not None and basis_stat.complete \
+            and file.reporting_file_type:
+        _, note, blocking = rules.actual_period_type(file.reporting_file_type, *rules.role_range(basis_stat))
+        if note and not blocking:
+            warnings.append(note)
     if left_out:
         warnings.append(f"Left out of ingestion on Results: {', '.join(left_out)}. Include it there, or map "
                         "another column.")
@@ -715,10 +900,25 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     needs = []
     if not file.pc_id:
         needs.append(PC_NEEDED)
+    if not file.scope:
+        needs.append(SCOPE_NEEDED)
+    if not aggregated and primary is None and not missing and output.choice != rules.REJECT:
+        # A companion inherits its dates from the file it came with: it never needs its
+        # own date basis, file type or period. Nor does a file already missing a required
+        # column, or one the reviewer is rejecting outright -- it is rejected either way,
+        # whatever these three say, so they are never why it is held back.
+        if not file.date_basis:
+            needs.append(DATE_BASIS_NEEDED)
+        if not file.reporting_file_type:
+            needs.append(FILE_TYPE_NEEDED)
+        if not file.data_collection_period:
+            needs.append(PERIOD_NEEDED)
     if decision is None and primary_waiting:
         needs.append(f"Finish {_label(session, primary)} first: a companion takes its reporting dates.")
-    elif decision is None:
+    elif decision is None and aggregated:
         needs.append("Enter the reporting start and end dates: no date column is populated on every row.")
+    elif decision is None:
+        pass  # a transactional file with nothing decided yet: already explained above
     elif decision.action == rules.DECIDE:
         needs.append("Choose what happens to this file.")
     elif decision.action in (rules.INSERT, rules.APPEND) and not file.received:
@@ -730,10 +930,11 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     else:
         verdict = READY
 
-    needed = len(rules.requirements(required()))
+    needed = len(rules.requirements(required_items))
     checks = [
-        {"id": "columns", "label": "Required columns", "ok": not missing,
-         "detail": f"{needed - len(missing)} of {needed} found" + (f"; missing {', '.join(missing)}" if missing else "")},
+        {"id": "columns", "label": "Required columns", "ok": not missing and bool(file.scope),
+         "detail": "Choose the scope to check required columns" if not file.scope else
+         f"{needed - len(missing)} of {needed} found" + (f"; missing {', '.join(missing)}" if missing else "")},
         {"id": "dates", "label": "Reporting dates", "ok": start is not None,
          "detail": (_span(start, end) + f" · {_origin_label(origin, detail)}") if start else
          "No date column is populated on every row"},
@@ -763,7 +964,12 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     output.result = {
         "verdict": verdict, "needs": needs, "warnings": warnings, "missing": missing, "checks": checks,
         "dates": {role: stat.as_dict() for role, stat in stats.items()},
-        "date_detail": detail, "origin": origin, "flag": flag, "period_type": kind,
+        # period_type is the actual, possibly-NULL ("Invalid YTD") shape for a transactional
+        # file; computed_period_type is the clean YTD/MONTHLY the declared file type and
+        # period always give, which decision-making above already used as `kind`.
+        "date_detail": detail, "origin": origin, "flag": flag,
+        "period_type": kind if aggregated else actual_kind, "computed_period_type": computed_kind,
+        "basis_column": basis_column,
         "date_role": picked, "date_roles": ranges,
         "reporting_start_date": start, "reporting_end_date": end,
         "listed": {"start": listed[0], "end": listed[1]} if listed else None,
@@ -981,6 +1187,9 @@ def _origin_label(origin: str | None, detail: str | None = None) -> str:
         return "from the month each sheet names"
     if origin == "file_name":
         return "from the file name"
+    if origin == "computed":
+        return f"computed from the reporting file type and data collection period ({detail}'s shape checked)" \
+            if detail else "computed from the reporting file type and data collection period"
     if origin == "picked":
         return f"from {detail}, picked by the reviewer"
     if origin in ("entered", "control"):
@@ -1004,7 +1213,9 @@ def _editable(output: OutputCheck) -> None:
 
 
 def update_file(session_id: str, job_id: str, fields: set[str], pc_id: str | None = None,
-                file_received_date: str | None = None, division_name: str | None = None) -> Session:
+                file_received_date: str | None = None, division_name: str | None = None,
+                scope: str | None = None, date_basis: str | None = None, reporting_file_type: str | None = None,
+                data_collection_period: str | None = None) -> Session:
     session = ready(session_id)
     with session.lock:
         file = session.file(job_id)
@@ -1017,7 +1228,11 @@ def update_file(session_id: str, job_id: str, fields: set[str], pc_id: str | Non
                                field="pc_id")
             if normalized != file.pc_id:
                 file.pc_id = normalized
+                previous_scope = file.scope
+                _lookup_scope(session, file)
                 _lookup_division(session, file)
+                if file.scope != previous_scope:
+                    _rematch_file(session, file)
         if "file_received_date" in fields:
             file.received = _parse_day(file_received_date, "file_received_date")
         if "division_name" in fields:
@@ -1026,6 +1241,27 @@ def update_file(session_id: str, job_id: str, fields: set[str], pc_id: str | Non
                 raise ApiError(422, "invalid_division", f"'{choice}' is not a division for {file.pc_id or 'this file'}.",
                                field="division_name")
             file.division_name = choice
+        if "scope" in fields:
+            choice = (scope or "").strip().upper() or None
+            if choice is not None and choice not in rules.SCOPE_VALUES:
+                raise ApiError(422, "invalid_scope", f"'{choice}' is not AJG, APD or BOTH.", field="scope")
+            if choice != file.scope:
+                file.scope = choice
+                _rematch_file(session, file)
+        if "date_basis" in fields:
+            choice = (date_basis or "").strip().upper() or None
+            if choice is not None and choice not in rules.DATE_BASIS_VALUES:
+                raise ApiError(422, "invalid_date_basis", f"'{choice}' is not AED, TED or PED.", field="date_basis")
+            file.date_basis = choice
+        if "reporting_file_type" in fields:
+            choice = (reporting_file_type or "").strip().upper() or None
+            if choice is not None and choice not in rules.FILE_TYPE_VALUES:
+                raise ApiError(422, "invalid_reporting_file_type", f"'{choice}' is not INCREMENTAL or CUMULATIVE.",
+                               field="reporting_file_type")
+            file.reporting_file_type = choice
+        if "data_collection_period" in fields:
+            file.data_collection_period = rules.month_start(_parse_month(data_collection_period,
+                "data_collection_period")) if data_collection_period else None
         _evaluate(session)
     return session
 
@@ -1041,7 +1277,8 @@ def update_output(session_id: str, key: str, fields: set[str], mapping: dict[str
         _editable(output)
         if "mapping" in fields and mapping:
             known = {column["original"] for column in output.columns}
-            names = {item.name for item in required()}
+            file = session.file(output.job_id)
+            names = {item.name for item in required_for(session, file.scope)}
             for target, column in mapping.items():
                 if target not in names:
                     raise ApiError(422, "unknown_required_column", f"'{target}' is not a required column.")
@@ -1172,6 +1409,7 @@ def stage(session_id: str, keys: list[str] | None, user_name: str) -> Session:
             # Under the lock, against the control table as it is now.
             context = _read([file.file_name for file in session.files], conn)
             session.pending, session.loaded = context.pending, context.loaded
+            session.bronze_counts = context.bronze_counts
             _evaluate(session)
             waiting = [output for output in targets if output.result["verdict"] == NEEDS_INPUT]
             if waiting:
@@ -1186,6 +1424,7 @@ def stage(session_id: str, keys: list[str] | None, user_name: str) -> Session:
         with db.connection() as conn:
             context = _read([file.file_name for file in session.files], conn)
         session.pending, session.loaded = context.pending, context.loaded
+        session.bronze_counts = context.bronze_counts
     return session
 
 
@@ -1242,7 +1481,9 @@ def _stage_one(conn, session: Session, output: OutputCheck, user_name: str, comp
         "drt_reporting_end_date": result["reporting_end_date"],
         "date_detail": result["date_detail"], "file_replaced": result["file_replaced"],
         "is_active": "N" if action == rules.REJECTED else "Y",
-        "pc_id": file.pc_id, "division_name": file.division_name, "file_sha256": file.file_sha256,
+        "pc_id": file.pc_id, "division_name": file.division_name, "scope": file.scope,
+        "date_basis": file.date_basis, "reporting_file_type": file.reporting_file_type,
+        "data_collection_period": file.data_collection_period, "file_sha256": file.file_sha256,
         "job_id": output.job_id, "output_id": output.output_id, "sheet_names": list(record.sheet_names),
         "rejection_reason": " ".join(decision.reasons) if action == rules.REJECTED else None,
         "validation": Jsonb(details), "replace_month": result["replace_month"], "created_by": user_name,
@@ -1301,20 +1542,28 @@ def _save_mapping(conn, file: FileCheck, output: OutputCheck, by_original: dict,
 
 
 def _write_staging(conn, table: str, record: OutputRecord, kept: list[tuple[str, str]], result: dict) -> None:
-    """The output's kept columns as text, each row's sheet, and each row's month."""
+    """The output's kept columns as text, each row's sheet, and each row's month -- only
+    rows whose date basis column falls in the declared reporting period (the file may
+    carry extra rows outside it, for a cumulative file as much as an incremental one)."""
     from psycopg import sql
 
     schema = sql.Identifier(config.STAGING_SCHEMA)
     target = sql.Identifier(table)
-    frame = bronze_service._as_text(record)
+    basis_column = result.get("basis_column")
+    start, end = result.get("reporting_start_date"), result.get("reporting_end_date")
+    mask = None
+    if basis_column and basis_column in record.frame.columns and start and end:
+        mask = rules.in_range(rules.parse_dates(record.frame[basis_column]), start, end)
+    source = record.frame.filter(mask) if mask is not None else record.frame
+    frame = bronze_service._as_text(record, rows=mask)
     sheets = list(dict.fromkeys(record.sheet_names))
-    if SOURCE_SHEET_COLUMN in record.frame.columns:
-        sheet = record.frame[SOURCE_SHEET_COLUMN].cast(pl.String)
+    if SOURCE_SHEET_COLUMN in source.columns:
+        sheet = source[SOURCE_SHEET_COLUMN].cast(pl.String)
     else:
-        sheet = pl.Series([sheets[0] if len(sheets) == 1 else None] * record.frame.height, dtype=pl.String)
-    sheets = (SOURCE_SHEET_COLUMN, result["sheet_months"]) if result.get("sheet_months") and \
+        sheet = pl.Series([sheets[0] if len(sheets) == 1 else None] * source.height, dtype=pl.String)
+    sheet_months_arg = (SOURCE_SHEET_COLUMN, result["sheet_months"]) if result.get("sheet_months") and \
         result.get("provenance") and not result.get("date_detail") else None
-    month = rules.row_months(record.frame, result["month_column"], result["fixed_month"], sheets)
+    month = rules.row_months(source, result["month_column"], result["fixed_month"], sheet_months_arg)
     frame = frame.with_columns(sheet.alias("_source_sheet"), month.alias("_reporting_month"))
     conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
     conn.execute(sql.SQL("DROP TABLE IF EXISTS {}.{}").format(schema, target))
@@ -1338,11 +1587,18 @@ def session_out(session: Session) -> dict:
             "file_received_date": file.received, "detected_received_date": file.detected_received,
             "received_note": file.received_note, "division_name": file.division_name,
             "division_matches": file.division_matches, "division_options": division_options(session, file),
+            "scope": file.scope, "detected_scope": file.detected_scope, "scope_options": list(rules.SCOPE_VALUES),
+            "date_basis": file.date_basis, "date_basis_options": list(rules.DATE_BASIS_VALUES),
+            "reporting_file_type": file.reporting_file_type,
+            "reporting_file_type_options": list(rules.FILE_TYPE_VALUES),
+            "data_collection_period": rules.month_key(file.data_collection_period)
+                if file.data_collection_period else None,
             "warnings": file.warnings,
         })
     outputs = []
     for output in session.outputs:
         result = dict(output.result)
+        scoped = required_for(session, session.file(output.job_id).scope)
         outputs.append({
             "key": output.key, "job_id": output.job_id, "output_id": output.output_id, "name": output.name,
             "sheet_names": output.sheet_names, "rows": output.rows, "columns": output.columns,
@@ -1350,11 +1606,11 @@ def session_out(session: Session) -> dict:
             "required": [
                 {"name": item.name, "label": item.label, "date_role": item.date_role,
                  # The required columns that can stand in for this one (Silver names).
-                 "one_of": [other.name for other in required() if item.one_of and other.one_of == item.one_of
+                 "one_of": [other.name for other in scoped if item.one_of and other.one_of == item.one_of
                             and other.name != item.name],
                  "column": output.mapping.get(item.name), "vote": output.votes.get(item.name),
                  "options": output.options.get(item.name, []), "reviewer": item.name in output.reviewer}
-                for item in required()
+                for item in scoped
             ],
             "entered": bool(output.entered), "use_control_dates": output.use_control_dates,
             "choice": output.choice, "staged": output.staged,

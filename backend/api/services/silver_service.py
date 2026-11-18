@@ -5,7 +5,7 @@ Human-in-the-loop, like Ingest:
 1. ``eligible`` reads the ingestion audit table: loads that reached bronze and have no
    successful Silver run (the AHI document's rule).
 2. ``create_run`` lets every matching method vote on every bronze column (saved --
-   the business's DRT column mapping for the profit center --, exact, fuzzy, word2vec,
+   the business's DRT column mapping, the same everywhere --, exact, fuzzy, word2vec,
    the AI; independently, see ``ahi_silver.matching``), pre-selects the best-supported
    candidate and computes a dry-run quality report with the same code the load will use.
 3. The reviewer picks any candidate (or any Silver column, or Ignore) for any row, and
@@ -54,12 +54,10 @@ from ahi_silver.matching import Suggestion
 from .. import config, db
 from ..errors import ApiError, conflict, not_found
 from . import job_history, reference_service
+from .column_matching import NOT_A_COLUMN as _NOT_A_COLUMN
 from .column_matching import header_key as _header_key  # noqa: F401 - shared with the Validate step
 from .column_matching import matchers as _matchers
-from .column_matching import precedents as _precedents
-from .column_matching import same_pc as _same_pc
 from .column_matching import samples as _samples
-from .column_matching import saved_votes as _saved
 
 log = logging.getLogger("ahi.silver")
 
@@ -346,16 +344,69 @@ def _forget_frames(run: Run) -> None:
 
 
 def _mapping_rows(conn) -> list[tuple]:
-    """Every DRT column mapping row: (profit_center, pc_column, drt_column, silver_column_name),
-    in a fixed order, so the first of several rows is always the same one."""
+    """Every DRT column mapping row: (pc_column, drt_column, silver_column_name), in a
+    fixed order, so the first of several rows is always the same one. The mapping is the
+    same for every profit center."""
     from psycopg import sql
 
     if not _table_exists(conn, config.SILVER_SCHEMA, DRT_TABLE):
         return []
     return conn.execute(sql.SQL(
-        "SELECT profit_center, pc_column, drt_column, silver_column_name FROM {}.{} "
-        "ORDER BY profit_center, pc_column, silver_column_name NULLS LAST, drt_column NULLS LAST")
+        "SELECT pc_column, drt_column, silver_column_name FROM {}.{} "
+        "ORDER BY pc_column, silver_column_name NULLS LAST, drt_column NULLS LAST")
         .format(_ident(config.SILVER_SCHEMA), _ident(DRT_TABLE))).fetchall()
+
+
+def _saved(rows: list[tuple], columns: list[str], headers: dict[str, str] | None = None
+          ) -> tuple[dict[str, list[str]], set[str]]:
+    """The DRT mapping's approved targets for these bronze columns: {column: [silver, ...]},
+    and the columns whose one header got mapped twice (a real one-to-many, not two headers
+    that merely normalize alike).
+
+    The DRT mapping names a source column as the file wrote it ("Net Premium"). A bronze
+    column meets it by its own source header, exactly (spaces and case aside); a column
+    whose header is unknown (loaded before headers were kept) meets it on normalized words
+    ("net_premium"). A row naming a DRT label with no Silver column is not a decision and
+    is skipped.
+    """
+    headers = headers or {}
+    by_header: dict[str, str] = {}
+    for column in columns:
+        by_header.setdefault(_header_key(headers.get(column) or column), column)
+    by_compact = {normalize.compact(column): column for column in columns}
+    own: dict[str, list[str]] = {}
+    seen_headers: dict[str, set[str]] = {}
+    for pc_column, _drt_column, silver in rows:
+        key = normalize.compact(pc_column or "")
+        if not key or not silver:
+            continue
+        column = by_header.get(_header_key(pc_column)) or by_compact.get(key)
+        if column is None:
+            continue
+        targets = own.get(column) or []
+        if silver not in targets:
+            own[column] = targets + [silver]
+        seen_headers.setdefault(column, set()).add(_header_key(pc_column))
+    one_to_many = {column for column, targets in own.items()
+                   if len(targets) > 1 and len(seen_headers.get(column, ())) == 1}
+    return own, one_to_many
+
+
+def _precedents(rows: list[tuple]) -> list[tuple[str, str]]:
+    """Approved decisions worth showing the AI as examples: a renamed or abbreviated
+    column (Bk MGA Comm -> gross_commission_amount). A column named exactly like its
+    Silver column teaches nothing."""
+    picked: set[tuple[str, str]] = set()
+    for pc_column, _drt_column, silver in rows:
+        header = " ".join((pc_column or "").split())
+        if not header or len(header) > 40 or any(word in header.casefold() for word in _NOT_A_COLUMN):
+            continue
+        if silver is None:
+            continue  # a DRT label without a Silver column: not a decision
+        if normalize.compact(header) == normalize.compact(silver):
+            continue
+        picked.add((header, silver))
+    return sorted(picked, key=lambda pair: (pair[0].casefold(), pair[1]))
 
 
 # --- storing a review ------------------------------------------------------------
@@ -581,7 +632,7 @@ def create_run(ingestion_ids: list[str]) -> Run:
             pc, seen = _table_pc(members, source)
             if len(seen) > 1:
                 notes.append(f"{table}: loads from {', '.join(seen)}. Each row keeps its own load's profit "
-                             f"center; the approved mapping is saved for each of them.")
+                             f"center; the approved mapping applies to all of them.")
             review = TableReview(
                 table_name=table, source_system=source, pc_id=pc, pc_ids=seen,
                 loads=[Load(m[0], m[2], m[6], m[4], m[5], job_id=m[9], file_sha256=m[10],
@@ -597,7 +648,8 @@ def create_run(ingestion_ids: list[str]) -> Run:
                 own, known, one_to_many = _aggregate_saved(conn, pc, table), {}, None
                 review.lineage = [c["name"] for c in _registry(conn, table) if c.get("provenance")]
             else:
-                own, known, one_to_many = _saved(approved, seen or ([pc] if pc else []), review.columns, review.headers)
+                own, one_to_many = _saved(approved, review.columns, review.headers)
+                known = {}
             gathered.append((review, frame, own, known, one_to_many))
         links = _links(conn, pairs, {i: found[i][1] for i in ids}, {r.table_name: r for r, *_ in gathered})
         # A join approved before for these two tables is made again; the reviewer can change it.
@@ -612,8 +664,7 @@ def create_run(ingestion_ids: list[str]) -> Run:
     if not ids and not cleanup:
         raise conflict("There is nothing to load or remove.", "Select at least one bronze load.")
 
-    first_pc = gathered[0][0].pc_id if gathered else None
-    similarity, llm, matcher_notes = _matchers(_precedents(approved, first_pc))
+    similarity, llm, matcher_notes = _matchers(_precedents(approved))
     notes.extend(matcher_notes)
     tables = []
     raw = {review.table_name: frame for review, frame, *_ in gathered}
@@ -630,8 +681,8 @@ def create_run(ingestion_ids: list[str]) -> Run:
         else:
             columns = _columns(review)
             if review.join:
-                own, known, one_to_many = _saved(approved, review.pc_ids or ([review.pc_id] if review.pc_id else []),
-                                                 columns, review.headers)
+                own, one_to_many = _saved(approved, columns, review.headers)
+                known = {}
             suggestions, step_notes = matching.suggest(
                 columns, columns_catalog, own, known, _samples(frame.head(SAMPLE_ROWS), columns),
                 similarity=similarity, llm=llm, fuzzy_min=config.MATCH_FUZZY_MIN,
@@ -807,22 +858,20 @@ def update_join(run_id: str, left_table: str, right_table: str, how: str | None,
         if keeper_before is not None and keeper is None:
             # Undone: the data table maps its own columns again.
             keeper_before.suggestions = [s for s in keeper_before.suggestions if s.bronze_column in keeper_before.columns]
-    similarity, llm, _ = _matchers(_precedents(approved, left.pc_id))
+    similarity, llm, _ = _matchers(_precedents(approved))
     if keeper is not None:
         columns = _columns(keeper)
-        own, known, one_to_many = _saved(approved, keeper.pc_ids or ([keeper.pc_id] if keeper.pc_id else []), columns,
-                                         keeper.headers)
-        fresh, _ = matching.suggest(columns, catalog(), own, known, _samples(frame.head(SAMPLE_ROWS), columns),
+        own, one_to_many = _saved(approved, columns, keeper.headers)
+        fresh, _ = matching.suggest(columns, catalog(), own, {}, _samples(frame.head(SAMPLE_ROWS), columns),
                                     similarity=similarity, llm=llm, fuzzy_min=config.MATCH_FUZZY_MIN,
                                     semantic_min=config.MATCH_SEMANTIC_MIN, one_to_many=one_to_many,
                                     labels=_labels(keeper))
         decided = {s.bronze_column: s for s in keeper.suggestions if s.selection == matching.MANUAL or s.ignored}
         keeper.suggestions = [decided.get(s.bronze_column, s) for s in fresh]
     for review in undone:
-        own, known, one_to_many = _saved(approved, review.pc_ids or ([review.pc_id] if review.pc_id else []),
-                                         review.columns, review.headers)
+        own, one_to_many = _saved(approved, review.columns, review.headers)
         review.suggestions, _ = matching.suggest(
-            review.columns, catalog(), own, known, _samples(frames[review.table_name].head(SAMPLE_ROWS), review.columns),
+            review.columns, catalog(), own, {}, _samples(frames[review.table_name].head(SAMPLE_ROWS), review.columns),
             similarity=similarity, llm=llm, fuzzy_min=config.MATCH_FUZZY_MIN, semantic_min=config.MATCH_SEMANTIC_MIN,
             one_to_many=one_to_many)
     with db.connection() as conn:
@@ -1301,16 +1350,16 @@ def _current_rows(rows: list[tuple], header: str) -> list[tuple]:
     """The mapping rows that are this source column: the same header as written (spaces
     and case aside); failing that, rows whose header has the same words -- but only when
     they are all one header, so 'Agent Commission' never stands for 'Agent Commission%'."""
-    exact = [row for row in rows if _header_key(row[1]) == _header_key(header)]
+    exact = [row for row in rows if _header_key(row[0]) == _header_key(header)]
     if exact:
         return exact
-    alike = [row for row in rows if normalize.compact(row[1] or "") == normalize.compact(header)]
-    return alike if len({_header_key(row[1]) for row in alike}) == 1 else []
+    alike = [row for row in rows if normalize.compact(row[0] or "") == normalize.compact(header)]
+    return alike if len({_header_key(row[0]) for row in alike}) == 1 else []
 
 
 def _save_mapping(conn, run: Run, columns_catalog: list[SilverColumn]) -> int:
-    """Save every approved mapping into the DRT column mapping, for each profit center the
-    table's loads carry. Returns the rows added.
+    """Save every approved mapping into the DRT column mapping (the same for every profit
+    center). Returns the rows added.
 
     A source column's rows become exactly its approved targets: rows for other Silver
     columns go, missing ones are added under the header the file wrote. drt_column is the
@@ -1329,30 +1378,28 @@ def _save_mapping(conn, run: Run, columns_catalog: list[SilverColumn]) -> int:
         if review.aggregated:
             saved += _save_aggregate_mapping(conn, run, review)
             continue
-        for pc in review.pc_ids or ([review.pc_id] if review.pc_id else []):
-            mine = [row for row in _mapping_rows(conn) if _same_pc(row[0], pc) and row[3]]
-            for s in review.suggestions:
-                wanted = s.targets
-                if not wanted:
+        mine = [row for row in _mapping_rows(conn) if row[2]]
+        for s in review.suggestions:
+            wanted = s.targets
+            if not wanted:
+                continue
+            header = review.headers.get(s.bronze_column) or s.bronze_column
+            current = _current_rows(mine, header)
+            for pc_column, drt_column, silver in current:
+                if silver not in wanted:
+                    conn.execute(sql.SQL(
+                        "DELETE FROM {} WHERE pc_column = %s AND "
+                        "silver_column_name IS NOT DISTINCT FROM %s AND drt_column IS NOT DISTINCT FROM %s").format(table),
+                        [pc_column, silver, drt_column])
+            have = {row[2] for row in current}
+            written = current[0][0] if current else header
+            for target in wanted:
+                if target in have:
                     continue
-                header = review.headers.get(s.bronze_column) or s.bronze_column
-                current = _current_rows(mine, header)
-                for profit_center_code, pc_column, drt_column, silver in current:
-                    if silver not in wanted:
-                        conn.execute(sql.SQL(
-                            "DELETE FROM {} WHERE profit_center = %s AND pc_column = %s AND "
-                            "silver_column_name IS NOT DISTINCT FROM %s AND drt_column IS NOT DISTINCT FROM %s").format(table),
-                            [profit_center_code, pc_column, silver, drt_column])
-                have = {row[3] for row in current}
-                code = current[0][0] if current else pc
-                written = current[0][1] if current else header
-                for target in wanted:
-                    if target in have:
-                        continue
-                    saved += conn.execute(sql.SQL(
-                        "INSERT INTO {} (profit_center, pc_column, drt_column, silver_column_name) "
-                        "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING").format(table),
-                        [code, written, labels.get(target), target]).rowcount
+                saved += conn.execute(sql.SQL(
+                    "INSERT INTO {} (pc_column, drt_column, silver_column_name) "
+                    "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING").format(table),
+                    [written, labels.get(target), target]).rowcount
     return saved
 
 
@@ -1623,28 +1670,28 @@ def _record_failure(run: Run) -> None:
 
 
 def saved_mapping() -> list[dict]:
-    """The DRT column mapping (filled from assets/ when the database is first used)."""
+    """The DRT column mapping (filled from assets/ when the database is first used), the
+    same for every profit center."""
     from psycopg import sql
 
     with db.connection() as conn:
         if not _table_exists(conn, config.SILVER_SCHEMA, DRT_TABLE):
             return []
         rows = conn.execute(sql.SQL(
-            "SELECT profit_center, pc_column, drt_column, silver_column_name FROM {}.{} "
-            "ORDER BY profit_center, pc_column, silver_column_name NULLS LAST, drt_column NULLS LAST")
+            "SELECT pc_column, drt_column, silver_column_name FROM {}.{} "
+            "ORDER BY pc_column, silver_column_name NULLS LAST, drt_column NULLS LAST")
             .format(_ident(config.SILVER_SCHEMA), _ident(DRT_TABLE))).fetchall()
-    return [{"profit_center": r[0], "pc_column": r[1], "drt_column": r[2], "silver_column_name": r[3]} for r in rows]
+    return [{"pc_column": r[0], "drt_column": r[1], "silver_column_name": r[2]} for r in rows]
 
 
-_ONE_ROW = ("profit_center = %s AND pc_column = %s AND drt_column IS NOT DISTINCT FROM %s "
-            "AND silver_column_name IS NOT DISTINCT FROM %s")
+_ONE_ROW = "pc_column = %s AND drt_column IS NOT DISTINCT FROM %s AND silver_column_name IS NOT DISTINCT FROM %s"
 
 
-def edit_saved_mapping(profit_center_code: str, pc_column: str, drt_column: str | None, silver_column: str | None,
+def edit_saved_mapping(pc_column: str, drt_column: str | None, silver_column: str | None,
                        new_silver_column: str | None) -> dict:
     """Point one DRT mapping row at another Silver column; it applies from the next Silver
-    run. The row is found by all four of its values (a source column can have two rows,
-    and the unique index makes the four of them name exactly one). Its DRT label becomes
+    run. The row is found by all three of its values (a source column can have two rows,
+    and the unique index makes the three of them name exactly one). Its DRT label becomes
     the business's label for the new Silver column, or none."""
     from psycopg import errors, sql
 
@@ -1662,24 +1709,22 @@ def edit_saved_mapping(profit_center_code: str, pc_column: str, drt_column: str 
             updated = conn.execute(sql.SQL(
                 "UPDATE {}.{} SET silver_column_name = %s, drt_column = %s WHERE " + _ONE_ROW).format(
                     _ident(config.SILVER_SCHEMA), _ident(DRT_TABLE)),
-                [new_silver_column, drt, profit_center_code, pc_column, drt_column, silver_column]).rowcount
+                [new_silver_column, drt, pc_column, drt_column, silver_column]).rowcount
     except errors.UniqueViolation as error:
-        raise conflict(f"{pc_column} already maps to {new_silver_column} for {profit_center_code}.") from error
+        raise conflict(f"{pc_column} already maps to {new_silver_column}.") from error
     if not updated:
         raise not_found("That mapping row")
-    return {"profit_center": profit_center_code, "pc_column": pc_column, "drt_column": drt,
-            "silver_column_name": new_silver_column}
+    return {"pc_column": pc_column, "drt_column": drt, "silver_column_name": new_silver_column}
 
 
-def delete_saved_mapping(profit_center_code: str, pc_column: str, drt_column: str | None,
-                         silver_column: str | None) -> None:
-    """Remove one DRT mapping row (found by all four of its values)."""
+def delete_saved_mapping(pc_column: str, drt_column: str | None, silver_column: str | None) -> None:
+    """Remove one DRT mapping row (found by all three of its values)."""
     from psycopg import sql
 
     with db.connection() as conn:
         removed = conn.execute(sql.SQL("DELETE FROM {}.{} WHERE " + _ONE_ROW).format(
             _ident(config.SILVER_SCHEMA), _ident(DRT_TABLE)),
-            [profit_center_code, pc_column, drt_column, silver_column]).rowcount
+            [pc_column, drt_column, silver_column]).rowcount
     if not removed:
         raise not_found("That mapping row")
 

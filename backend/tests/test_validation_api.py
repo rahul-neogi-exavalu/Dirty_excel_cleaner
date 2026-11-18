@@ -37,10 +37,18 @@ def client(tmp_path_factory):
     return TestClient(app)
 
 
+# BOTH's required columns (ahi_bronze.required_column_by_scope, seeded in migrations 010/011):
+# the business's whole master list.
+BOTH_NAMES = {"premium", "producer_agency_name", "producer_commission_amount", "producer_commission_pct",
+             "gross_commission_amount", "commission_pct", "policy_number", "transaction_effective_date",
+             "accounting_effective_date", "policy_effective_date", "insurance_company_name"}
+
+
 @pytest.fixture
 def context(monkeypatch):
-    """The database's answers: one saved mapping for PC0101 (Pol_Ef_Dt is its PED), and
-    whatever each test puts in ``loaded``."""
+    """The database's answers: one saved mapping for PC0101 (Pol_Ef_Dt is its PED), PC0101
+    scoped to BOTH (so its required columns are the business's full list), and whatever each
+    test puts in ``loaded``."""
     from api import config
     from api.services import validation_service
 
@@ -48,9 +56,13 @@ def context(monkeypatch):
     monkeypatch.setattr(config, "INGEST_ENABLED", True)
     monkeypatch.setattr(config, "AI_ENABLED", False)
     monkeypatch.setattr(config, "WORD2VEC_PATH", "")
+    catalog = {item.name: item for item in validation_service.required()}
+    scope_required = {"BOTH": tuple(catalog[name] for name in [item.name for item in validation_service.required()]
+                                    if name in BOTH_NAMES)}
     found = validation_service.Context(
         divisions=[("AH Programs", "No", "0101")],
         mapping_rows=[("PC0101", "Pol_Ef_Dt", None, "policy_effective_date")],
+        scope_required=scope_required, scope_by_pc={"PC0101": "BOTH"},
     )
     monkeypatch.setattr(validation_service, "_read", lambda names, conn=None, tracker=None: found)
     return found
@@ -137,6 +149,17 @@ def _patch(client, data, output, change):
     return response.json()
 
 
+def _set_period(client, data, job_id, reporting_file_type, data_collection_period, date_basis="AED"):
+    """The file-level fields every non-aggregated file now needs before it can resolve: the
+    date basis, incremental or cumulative, and the year and month it reports."""
+    response = client.patch(f"/api/validations/{data['id']}/files/{job_id}", json={
+        "date_basis": date_basis, "reporting_file_type": reporting_file_type,
+        "data_collection_period": data_collection_period,
+    })
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def test_a_year_to_date_file_with_every_column_is_ready(client, context):
     data, output = _validate(client, "PC0101_Report_07132026.xlsx", _book(range(1, 7)))
     file = data["files"][0]
@@ -146,18 +169,27 @@ def test_a_year_to_date_file_with_every_column_is_ready(client, context):
     # The bronze column mapping (seeded from the DRT mapping) knows Pol_Ef_Dt for PC0101.
     assert _required(output, "policy_effective_date")["vote"]["method"] == "saved"
     assert _required(output, "premium")["vote"]["method"] == "exact"
+    after = _set_period(client, data, file["job_id"], "CUMULATIVE", "2026-06")
+    output = after["outputs"][0]
     assert (output["date_detail"], output["period_type"]) == ("AED", "YTD")
     assert (output["reporting_start_date"], output["reporting_end_date"]) == ("2026-01-01", "2026-06-30")
     assert output["action"] == "INSERT" and output["verdict"] == "ready" and output["fitness"] == 100
-    assert data["counts"]["ready"] == 1
+    assert after["counts"]["ready"] == 1
 
 
-def test_one_empty_aed_hands_the_dates_to_ted_and_a_non_ytd_span_is_flagged(client, context):
+def test_an_incomplete_date_basis_is_flagged_and_an_uneven_span_is_noted_not_rejected(client, context):
     data, output = _validate(client, "PC0101_Partial_07132026.xlsx", _book(range(2, 7), blank_aed=True))
     assert output["dates"]["AED"]["complete"] is False and output["dates"]["TED"]["complete"] is True
-    assert output["date_detail"] == "TED" and output["period_type"] is None
-    assert output["verdict"] == "flagged" and output["action"] == "REJECTED" and output["flag"]
-    # AED misses a row: it cannot be picked to decide the dates.
+    file = data["files"][0]
+    as_aed = _set_period(client, data, file["job_id"], "INCREMENTAL", "2026-06", date_basis="AED")["outputs"][0]
+    assert as_aed["verdict"] == "flagged" and as_aed["action"] == "REJECTED" and as_aed["flag"]
+    # TED is complete, but its actual range (Feb-Jun) is wider than one incremental month:
+    # noted as "Invalid YTD", not rejected -- the file still loads, filtered to June.
+    as_ted = _set_period(client, data, file["job_id"], "INCREMENTAL", "2026-06", date_basis="TED")["outputs"][0]
+    assert as_ted["verdict"] == "ready" and as_ted["date_detail"] == "TED" and not as_ted["flag"]
+    assert as_ted["period_type"] is None and as_ted["computed_period_type"] == "MONTHLY"
+    assert any("more than this incremental file's one month" in warning for warning in as_ted["warnings"])
+    # AED misses a row: the per-output override cannot pick it either.
     response = client.patch(f"/api/validations/{data['id']}/outputs/{output['key']}", json={"date_role": "AED"})
     assert response.status_code == 422 and response.json()["error"]["code"] == "date_role_incomplete"
 
@@ -178,55 +210,62 @@ def _dated_book(rows):
     return _save(book)
 
 
-def test_the_reviewer_picks_the_date_column_and_it_is_the_date_detail(client, context):
-    # AED runs Feb-Jun (neither YTD nor monthly), TED Jan-Jun (YTD), PED is one month of 2025.
+def test_the_reviewer_can_override_which_column_is_checked_for_this_sheet(client, context):
+    # AED runs Feb-Jun (an uneven span for an incremental file), TED Jan-Jun, PED is one
+    # month of 2025 -- only the raw scan, shown for reference; none of it decides the dates.
     rows = [(date(2026, max(month, 2), 10), date(2026, month, 5), date(2025, 7, 1)) for month in range(1, 7)]
     data, output = _validate(client, "PC0101_Picked_07132026.xlsx", _dated_book(rows))
-    assert output["date_detail"] == "AED" and output["verdict"] == "flagged"
     roles = output["date_roles"]
-    assert roles["AED"]["period_type"] is None and roles["AED"]["flag"]
+    assert roles["AED"]["period_type"] is None
     assert (roles["TED"]["start"], roles["TED"]["end"], roles["TED"]["period_type"]) == ("2026-01-01", "2026-06-30", "YTD")
     assert roles["PED"]["period_type"] == "MONTHLY"
 
-    # Picking TED: its range decides and TED is recorded, not a blank.
-    picked = _patch(client, data, output, {"date_role": "TED"})["outputs"][0]
-    assert (picked["date_detail"], picked["date_role"], picked["origin"]) == ("TED", "TED", "picked")
+    file = data["files"][0]
+    after = _set_period(client, data, file["job_id"], "CUMULATIVE", "2026-06", date_basis="TED")
+    output = after["outputs"][0]
+    assert output["date_detail"] == "TED" and output["verdict"] == "ready" and output["period_type"] == "YTD"
+    assert (output["reporting_start_date"], output["reporting_end_date"]) == ("2026-01-01", "2026-06-30")
+
+    # The per-output override picks a different column to check, without moving the
+    # file-level computed reporting dates at all.
+    picked = _patch(client, data, output, {"date_role": "PED"})["outputs"][0]
+    assert picked["date_detail"] == "PED" and picked["date_role"] == "PED"
     assert (picked["reporting_start_date"], picked["reporting_end_date"], picked["period_type"]) == (
         "2026-01-01", "2026-06-30", "YTD")
-    assert picked["verdict"] == "ready" and picked["month_column"] == _required(picked, "transaction_effective_date")["column"]
-    assert "picked by the reviewer" in _check(picked, "dates")["detail"]
+    assert "picked by the reviewer" not in _check(picked, "dates")["detail"]
 
-    # Typed dates that are TED's range: TED. Dates no column spans: blank.
-    typed = _patch(client, data, output, {"reporting_start_date": "2026-01", "reporting_end_date": "2026-06"})["outputs"][0]
-    assert (typed["date_detail"], typed["origin"], typed["date_role"]) == ("TED", "entered", None)
-    made_up = _patch(client, data, output, {"reporting_start_date": "2026-01", "reporting_end_date": "2026-05"})["outputs"][0]
-    assert made_up["date_detail"] is None and made_up["origin"] == "entered"
-    assert "no date column's range" in _check(made_up, "dates")["detail"]
+    # Typed start/end dates no longer do anything for a transactional sheet: the file-level
+    # computed range always decides.
+    typed = _patch(client, data, output, {"reporting_start_date": "2026-01", "reporting_end_date": "2026-05"})["outputs"][0]
+    assert (typed["reporting_start_date"], typed["reporting_end_date"]) == ("2026-01-01", "2026-06-30")
 
-    # Back to the priority's column.
-    _patch(client, data, output, {"reporting_start_date": None, "reporting_end_date": None})
     back = _patch(client, data, output, {"date_role": None})["outputs"][0]
-    assert back["date_detail"] == "AED" and back["origin"] == "AED"
+    assert back["date_detail"] == "TED" and back["date_role"] is None
 
 
-def test_the_reviewer_corrects_flagged_dates(client, context):
-    data, output = _validate(client, "PC0101_FebJun_07132026.xlsx", _book(range(2, 7)))
-    assert output["verdict"] == "flagged"
-    fixed = client.patch(f"/api/validations/{data['id']}/outputs/{output['key']}",
-                         json={"reporting_start_date": "2026-01", "reporting_end_date": "2026-06"}).json()["outputs"][0]
-    assert fixed["verdict"] == "ready" and fixed["period_type"] == "YTD" and fixed["date_detail"] is None
-    assert fixed["origin"] == "entered"
+def test_a_cross_year_span_is_rejected_but_cumulative_is_never_shape_checked(client, context):
+    # TED spans Dec 2025 to Jan 2026: across years.
+    rows = [(date(2025, 12, 10), date(2025, 12, 20), date(2025, 7, 1)),
+            (date(2026, 1, 10), date(2026, 1, 20), date(2025, 7, 1))]
+    data, output = _validate(client, "PC0101_CrossYear_07132026.xlsx", _dated_book(rows))
+    file = data["files"][0]
+    incremental = _set_period(client, data, file["job_id"], "INCREMENTAL", "2026-01", date_basis="TED")["outputs"][0]
+    assert incremental["verdict"] == "flagged" and "across years" in incremental["flag"]
+    # Cumulative never inspects the actual shape at all: always YTD, never flagged by it.
+    cumulative = _set_period(client, data, file["job_id"], "CUMULATIVE", "2026-01", date_basis="TED")["outputs"][0]
+    assert cumulative["verdict"] == "ready" and not cumulative["flag"] and cumulative["period_type"] == "YTD"
 
 
 def test_a_missing_required_column_rejects_the_file(client, context):
-    headers = [name for name in HEADERS if name != "Revenue"]
-    data, output = _validate(client, "PC0101_NoRevenue_07132026.xlsx", _book(range(1, 7), headers=headers))
-    assert output["missing"] == ["Revenue"] and output["verdict"] == "rejected" and output["action"] == "REJECTED"
+    headers = [name for name in HEADERS if name != "InsuranceCompany Name"]
+    data, output = _validate(client, "PC0101_NoInsuranceCompany_07132026.xlsx", _book(range(1, 7), headers=headers))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
+    assert output["missing"] == ["InsuranceCompany Name"] and output["verdict"] == "rejected" and output["action"] == "REJECTED"
     # Mapping another column to it would be the reviewer's call; clearing a found one rejects too.
     key = output["key"]
     cleared = client.patch(f"/api/validations/{data['id']}/outputs/{key}",
                            json={"mapping": {"premium": None}}).json()["outputs"][0]
-    assert set(cleared["missing"]) == {"Revenue", "Premium"}
+    assert set(cleared["missing"]) == {"InsuranceCompany Name", "Premium"}
     assert _required(cleared, "premium")["reviewer"] is True
 
 
@@ -248,6 +287,7 @@ def test_a_month_already_in_bronze_is_flagged_and_rejected(client, context):
     context.loaded = {"EXT_PC0101": [_h1()]}
     # June again, in a file of another name: the profit center in the name ties it to the H1 file.
     data, output = _validate(client, "PC0101_June_07132026.xlsx", _book([6]))
+    output = _set_period(client, data, data["files"][0]["job_id"], "INCREMENTAL", "2026-06")["outputs"][0]
     assert output["period_type"] == "MONTHLY" and output["action"] == "REJECTED"
     assert output["verdict"] == "flagged" and output["options"] == []
     assert output["reasons"][0].startswith("Jun 2026 is already loaded from PC0101_H1_07132026.xlsx")
@@ -259,13 +299,15 @@ def test_a_month_after_the_year_to_date_file_is_appended_and_its_schema_compared
     context.loaded = {"EXT_PC0101": [_h1()]}
     # July, in a file of its own name, with one column the H1 file did not have (Notes).
     data, july = _validate(client, "PC0101_July_08142026.xlsx", _book([7], headers=HEADERS + ["Notes"]))
+    july = _set_period(client, data, data["files"][0]["job_id"], "INCREMENTAL", "2026-07")["outputs"][0]
     assert july["action"] == "APPEND" and july["verdict"] == "ready"
     assert [item["file_name"] for item in july["appends_to"]] == ["PC0101_H1_07132026.xlsx"]
     schema = july["schema"]
     assert schema["against"] == "PC0101_H1_07132026.xlsx" and schema["kind"] == "evolved"
     assert schema["added"] == ["notes"] and schema["missing"] == []
     # The same columns as H1: identical.
-    _, same = _validate(client, "PC0101_July_08142026.xlsx", _book([7]))
+    data2, same = _validate(client, "PC0101_July_08142026.xlsx", _book([7]))
+    same = _set_period(client, data2, data2["files"][0]["job_id"], "INCREMENTAL", "2026-07")["outputs"][0]
     assert same["schema"]["kind"] == "identical"
 
 
@@ -315,6 +357,7 @@ def test_a_summary_the_profit_center_aggregated_is_detected_and_dated_by_its_she
     assert set(output["months"]) == {"2026-01", "2026-03"}
 
     # The reviewer may say otherwise: as transactions it misses the business's columns.
+    _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-01")
     as_rows = _patch(client, data, output, {"grain": "transaction"})["outputs"][0]
     assert as_rows["aggregated"] is False and as_rows["verdict"] == "rejected" and "PolicyNumber" in as_rows["missing"]
     back = _patch(client, data, output, {"grain": None})["outputs"][0]
@@ -343,6 +386,7 @@ def test_a_revision_names_the_loaded_file_it_replaces(client, context):
         Loaded(6, "PC0101_July_08012026.xlsx", "MONTHLY", date(2026, 7, 1), date(2026, 7, 31), rows=2, columns=14),
     ]}
     data, output = _validate(client, "PC0101_Report_07132026.xlsx", _book(range(1, 7)))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
     # The same reporting dates as a loaded file: revision, companion or reject.
     assert output["action"] == "DECIDE" and output["options"] == ["revise", "companion", "reject"]
     assert output["verdict"] == "needs_input"
@@ -375,6 +419,7 @@ def test_no_profit_center_or_received_date_needs_input(client, context):
     job = data["files"][0]["job_id"]
     after = client.patch(f"/api/validations/{data['id']}/files/{job}", json={"pc_id": "101"}).json()
     assert after["files"][0]["pc_id"] == "PC0101"
+    after = _set_period(client, data, job, "CUMULATIVE", "2026-06")
     output = after["outputs"][0]
     assert output["verdict"] == "needs_input" and "Enter the file received date." in output["needs"]
     done = client.patch(f"/api/validations/{data['id']}/files/{job}", json={"file_received_date": "2026-07-13"}).json()
@@ -386,18 +431,20 @@ def test_no_profit_center_or_received_date_needs_input(client, context):
 def test_either_column_of_a_one_of_pair_is_enough(client, context):
     # CommissionPct without GrossCommissionAmount; ProducerCommissionAmount without ProducerCommissionPct.
     headers = [name for name in HEADERS if name not in ("GrossCommissionAmount", "ProducerCommissionPct")]
-    _, output = _validate(client, "PC0101_OneOfEach_07132026.xlsx", _book(range(1, 7), headers=headers))
+    data, output = _validate(client, "PC0101_OneOfEach_07132026.xlsx", _book(range(1, 7), headers=headers))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
     assert output["missing"] == [] and output["verdict"] == "ready" and output["fitness"] == 100
     assert _required(output, "gross_commission_amount")["column"] is None
     assert _required(output, "commission_pct")["one_of"] == ["gross_commission_amount"]
     assert _required(output, "producer_commission_pct")["one_of"] == ["producer_commission_amount"]
-    assert _required(output, "revenue")["one_of"] == []
-    assert _check(output, "columns")["detail"] == "12 of 12 found"
+    assert _required(output, "premium")["one_of"] == []
+    assert _check(output, "columns")["detail"] == "9 of 9 found"
 
 
 def test_neither_column_of_a_one_of_pair_rejects_the_file(client, context):
     headers = [name for name in HEADERS if name not in ("CommissionPct", "GrossCommissionAmount")]
-    _, output = _validate(client, "PC0101_NoCommission_07132026.xlsx", _book(range(1, 7), headers=headers))
+    data, output = _validate(client, "PC0101_NoCommission_07132026.xlsx", _book(range(1, 7), headers=headers))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
     assert output["missing"] == ["CommissionPct or GrossCommissionAmount"]
     assert output["verdict"] == "rejected" and output["action"] == "REJECTED"
     assert "Missing required column: CommissionPct or GrossCommissionAmount." in output["reasons"]
@@ -405,6 +452,7 @@ def test_neither_column_of_a_one_of_pair_rejects_the_file(client, context):
 
 def test_clearing_one_column_of_a_found_pair_leaves_the_file_fit(client, context):
     data, output = _validate(client, "PC0101_Both_07132026.xlsx", _book(range(1, 7)))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
     assert output["verdict"] == "ready"
     cleared = _patch(client, data, output, {"mapping": {"commission_pct": None}})["outputs"][0]
     assert cleared["missing"] == [] and cleared["verdict"] == "ready"
@@ -413,31 +461,34 @@ def test_clearing_one_column_of_a_found_pair_leaves_the_file_fit(client, context
 
 
 def test_a_sheet_without_the_required_columns_is_left_out_and_the_valid_sheet_goes_on(client, context):
-    no_revenue = [name for name in HEADERS if name != "Revenue"]
+    no_insurance = [name for name in HEADERS if name != "InsuranceCompany Name"]
     data, _ = _validate(client, "PC0101_TwoSheets_07132026.xlsx", _sheets(
-        ("Fit", range(1, 7), HEADERS, ()), ("NoRevenue", range(1, 7), no_revenue, ())))
+        ("Fit", range(1, 7), HEADERS, ()), ("NoInsuranceCompany", range(1, 7), no_insurance, ())))
+    data = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")
     sheets = _by_sheet(data)
-    assert set(sheets) == {"Fit", "NoRevenue"}
-    left_out = sheets["NoRevenue"]
-    assert left_out["missing"] == ["Revenue"] and left_out["verdict"] == "rejected"
+    assert set(sheets) == {"Fit", "NoInsuranceCompany"}
+    left_out = sheets["NoInsuranceCompany"]
+    assert left_out["missing"] == ["InsuranceCompany Name"] and left_out["verdict"] == "rejected"
     assert any("Left out on its own" in warning for warning in left_out["warnings"])
     # The valid sheet is not dragged down with it.
     fit = sheets["Fit"]
     assert fit["missing"] == [] and fit["verdict"] == "ready" and fit["action"] == "INSERT"
     assert _check(fit, "file") == {"id": "file", "label": "Every sheet of the file", "ok": True,
-                                   "detail": "NoRevenue left out (not data)"}
+                                   "detail": "NoInsuranceCompany left out (not data)"}
     assert fit["fitness"] == 100 and data["counts"]["ready"] == 1 and data["counts"]["rejected"] == 1
-    # Mapping a column to Revenue makes that sheet fit too.
+    # Mapping a column to InsuranceCompany Name makes that sheet fit too.
     premium = next(column["original"] for column in left_out["columns"] if column["header"] == "Premium")
-    after = _by_sheet(_patch(client, data, left_out, {"mapping": {"revenue": premium}}))
-    assert {name: output["verdict"] for name, output in after.items()} == {"Fit": "ready", "NoRevenue": "ready"}
+    after = _by_sheet(_patch(client, data, left_out, {"mapping": {"insurance_company_name": premium}}))
+    assert {name: output["verdict"] for name, output in after.items()} == {"Fit": "ready", "NoInsuranceCompany": "ready"}
     assert _check(after["Fit"], "file")["detail"] == "The other 1 sheet fit"
 
 
 def test_a_data_sheet_unfit_for_another_reason_still_rejects_the_file(client, context):
-    # Both sheets carry every required column; FebJun's dates are neither YTD nor monthly.
+    # Both sheets carry every required column; FebJun's AED misses a row.
     data, _ = _validate(client, "PC0101_Flagged_07132026.xlsx", _sheets(
-        ("Fit", range(1, 7), HEADERS, ()), ("FebJun", range(2, 7), HEADERS + ["Notes"], ())))
+        ("Fit", range(1, 7), HEADERS, ()),
+        ("FebJun", range(2, 7), HEADERS + ["Notes"], ("AccountingEffectiveDate",))))
+    data = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")
     sheets = _by_sheet(data)
     assert sheets["FebJun"]["verdict"] == "flagged" and sheets["FebJun"]["missing"] == []
     fit = sheets["Fit"]
@@ -450,17 +501,22 @@ def test_a_data_sheet_unfit_for_another_reason_still_rejects_the_file(client, co
 def test_a_sheet_waiting_for_the_reviewer_holds_the_file_back(client, context):
     data, _ = _validate(client, "PC0101_Undated_07132026.xlsx", _sheets(
         ("Fit", range(1, 7), HEADERS, ()), ("Undated", range(1, 7), HEADERS + ["Notes"], DATES)))
+    job = data["files"][0]["job_id"]
+    data = _set_period(client, data, job, "CUMULATIVE", "2026-06")
     sheets = _by_sheet(data)
-    assert sheets["Undated"]["verdict"] == "needs_input" and sheets["Undated"]["reporting_start_date"] is None
-    fit = sheets["Fit"]
+    # Forced aggregated, with no sheet name or file name month and no date column populated
+    # on every row: its dates stay unresolved, unlike "Fit"'s file-level computed ones.
+    after = _by_sheet(_patch(client, data, sheets["Undated"], {"grain": "aggregate"}))
+    assert after["Undated"]["verdict"] == "needs_input" and after["Undated"]["reporting_start_date"] is None
+    fit = after["Fit"]
     assert fit["verdict"] == "needs_input" and fit["action"] == "INSERT"
     assert fit["needs"] == ["Finish Undated first: a file's sheets are staged together."]
     assert _check(fit, "file")["detail"] == "Waiting on Undated"
-    after = _by_sheet(_patch(client, data, sheets["Undated"],
-                             {"reporting_start_date": "2026-01", "reporting_end_date": "2026-06"}))
-    assert after["Fit"]["verdict"] == "ready" and after["Undated"]["verdict"] == "ready"
+    resolved = _by_sheet(_patch(client, data, after["Undated"],
+                                {"reporting_start_date": "2026-01", "reporting_end_date": "2026-06"}))
+    assert resolved["Fit"]["verdict"] == "ready" and resolved["Undated"]["verdict"] == "ready"
     # The reviewer rejecting one sheet rejects the other.
-    rejected = _by_sheet(_patch(client, data, after["Fit"], {"choice": "reject"}))
+    rejected = _by_sheet(_patch(client, data, resolved["Fit"], {"choice": "reject"}))
     assert rejected["Fit"]["reasons"] == ["Rejected by the reviewer."]
     assert rejected["Undated"]["verdict"] == "rejected" and "Fit (Rejected by the reviewer)" in rejected["Undated"]["reasons"][0]
     assert any("so are the file's other 1 sheet" in warning for warning in rejected["Fit"]["warnings"])
@@ -490,6 +546,7 @@ def test_staging_one_sheet_stages_the_whole_file(client, context, monkeypatch):
     monkeypatch.setattr(validation_service, "_stage_one", stage_one)
     data, _ = _validate(client, "PC0101_Both_07132026.xlsx", _sheets(
         ("Jan", range(1, 7), HEADERS, ()), ("Feb", range(1, 7), HEADERS + ["Notes"], ())))
+    data = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")
     keys = [output["key"] for output in data["outputs"]]
     assert len(keys) == 2
     response = client.post(f"/api/validations/{data['id']}/stage", json={"keys": keys[:1]})
@@ -506,20 +563,20 @@ BROKERS = [("Brown & Brown", "Market A", "East"), ("Acme", "Market B", "West"), 
 
 
 def _broker_list(rows=BROKERS):
-    """A broker list: who each broker is, and the market provider the data file lacks."""
+    """A broker list: who each broker is, and the insurance company the data file lacks."""
     book = openpyxl.Workbook()
     sheet = book.active
     sheet.title = "Brokers"
-    sheet.append(["Account_Name", "MarketProvider", "Region", "Agents"])
+    sheet.append(["Account_Name", "InsuranceCompany Name", "Region", "Agents"])
     for index, row in enumerate(rows, 1):
         sheet.append(list(row) + [index * 3])
     return _save(book)
 
 
 def _pair(client):
-    """PC0101's transactions (no MarketProvider, a Producer_name instead) and its broker
-    list, received together on 8 Aug 2026, validated in one batch."""
-    headers = [name for name in HEADERS if name != "MarketProvider"]
+    """PC0101's transactions (no InsuranceCompany Name, a Producer_name instead) and its
+    broker list, received together on 8 Aug 2026, validated in one batch."""
+    headers = [name for name in HEADERS if name != "InsuranceCompany Name"]
     data = validate(client, [_clean(client, "PC0101_Transactional_08082026.xlsx", _book(range(1, 7), headers=headers)),
                              _clean(client, "PC0101_BrokerList_08082026.xlsx", _broker_list())])
     by_file = {file["job_id"]: file["file_name"] for file in data["files"]}
@@ -529,8 +586,13 @@ def _pair(client):
 
 def test_a_list_that_came_with_the_data_is_its_companion(client, context):
     data, transactions, brokers = _pair(client)
+    by_file = {file["file_name"]: file["job_id"] for file in data["files"]}
+    _set_period(client, data, by_file["PC0101_Transactional_08082026.xlsx"], "CUMULATIVE", "2026-06")
+    after = _set_period(client, data, by_file["PC0101_BrokerList_08082026.xlsx"], "CUMULATIVE", "2026-06")
+    outputs = {output["key"]: output for output in after["outputs"]}
+    transactions, brokers = outputs[transactions["key"]], outputs[brokers["key"]]
     # On their own each lacks a required column; the broker list may be the other's companion.
-    assert transactions["missing"] == ["MarketProvider"] and transactions["verdict"] == "rejected"
+    assert transactions["missing"] == ["InsuranceCompany Name"] and transactions["verdict"] == "rejected"
     assert brokers["verdict"] == "rejected" and brokers["options"] == ["companion"]
     assert [partner["ref"] for partner in brokers["partners"]] == [transactions["key"]]
     assert brokers["partners"][0]["file_name"] == "PC0101_Transactional_08082026.xlsx"
@@ -543,7 +605,7 @@ def test_a_list_that_came_with_the_data_is_its_companion(client, context):
     after = _patch(client, data, brokers, {"choice": "companion", "companion_of": transactions["key"]})
     outputs = {output["key"]: output for output in after["outputs"]}
     brokers, transactions = outputs[brokers["key"]], outputs[transactions["key"]]
-    # Checked together: the broker list carries MarketProvider, so the pair is fit.
+    # Checked together: the broker list carries InsuranceCompany Name, so the pair is fit.
     assert transactions["missing"] == [] and transactions["verdict"] == "ready" and transactions["action"] == "INSERT"
     assert transactions["companions"] == ["PC0101_BrokerList_08082026.xlsx"]
     assert transactions["pair"] == "PC0101_Transactional_08082026.xlsx + PC0101_BrokerList_08082026.xlsx"
@@ -579,6 +641,7 @@ def test_a_companion_is_staged_with_the_file_it_came_with(client, context, monke
                 "processing_action": output.decision.action, "seeded": False}
 
     data, transactions, brokers = _pair(client)
+    _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")
     _patch(client, data, brokers, {"choice": "companion", "companion_of": transactions["key"]})
     monkeypatch.setattr(validation_service.db, "connection", connection)
     monkeypatch.setattr(validation_service, "_stage_one", stage_one)

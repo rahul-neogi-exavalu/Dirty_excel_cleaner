@@ -270,6 +270,14 @@ class ValidationFileUpdate(BaseModel):
     pc_id: str | None = None
     file_received_date: str | None = None
     division_name: str | None = None
+    # AJG | APD | BOTH: which required columns apply to this file.
+    scope: str | None = None
+    # AED | TED | PED: the date column rows are filtered by, before loading.
+    date_basis: str | None = None
+    # INCREMENTAL | CUMULATIVE.
+    reporting_file_type: str | None = None
+    # YYYY-MM: the year and month this file reports.
+    data_collection_period: str | None = None
 
 
 class ValidationOutputUpdate(BaseModel):

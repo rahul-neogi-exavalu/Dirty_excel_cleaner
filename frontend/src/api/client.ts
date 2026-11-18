@@ -251,7 +251,8 @@ export const api = {
   updateValidationFile: (
     id: string,
     jobId: string,
-    change: { pc_id?: string | null; file_received_date?: string | null; division_name?: string | null },
+    change: { pc_id?: string | null; file_received_date?: string | null; division_name?: string | null; scope?: string | null;
+      date_basis?: string | null; reporting_file_type?: string | null; data_collection_period?: string | null },
   ) => request<Validation>(`/api/validations/${id}/files/${jobId}`, { method: "PATCH", body: JSON.stringify(change) }),
   updateValidationOutput: (
     id: string,

@@ -492,6 +492,18 @@ export interface ValidationFile {
   division_name: string | null;
   division_matches: string[];
   division_options: string[];
+  /** AJG | APD | BOTH: which required columns apply to this file. */
+  scope: string | null;
+  detected_scope: string | null;
+  scope_options: string[];
+  /** AED | TED | PED: always a manual pick. */
+  date_basis: string | null;
+  date_basis_options: string[];
+  /** INCREMENTAL | CUMULATIVE. */
+  reporting_file_type: string | null;
+  reporting_file_type_options: string[];
+  /** YYYY-MM. */
+  data_collection_period: string | null;
   warnings: string[];
 }
 
@@ -935,10 +947,9 @@ export interface SilverRun {
   links: SilverLink[];
 }
 
-/** A row of the business's DRT column mapping. One source column can have two rows. */
+/** A row of the business's DRT column mapping, the same for every profit center. One
+ * source column can have two rows. */
 export interface DrtMapping {
-  /** PC0077 */
-  profit_center: string;
   /** The source column as the file writes it. */
   pc_column: string;
   /** The business's DRT label for the Silver column; null when the business has none for it. */
