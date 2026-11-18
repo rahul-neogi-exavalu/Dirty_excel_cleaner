@@ -4,9 +4,8 @@
 |------------------------------------|-------------------------------------|----------------------------------------|
 | ``<control>.division_mapping``     | division_table_details.xlsx         | bronze ``division_name`` by profit center |
 | ``<control>.lotl``                 | pc_name_pc_number_from_lotl.xlsx    | Silver profit center name / number     |
-| ``<silver>.drt_column_mapping``    | drt_column_mapping.xlsx             | the approved column mapping            |
+| ``<silver>.drt_column_mapping``    | drt_column_mapping.xlsx             | the approved column mapping (global, not per PC) |
 | ``<control>.drt_label``            | drt_column_mapping.xlsx (DRT_Column)| the DRT labels the business uses       |
-| ``<bronze>.bronze_column_mapping`` | (the DRT mapping's required columns)| which file column is which required one|
 | ``<control>.control_table``        | control_table 1.xlsx                | the files Bronze has received          |
 
 A table is filled from its workbook only while it is empty, so rows added or changed
@@ -36,10 +35,11 @@ DRT_FILE = "drt_column_mapping.xlsx"
 
 DIVISION_COLUMNS = ("division", "international_office", "profit_center")
 LOTL_COLUMNS = ("profit_center_number", "legacy_office_name", "status")
-DRT_COLUMNS = ("profit_center", "pc_column", "drt_column", "silver_column_name")
+DRT_COLUMNS = ("pc_column", "drt_column", "silver_column_name")
 DRT_TABLE = "drt_column_mapping"
 LABEL_TABLE = "drt_label"
 MAPPING_TABLE = "bronze_column_mapping"
+SCOPE_TABLE = "required_column_by_scope"
 CONTROL_FILE = "control_table 1.xlsx"
 CONTROL_TABLE = "control_table"
 # The workbook's columns, in its order: the control table starts with these, sheet_name
@@ -111,13 +111,15 @@ def lotl_rows_from_file() -> list[tuple]:
 
 
 def drt_rows_from_file(columns_catalog) -> list[tuple]:
-    """(profit_center, pc_column, drt_column, silver_column_name), the last derived from
-    the DRT label through the Silver catalog ('InsuranceCompany Name' -> insurance_company_name)."""
+    """(pc_column, drt_column, silver_column_name), the last derived from the DRT label
+    through the Silver catalog ('InsuranceCompany Name' -> insurance_company_name). The
+    workbook also carries a profit_center column; the mapping no longer varies by PC, so
+    it is ignored (rows that only differed by it collapse into one)."""
     from ahi_silver.catalog import silver_name_for_drt
 
     rows = []
-    for profit_center, pc_column, drt_column in read_workbook(DRT_FILE, 3, keep_text=True):
-        rows.append((profit_center.strip() if profit_center else None, pc_column, drt_column.strip() if drt_column else None,
+    for _profit_center, pc_column, drt_column in read_workbook(DRT_FILE, 3, keep_text=True):
+        rows.append((pc_column, drt_column.strip() if drt_column else None,
                      silver_name_for_drt(drt_column, columns_catalog)))
     return rows
 
@@ -191,46 +193,13 @@ def seed_silver(conn, columns_catalog, replace: bool = False) -> dict[str, int]:
             if cleared:
                 log.info("DRT column mapping: %s label(s) the business does not use were cleared", cleared)
     if replace or _empty(conn, config.SILVER_SCHEMA, DRT_TABLE):
-        rows = [row for row in drt_rows_from_file(columns_catalog) if row[0] and row[1]]
-        # The workbook repeats a few rows exactly; the unique index would refuse them.
+        rows = [row for row in drt_rows_from_file(columns_catalog) if row[0]]
+        # The workbook repeats a row per profit center; now that the mapping is global,
+        # those collapse into one, and the unique index would refuse any left over.
         rows = list(dict.fromkeys(rows))
         if rows:
             loaded[f"{config.SILVER_SCHEMA}.{DRT_TABLE}"] = _insert(
                 conn, config.SILVER_SCHEMA, DRT_TABLE, DRT_COLUMNS, rows, replace)
-    if loaded:
-        log.info("Reference data loaded: %s", loaded)
-    return loaded
-
-
-def required_names() -> list[str]:
-    """The Silver names of the columns every file must carry to reach Bronze."""
-    from ahi_bronze.validation import load_required
-
-    return [item.name for item in load_required(config.BRONZE_REQUIRED_COLUMNS_FILE)]
-
-
-def seed_bronze_mapping(conn, replace: bool = False) -> dict[str, int]:
-    """Fill the bronze column mapping from the DRT mapping's rows for the required columns.
-
-    Only while the table is empty, unless ``replace``, which reloads the DRT rows and keeps
-    every mapping the app added since.
-    """
-    from psycopg import sql
-
-    target = sql.SQL("{}.{}").format(_ident(config.BRONZE_SCHEMA), _ident(MAPPING_TABLE))
-    if not (replace or _empty(conn, config.BRONZE_SCHEMA, MAPPING_TABLE)):
-        return {}
-    if conn.execute("SELECT to_regclass(%s)", [f'"{config.SILVER_SCHEMA}"."{DRT_TABLE}"']).fetchone()[0] is None:
-        return {}
-    if replace:
-        conn.execute(sql.SQL("DELETE FROM {} WHERE method = 'drt'").format(target))
-    added = conn.execute(sql.SQL(
-        "INSERT INTO {} (profit_center, file_columns, silver_column_name, method) "
-        "SELECT DISTINCT profit_center, pc_column, silver_column_name, 'drt' FROM {}.{} "
-        "WHERE silver_column_name = ANY(%s) AND profit_center IS NOT NULL AND pc_column IS NOT NULL "
-        "ON CONFLICT DO NOTHING").format(target, _ident(config.SILVER_SCHEMA), _ident(DRT_TABLE)),
-        [required_names()]).rowcount
-    loaded = {f"{config.BRONZE_SCHEMA}.{MAPPING_TABLE}": added} if added else {}
     if loaded:
         log.info("Reference data loaded: %s", loaded)
     return loaded
@@ -348,7 +317,7 @@ def sync_drt_columns(conn, columns_catalog) -> dict[str, int]:
     # Rows without a DRT column: their Silver column's (a twin that already has it wins).
     conn.execute(sql.SQL(
         "DELETE FROM {m} a USING {l} l, {m} b WHERE a.drt_column IS NULL AND l.silver_column_name = a.silver_column_name "
-        "AND b.profit_center = a.profit_center AND b.pc_column = a.pc_column "
+        "AND b.pc_column = a.pc_column "
         "AND b.silver_column_name = a.silver_column_name AND b.drt_column = l.label").format(m=mapping, l=labels))
     labelled = conn.execute(sql.SQL(
         "UPDATE {m} m SET drt_column = l.label FROM {l} l "
@@ -357,7 +326,7 @@ def sync_drt_columns(conn, columns_catalog) -> dict[str, int]:
     same = sql.SQL("regexp_replace(lower({}), '[^a-z0-9]', '', 'g') = regexp_replace(lower({}), '[^a-z0-9]', '', 'g')")
     conn.execute(sql.SQL(
         "DELETE FROM {m} a USING {l} l, {m} b WHERE a.silver_column_name IS NULL AND l.silver_column_name IS NOT NULL "
-        "AND {match} AND b.profit_center = a.profit_center AND b.pc_column = a.pc_column "
+        "AND {match} AND b.pc_column = a.pc_column "
         "AND b.drt_column IS NOT DISTINCT FROM a.drt_column AND b.silver_column_name = l.silver_column_name").format(
             m=mapping, l=labels, match=same.format(sql.SQL("a.drt_column"), sql.SQL("l.label"))))
     resolved = conn.execute(sql.SQL(
@@ -426,7 +395,7 @@ def clear_unknown_labels(conn) -> int:
     # A twin with no label or the business's label is kept; of two unknown-label twins, the first.
     conn.execute(sql.SQL(
         "DELETE FROM {t} a USING {t} b WHERE a.drt_column = ANY(%s) AND a.ctid <> b.ctid "
-        "AND a.profit_center = b.profit_center AND a.pc_column = b.pc_column "
+        "AND a.pc_column = b.pc_column "
         "AND a.silver_column_name IS NOT DISTINCT FROM b.silver_column_name "
         "AND (b.drt_column IS NULL OR NOT (b.drt_column = ANY(%s)) OR b.ctid < a.ctid)").format(t=table),
         [unknown, unknown])
@@ -440,6 +409,31 @@ def divisions(conn) -> list[tuple]:
 
     return conn.execute(sql.SQL("SELECT division, international_office, profit_center FROM {}.division_mapping")
                         .format(_ident(config.CONTROL_SCHEMA))).fetchall()
+
+
+def scope_column_names(conn) -> dict[str, set[str]]:
+    """Every scope (AJG / APD / BOTH) -> the silver_column_name rows required for it."""
+    from psycopg import sql
+
+    names: dict[str, set[str]] = {}
+    for scope, name in conn.execute(sql.SQL("SELECT scope, silver_column_name FROM {}.{}")
+                                    .format(_ident(config.BRONZE_SCHEMA), _ident(SCOPE_TABLE))):
+        names.setdefault(scope, set()).add(name)
+    return names
+
+
+def scope_by_pc(conn) -> dict[str, str]:
+    """Each profit center's scope, from its most recent control-table row that has one."""
+    from psycopg import sql
+
+    table = sql.SQL("{}.{}").format(_ident(config.CONTROL_SCHEMA), _ident(CONTROL_TABLE))
+    rows = conn.execute(sql.SQL(
+        "SELECT pc_id, scope FROM {} WHERE scope IS NOT NULL AND pc_id IS NOT NULL ORDER BY control_id DESC")
+        .format(table))
+    found: dict[str, str] = {}
+    for pc_id, scope in rows:
+        found.setdefault(pc_id, scope)
+    return found
 
 
 def lotl(conn) -> list[tuple]:

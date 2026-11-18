@@ -71,7 +71,7 @@ def saved_votes(rows: list[tuple], pcs: list[str], columns: list[str],
 
 # Notes the business keeps in the mapping's source-column field ("check comments",
 # "08/05: Sara suggested ...") are not column names: never shown to the AI as examples.
-_NOT_A_COLUMN = ("comment", "disregard", "sara", "check ", "suggested", "backfill", "(tab", "data profile")
+NOT_A_COLUMN = ("comment", "disregard", "sara", "check ", "suggested", "backfill", "(tab", "data profile")
 
 
 def precedents(rows: list[tuple], pc: str | None = None) -> list[tuple[str, str]]:
@@ -81,7 +81,7 @@ def precedents(rows: list[tuple], pc: str | None = None) -> list[tuple[str, str]
     picked: dict[tuple[str, str], bool] = {}
     for profit_center_code, pc_column, _drt_column, silver in rows:
         header = " ".join((pc_column or "").split())
-        if not header or len(header) > 40 or any(word in header.casefold() for word in _NOT_A_COLUMN):
+        if not header or len(header) > 40 or any(word in header.casefold() for word in NOT_A_COLUMN):
             continue
         if silver is None:
             continue  # a DRT label without a Silver column: not a decision

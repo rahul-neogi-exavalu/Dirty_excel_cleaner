@@ -2,7 +2,6 @@ import clsx from "clsx";
 import {
   ArrowRight,
   BookCheck,
-  Building2,
   Check,
   Columns3,
   Database,
@@ -1155,7 +1154,6 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
   const toast = useToast();
   const [rows, setRows] = useState<DrtMapping[] | null>(null);
   const [query, setQuery] = useState("");
-  const [profitCenter, setProfitCenter] = useState(ALL);
   const load = useCallback(() => {
     setRows(null);
     api.silverMapping().then(setRows).catch((err) => toast({ severity: "error", title: toError(err).body.message }));
@@ -1165,21 +1163,10 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
     () => targetsOf(catalog).map((column) => ({ value: column.name, label: column.name, description: `${column.drt_name} · ${column.data_type}` })),
     [catalog],
   );
-  const centers = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const row of rows ?? []) counts.set(row.profit_center, (counts.get(row.profit_center) ?? 0) + 1);
-    return [
-      { value: ALL, label: "All profit centers", description: plural(rows?.length ?? 0, "row") },
-      ...[...counts.entries()].map(([value, count]) => ({ value, label: value, description: plural(count, "row") })),
-    ];
-  }, [rows]);
   const needle = query.trim().toLowerCase();
   const visible = useMemo(() => (rows ?? []).filter(
-    (row) =>
-      (profitCenter === ALL || row.profit_center === profitCenter) &&
-      (!needle || [row.profit_center, row.pc_column, row.drt_column ?? "", row.silver_column_name ?? ""].some((v) => v.toLowerCase().includes(needle))),
-  ), [rows, profitCenter, needle]);
-  const centerCount = useMemo(() => new Set(visible.map((row) => row.profit_center)).size, [visible]);
+    (row) => !needle || [row.pc_column, row.drt_column ?? "", row.silver_column_name ?? ""].some((v) => v.toLowerCase().includes(needle)),
+  ), [rows, needle]);
 
   if (!rows) return <div className="card space-y-2 p-6"><Skeleton className="h-10" /><Skeleton className="h-10" /></div>;
   if (!rows.length) return <div className="card"><EmptyState icon={<BookCheck />} title="No mappings" description="Add drt_column_mapping.xlsx to assets/." /></div>;
@@ -1208,51 +1195,46 @@ function MappingView({ catalog }: { catalog: SilverCatalog }) {
     <SectionCard
       icon={<BookCheck />}
       title="Mapping"
-      description="DRT column mapping by profit center."
-      actions={
-        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <Select<string> label="Profit center" hideLabel value={profitCenter} options={centers} onChange={setProfitCenter} icon={<Building2 className="h-4 w-4" />} className="sm:w-56" />
-          <SearchInput value={query} onChange={setQuery} placeholder="Search" label="Search mappings" className="sm:w-56" />
-        </div>
-      }
+      description="DRT column mapping, the same for every profit center."
+      actions={<SearchInput value={query} onChange={setQuery} placeholder="Search" label="Search mappings" className="sm:w-56" />}
     >
       <p className="mb-3 text-caption text-ink-500">
-        {plural(visible.length, "mapping")} across {plural(centerCount, "profit center")}: each source column under the Silver column it fills.
+        {plural(visible.length, "mapping")}: each source column under the Silver column it fills.
       </p>
       {visible.length ? (
         <PagedBands
           items={visible}
-          keyOf={(row) => `${row.profit_center}|${row.pc_column}|${row.silver_column_name}|${row.drt_column}`}
+          keyOf={(row) => `${row.pc_column}|${row.silver_column_name}|${row.drt_column}`}
           caption="DRT column mapping"
           noun="mapping"
-          reset={`${profitCenter}|${needle}`}
+          reset={needle}
           bottomLabel="Source column"
           attention={(row) => !row.silver_column_name}
           width={(row, measure) => Math.max(
             measure(row.silver_column_name ?? "Not resolved", "value") + SELECT_CHROME,
             measure(row.pc_column, "name") + 4 + 28,
-            measure(`${row.profit_center} · ${row.drt_column ? `DRT: ${row.drt_column}` : "No DRT column"}`, "caption"),
+            measure(row.drt_column ? `DRT: ${row.drt_column}` : "No DRT column", "caption"),
           )}
           top={(row) => (
             <Select<string> value={row.silver_column_name} options={options} onChange={(value) => save(row, value)}
-              label={`Silver column for ${row.pc_column} (${row.profit_center})`} hideLabel placeholder="Not resolved" width={300} className="w-full" />
+              label={`Silver column for ${row.pc_column}`} hideLabel placeholder="Not resolved" width={300} className="w-full" />
           )}
           bottom={(row) => (
             <div className="flex min-w-0 items-start gap-1">
               <div className="min-w-0 flex-1">
                 <p className="truncate font-mono text-[12.5px] font-semibold leading-5 text-ink-900">{row.pc_column}</p>
                 <p className="mt-1 truncate text-caption leading-4 text-ink-500">
-                  <span className="font-mono">{row.profit_center}</span> · {row.drt_column ? `DRT: ${row.drt_column}` : "No DRT column"}
+                  {row.drt_column ? `DRT: ${row.drt_column}` : "No DRT column"}
                 </p>
               </div>
-              <IconButton label={`Remove the mapping of ${row.pc_column} for ${row.profit_center}`} className="!h-7 !w-7 shrink-0" onClick={() => remove(row)}>
+              <IconButton label={`Remove the mapping of ${row.pc_column}`} className="!h-7 !w-7 shrink-0" onClick={() => remove(row)}>
                 <Trash2 />
               </IconButton>
             </div>
           )}
         />
       ) : (
-        <EmptyState compact icon={<BookCheck />} title="No matching mappings" description="Try another profit center or search." />
+        <EmptyState compact icon={<BookCheck />} title="No matching mappings" description="Try another search." />
       )}
     </SectionCard>
   );

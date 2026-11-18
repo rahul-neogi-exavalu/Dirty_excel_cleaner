@@ -57,8 +57,6 @@ def pool():
                     reference_service.seed_silver(conn, silver_service.catalog())
                     # Every DRT column of the Silver schema, and the mapping rows' DRT columns.
                     reference_service.sync_drt_columns(conn, silver_service.catalog())
-                    # After the DRT mapping, which seeds the bronze mapping.
-                    reference_service.seed_bronze_mapping(conn)
                     reference_service.seed_control_table(conn)
                     # Bronze tables made before file_received_date and the reporting dates.
                     bronze_service.upgrade_tables(conn)
