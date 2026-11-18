@@ -26,14 +26,14 @@ python -m ahi_clean <inputs> [options]
 | Goal | Command |
 |---|---|
 | Clean the sample folder | `python clean.py` |
-| Clean one file | `python clean.py "Test_data/2026 07 JUL/PC0152_Carrier Totals by Month Jan-July 2026_08132026.xlsx"` |
-| Clean a folder | `python clean.py "Test_data/2026 07 JUL"` |
-| Clean a folder tree | `python clean.py Test_data -r` |
+| Clean one file | `python clean.py inbox/report.xlsx` |
+| Clean a folder | `python clean.py inbox` |
+| Clean a folder tree | `python clean.py inbox -r` |
 | Glob pattern | `python clean.py "inbox/*.xlsx" "inbox/*.csv"` |
-| Skip files by name | `python clean.py Test_data -r --exclude "*donotingest*"` |
+| Skip files by name | `python clean.py inbox -r --exclude "*draft*"` |
 | Only some sheets | `python clean.py book.xlsx --sheet "July" --sheet "August"` |
 | Never append tables | `python clean.py book.xlsx --no-append` |
-| See decisions, write nothing | `python clean.py Test_data -r --dry-run` |
+| See decisions, write nothing | `python clean.py inbox -r --dry-run` |
 | Choose output folders | `python clean.py inbox --out cleaned --audit audit` |
 | Parallel, one worker per CPU | `python clean.py inbox --workers 0` |
 | Large files in processes | `python clean.py big/ --workers 4 --executor process` |
@@ -85,7 +85,7 @@ python -m pytest
 ```
 
 ```bash
-python backend/tools/snapshot_sheets.py snap Test_data/2026\ 07\ JUL before.json
+python backend/tools/snapshot_sheets.py snap inbox before.json
 ```
 
 ```bash
