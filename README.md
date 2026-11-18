@@ -21,12 +21,12 @@ you that workbook and nothing else.
 
 ## Run
 
-**Integrating the cleaner into another workflow?** It is released as a standalone,
-pip-installable package in the private org repository
-[exavalu-solutions/ahi_cleaner](https://github.com/exavalu-solutions/ahi_cleaner), with its
-own CLI reference and integration guide. This repository stays the source of truth: change
-`backend/src/ahi_clean` here, then sync and tag a release there (see its README, "For
-maintainers").
+**Integrating the cleaner into another workflow?** Use the standalone package `ahi-clean`
+in the private org repository
+[exavalu-solutions/ahi_cleaner](https://github.com/exavalu-solutions/ahi_cleaner). It is
+developed, tested and released there (a versioned tag per change), with its own CLI
+reference and integration guide. `backend/src/ahi_clean` in this repository is this app's
+own copy and is **not** kept in sync with it.
 
 ```bash
 pip install -r requirements.txt
