@@ -68,7 +68,6 @@ class StagedFile:
     date_detail: str | None
     processing_action: str
     file_replaced: str | None
-    replace_month: str | None
     file_sha256: str
     sheet_names: list[str]
     staging_table: str
@@ -82,9 +81,10 @@ class StagedFile:
     rows: int = 0
     output_name: str | None = None
     fitness: int | None = None
-    # Ingestions the control decision replaces (whole), and those it replaces a month of.
+    # Ingestions the control decision replaces (whole), and -- month (YYYY-MM) -> the
+    # ingestions it replaces that month of (an incremental file's opted-in earlier months).
     replaces_ids: tuple[str, ...] = ()
-    month_replace_ids: tuple[str, ...] = ()
+    replace_months: dict[str, tuple[str, ...]] = field(default_factory=dict)
     # The profit center's own aggregates (an _agg table), not transactions.
     is_aggregated: bool = False
     # Ingestions this file continues (the months it is appended after, the file it
@@ -255,7 +255,7 @@ def upgrade_tables(conn) -> list[str]:
 
 _STAGED_FIELDS = ("control_id", "file_name", "source_system", "pc_id", "division_name", "file_received_date",
                   "drt_reporting_start_date", "drt_reporting_end_date", "reporting_period_type", "date_detail",
-                  "processing_action", "file_replaced", "replace_month", "file_sha256", "sheet_names",
+                  "processing_action", "file_replaced", "file_sha256", "sheet_names",
                   "staging_table", "job_id", "output_id", "staged_at", "validation", "companion_of", "is_aggregated")
 
 
@@ -276,6 +276,8 @@ def _staged(conn, control_ids: list[int] | None) -> list[StagedFile]:
     wanted = {cid for row in files for cid in ((row["validation"] or {}).get("replaces", [])
                                                 + (row["validation"] or {}).get("overlaps", [])
                                                 + (row["validation"] or {}).get("appends_to", [])
+                                                + [cid for ids in (row["validation"] or {}).get("replace_months", {}).values()
+                                                   for cid in ids]
                                                 + ([row["companion_of"]] if row["companion_of"] else []))}
     ingestion = dict(conn.execute(sql.SQL("SELECT control_id, ingestion_id FROM {} WHERE control_id = ANY(%s) "
                                           "AND ingestion_id IS NOT NULL").format(_control()),
@@ -284,22 +286,23 @@ def _staged(conn, control_ids: list[int] | None) -> list[StagedFile]:
     for row in files:
         details = row.pop("validation") or {}
         replaces = tuple(ingestion[cid] for cid in details.get("replaces", []) if cid in ingestion)
-        overlaps = tuple(ingestion[cid] for cid in details.get("overlaps", []) if cid in ingestion)
         appends = tuple(ingestion[cid] for cid in details.get("appends_to", []) if cid in ingestion)
+        replace_months = {month: tuple(ingestion[cid] for cid in ids if cid in ingestion)
+                         for month, ids in (details.get("replace_months") or {}).items()}
         staged.append(StagedFile(
             control_id=row["control_id"], file_name=row["file_name"], source_system=row["source_system"],
             pc_id=row["pc_id"], division_name=row["division_name"], file_received_date=row["file_received_date"],
             reporting_start_date=row["drt_reporting_start_date"], reporting_end_date=row["drt_reporting_end_date"],
             reporting_period_type=row["reporting_period_type"], date_detail=row["date_detail"],
             processing_action=row["processing_action"], file_replaced=row["file_replaced"],
-            replace_month=row["replace_month"], file_sha256=row["file_sha256"] or f"control-{row['control_id']}",
+            file_sha256=row["file_sha256"] or f"control-{row['control_id']}",
             sheet_names=list(row["sheet_names"] or []), staging_table=row["staging_table"], job_id=row["job_id"],
             output_id=row["output_id"], staged_at=row["staged_at"].timestamp() if row["staged_at"] else None,
             columns=list(details.get("columns") or []), provenance=details.get("provenance"),
             regions=list(details.get("regions") or []), rows=int(details.get("rows") or 0),
             output_name=details.get("output_name"), fitness=details.get("fitness"),
             replaces_ids=replaces if row["processing_action"] == rules.INSERT else (),
-            month_replace_ids=overlaps if row["replace_month"] else (),
+            replace_months=replace_months,
             is_aggregated=row["is_aggregated"] == "Y",
             home_ids=(replaces if row["processing_action"] == rules.INSERT else ()) + appends,
             keep_ids=(ingestion[row["companion_of"]],) if row["companion_of"] in ingestion else (),
@@ -367,8 +370,7 @@ def _planned(plan: Plan, conn=None) -> list[planner.PlanItem]:
             headers={column["name"]: column["header"] for column in file.columns if column.get("header")},
             provenance=file.provenance,
             replaces_ids=file.replaces_ids,
-            replace_month=file.replace_month,
-            month_replace_ids=file.month_replace_ids,
+            replace_months=tuple(file.replace_months.items()),
             aggregated=file.is_aggregated,
             home_ids=file.home_ids,
             keep_ids=file.keep_ids,
@@ -450,7 +452,7 @@ def _signature(items: list[planner.PlanItem]) -> list[tuple]:
     return [
         (item.key, item.action, item.table_name, item.rebuild, tuple(item.columns_after),
          tuple(ref["id"] for ref in item.replaces), tuple(sorted(item.column_map.items())),
-         item.replace_month, tuple(ref["id"] for ref in item.month_replaces))
+         tuple(sorted((month, tuple(ref["id"] for ref in refs)) for month, refs in item.replace_months.items())))
         for item in items
     ]
 
@@ -568,8 +570,8 @@ def _execute(conn, plan: Plan) -> None:
                                "Start a new plan so it is checked against the tables as they are now.")
             conn.execute(sql.SQL("UPDATE {} SET is_active = 'N' WHERE ingestion_id = ANY(%s)").format(_control()),
                          [replaced])
-        if item.replace_month and item.month_replaces:
-            _replace_month(conn, control, bronze, item)
+        if item.replace_months:
+            _replace_months(conn, control, bronze, item)
         _audit(conn, control, plan, item, file, ingestion_id, rows, "ingested", stamp)
         conn.execute(sql.SQL(
             "UPDATE {} SET bronze_load_flag = 'Y', loaded_at = now(), ingestion_id = %s, bronze_table = %s "
@@ -582,19 +584,21 @@ def _execute(conn, plan: Plan) -> None:
                          "WHERE id = %s").format(control), [plan.id])
 
 
-def _replace_month(conn, control, bronze, item: planner.PlanItem) -> None:
-    """Delete one month of the earlier loads holding it; they keep their other months,
-    and Silver loads them again without it."""
+def _replace_months(conn, control, bronze, item: planner.PlanItem) -> None:
+    """Delete each opted-in month from the earlier loads holding it; they keep their
+    other months, and Silver loads them again without it."""
     from psycopg import sql
 
-    for ref in item.month_replaces:
-        table = ref.get("table_name")
-        if not table or not _table_exists(conn, table):
-            continue
-        removed = conn.execute(sql.SQL("DELETE FROM {}.{} WHERE _ingestion_id = %s AND _reporting_month = %s").format(
-            bronze, sql.Identifier(table)), [ref["id"], item.replace_month]).rowcount
-        conn.execute(sql.SQL("UPDATE {}.ingestion SET rows_loaded = greatest(rows_loaded - %s, 0), "
-                             "silver_status = NULL WHERE id = %s").format(control), [removed, ref["id"]])
+    for month, refs in item.replace_months.items():
+        for ref in refs:
+            table = ref.get("table_name")
+            if not table or not _table_exists(conn, table):
+                continue
+            removed = conn.execute(sql.SQL(
+                "DELETE FROM {}.{} WHERE _ingestion_id = %s AND _reporting_month = %s").format(
+                    bronze, sql.Identifier(table)), [ref["id"], month]).rowcount
+            conn.execute(sql.SQL("UPDATE {}.ingestion SET rows_loaded = greatest(rows_loaded - %s, 0), "
+                                 "silver_status = NULL WHERE id = %s").format(control), [removed, ref["id"]])
 
 
 def _current_columns(conn, control, name: str) -> list[str] | None:

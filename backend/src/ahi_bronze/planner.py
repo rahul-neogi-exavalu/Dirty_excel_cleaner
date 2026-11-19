@@ -76,10 +76,10 @@ class Candidate:
     # The cleaner's sheet-provenance column, if this output has one.
     provenance: str | None = None
     # From the control table: ingestions this file supersedes (a year-to-date file), and
-    # the month (YYYY-MM) it replaces in the ingestions that hold it (a monthly file).
+    # month (YYYY-MM) -> the ingestions it replaces that month of (an incremental file's
+    # opted-in earlier months).
     replaces_ids: tuple[str, ...] = ()
-    replace_month: str | None = None
-    month_replace_ids: tuple[str, ...] = ()
+    replace_months: tuple[tuple[str, tuple[str, ...]], ...] = ()
     # The profit center's own aggregates: an ``_agg`` table.
     aggregated: bool = False
     # Ingestions this file continues (their table is its home), and ingestions it must
@@ -144,9 +144,9 @@ class PlanItem:
     # The file's column -> the table column it loads into, where the names differ only
     # because duplicate headers were numbered in another order (amount_2 is the table's amount).
     column_map: dict[str, str] = field(default_factory=dict)
-    # A monthly file replacing one month (YYYY-MM) of earlier loads, which stay otherwise.
-    replace_month: str | None = None
-    month_replaces: list[dict] = field(default_factory=list)
+    # An incremental file's opted-in earlier months, each replacing that month of earlier
+    # loads (which keep their other months): month (YYYY-MM) -> the refs it replaces.
+    replace_months: dict[str, list[dict]] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -170,8 +170,7 @@ class PlanItem:
             "reasons": self.reasons,
             "blockers": self.blockers,
             "column_map": self.column_map,
-            "replace_month": self.replace_month,
-            "month_replaces": self.month_replaces,
+            "replace_months": self.replace_months,
         }
 
 
@@ -404,9 +403,10 @@ def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Tab
     item.comparison = comparison.as_dict()
     overlapping = [load for load in table.loads if c.period and load[2] and load[2].overlaps(c.period)
                    and load[0] not in c.keep_ids]
-    if c.replace_month:
-        # The reviewer chose to replace this month in the loads holding it: they stay.
-        overlapping = [load for load in overlapping if load[0] not in c.month_replace_ids]
+    replace_ids = {pid for _, ids in c.replace_months for pid in ids}
+    if replace_ids:
+        # The reviewer chose to replace these months in the loads holding them: they stay.
+        overlapping = [load for load in overlapping if load[0] not in replace_ids]
     # A table override (or a stray schema fit) could put two profit centers in one table:
     # an overlapping load of a *different* one is never silently replaced or rebuilt over.
     cross_pc = [load for load in overlapping if load[4] and c.pc_id and load[4] != c.pc_id]
@@ -490,15 +490,14 @@ def _control_decisions(item: PlanItem, c: Candidate, state: dict[str, _Table]) -
         item.replaces.append(_ref(load[0], load[1], load[2], name))
         item.requires_confirmation = True
         item.reasons.append(f"Year to date: supersedes {load[1]} in {name}.")
-    if c.replace_month:
-        item.replace_month = c.replace_month
-        item.month_replaces = [_ref(load[0], load[1], load[2], name)
-                               for past_id in c.month_replace_ids if past_id in loads
-                               for name, load in [loads[past_id]]]
-        if item.month_replaces:
+    for month, ids in c.replace_months:
+        refs = [_ref(load[0], load[1], load[2], name) for past_id in ids if past_id in loads
+                for name, load in [loads[past_id]]]
+        if refs:
+            item.replace_months[month] = refs
             item.requires_confirmation = True
-            names = ", ".join(ref["file_name"] for ref in item.month_replaces)
-            item.reasons.append(f"Replaces {c.replace_month} in {names}; their other months stay.")
+            names = ", ".join(ref["file_name"] for ref in refs)
+            item.reasons.append(f"Replaces {month} in {names}; their other months stay.")
 
 
 def _kind_action(kind: str) -> str:

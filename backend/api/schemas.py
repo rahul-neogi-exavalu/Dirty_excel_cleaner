@@ -231,7 +231,7 @@ class PlanFile(BaseModel):
     date_detail: str | None
     processing_action: str
     file_replaced: str | None
-    replace_month: str | None
+    replace_months: list[str]
     rows: int
     fitness: int | None = None
     staging_table: str
@@ -303,6 +303,9 @@ class ValidationOutputUpdate(BaseModel):
     # aggregate | transaction: what the table holds, overriding what its shape says; null:
     # back to the detection.
     grain: str | None = None
+    # An incremental file's earlier months (YYYY-MM) to also truncate and reload in Bronze,
+    # besides its declared data collection month -- only those still within +-10% apply.
+    replace_months: list[str] | None = None
 
 
 class ValidationStage(BaseModel):

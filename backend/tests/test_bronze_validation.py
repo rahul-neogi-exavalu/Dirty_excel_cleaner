@@ -30,8 +30,9 @@ def test_the_required_columns_are_the_business_list():
                      "TED": "transaction_effective_date"}
     assert {item.label for item in required} >= {"Producer/Agency Name", "InsuranceCompany Name", "Premium"}
     pairs = [tuple(item.label for item in group) for group in v.requirements(required) if len(group) > 1]
-    assert pairs == [("CommissionPct", "GrossCommissionAmount"), ("ProducerCommissionAmount", "ProducerCommissionPct")]
-    assert len(v.requirements(required)) == 9
+    assert pairs == [("AccountingEffective Date", "PolicyEffectiveDate", "TransactionEffectiveDate"),
+                     ("CommissionPct", "GrossCommissionAmount"), ("ProducerCommissionAmount", "ProducerCommissionPct")]
+    assert len(v.requirements(required)) == 7
 
 
 def test_one_of_a_group_of_alternatives_is_enough():
@@ -238,6 +239,14 @@ def test_missing_columns_or_an_uncorrected_flag_reject_the_file():
     assert missing.action == v.REJECTED and "Revenue, MarketProvider" in missing.reasons[0]
     flagged = _act(None, None, None, [], flag="Feb–Jun 2026 is neither year-to-date nor a single month.")
     assert flagged.action == v.REJECTED
+
+
+def test_month_variance():
+    assert v.month_variance(100, 100) == 0
+    assert round(v.month_variance(107, 100), 2) == 0.07
+    assert round(v.month_variance(93, 100), 2) == -0.07
+    assert v.month_variance(50, 0) is None
+    assert v.month_variance(50, -5) is None
 
 
 @pytest.mark.parametrize("name, when, noted", [

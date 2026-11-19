@@ -51,7 +51,7 @@ async def update_output(session_id: str, key: str, request: ValidationOutputUpda
         validation_service.update_output, session_id, key, request.model_fields_set, request.mapping,
         request.reporting_start_date, request.reporting_end_date, request.choice, request.use_control_dates,
         date_role=request.date_role, replaces_file=request.replaces_file, companion_of=request.companion_of,
-        grain_choice=request.grain,
+        grain_choice=request.grain, replace_months=request.replace_months,
     )
     return validation_service.session_out(session)
 

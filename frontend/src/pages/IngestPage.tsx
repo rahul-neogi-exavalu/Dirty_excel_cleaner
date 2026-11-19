@@ -247,7 +247,7 @@ function PlanView({ onShowTables, onShowControl }: { onShowTables: () => void; o
   const active = plan.items.filter((item) => item.action !== "skip");
   const needConfirm = active.filter((item) => item.requires_confirmation);
   const unconfirmed = needConfirm.filter((item) => !confirmed.has(item.key));
-  const replacing = active.filter((item) => item.replaces.length > 0 || item.month_replaces.length > 0);
+  const replacing = active.filter((item) => item.replaces.length > 0 || Object.keys(item.replace_months).length > 0);
   const rows = active.reduce((sum, item) => sum + item.rows, 0);
   const tables = new Set(active.map((item) => item.table_name)).size;
   const blocked = plan.blockers.length > 0;
@@ -376,11 +376,11 @@ function PlanView({ onShowTables, onShowControl }: { onShowTables: () => void; o
                   {ref.file_name} · {periodLabel(ref.period_start, ref.period_end)} · whole file
                 </p>
               ))}
-              {item.month_replaces.map((ref) => (
-                <p key={ref.id} className="num text-caption text-ink-600">
-                  {ref.file_name} · only {item.replace_month}
+              {Object.entries(item.replace_months).flatMap(([month, refs]) => refs.map((ref) => (
+                <p key={`${month}-${ref.id}`} className="num text-caption text-ink-600">
+                  {ref.file_name} · only {month}
                 </p>
-              ))}
+              )))}
             </li>
           ))}
         </ul>
@@ -459,8 +459,8 @@ function StagedFilesTable({ plan }: { plan: IngestPlan }) {
                 <td className="px-3 py-2.5">{file.reporting_period_type ?? "—"}</td>
                 <td className="px-3 py-2.5">
                   <Badge tone={ACTION_TONE[file.processing_action] ?? "neutral"}>{file.processing_action}</Badge>
-                  {file.replace_month && <span className="block text-caption text-ink-500">replaces {file.replace_month}</span>}
-                  {!file.replace_month && file.file_replaced && <span className="block max-w-[200px] truncate text-caption text-ink-500" title={file.file_replaced}>replaces {file.file_replaced}</span>}
+                  {file.replace_months.length > 0 && <span className="block text-caption text-ink-500">replaces {file.replace_months.join(", ")}</span>}
+                  {file.replace_months.length === 0 && file.file_replaced && <span className="block max-w-[200px] truncate text-caption text-ink-500" title={file.file_replaced}>replaces {file.file_replaced}</span>}
                 </td>
                 <td className="num px-4 py-2.5 text-right">{formatNumber(file.rows)}</td>
               </tr>

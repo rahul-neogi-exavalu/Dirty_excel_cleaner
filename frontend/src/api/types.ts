@@ -333,7 +333,7 @@ export interface PlanFile {
   date_detail: DateRole | null;
   processing_action: ProcessingAction;
   file_replaced: string | null;
-  replace_month: string | null;
+  replace_months: string[];
   rows: number;
   fitness: number | null;
   staging_table: string;
@@ -368,9 +368,8 @@ export interface PlanItem {
   requires_confirmation: boolean;
   reasons: string[];
   blockers: string[];
-  /** A monthly file replacing one month (YYYY-MM) of earlier loads, which keep their other months. */
-  replace_month: string | null;
-  month_replaces: PlanReplaceRef[];
+  /** Month (YYYY-MM) -> the earlier loads it replaces that month of, which keep their other months. */
+  replace_months: Record<string, PlanReplaceRef[]>;
 }
 
 export interface IngestPlan {
@@ -477,6 +476,8 @@ export interface SchemaChange {
   /** In the earlier file, not in this one: left empty for this file. */
   missing: string[];
   reordered: boolean;
+  /** The shared columns over their union, as a percentage: how much the two overlap. */
+  common_percent: number;
 }
 
 export interface ValidationFile {
@@ -630,6 +631,11 @@ export interface ValidationOutput {
   /** The pair checked together, e.g. "Transactional.xlsx + BrokerList.xlsx". */
   pair: string | null;
   replace_month: string | null;
+  /** An incremental file's earlier months, each against what Bronze currently holds for
+   * that PC+month: whether it's close enough (±10%) to offer replacing it too. */
+  lookback_months: { month: string; file_rows: number; bronze_rows: number; percent: number | null; eligible: boolean }[];
+  /** The reviewer's opted-in earlier months (choice `replace_months`), resolved. */
+  replace_months: string[];
   compare: {
     month: string;
     this: { file_name: string; columns: number } & MonthView;

@@ -42,6 +42,7 @@ import type {
 import { PageHeader } from "../components/layout/Layout";
 import { Badge, type Tone } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
+import { LabeledCheckbox } from "../components/ui/Controls";
 import { Alert, EmptyState, ProgressBar, StatTile, useStableCallback, useToast } from "../components/ui/Feedback";
 import { Tooltip } from "../components/ui/Overlay";
 import { Select } from "../components/ui/Select";
@@ -1202,6 +1203,10 @@ function AgainstBronze({ output, busy, onChange }: { output: ValidationOutput; b
 
         {output.compare && <Comparison compare={output.compare} />}
 
+        {output.lookback_months.length > 0 && (
+          <LookbackMonths output={output} busy={busy} onChange={onChange} />
+        )}
+
         {output.schema && <SchemaChangeView schema={output.schema} />}
         {output.companions.length > 0 && (
           <p className="mt-2 flex items-center gap-1.5 text-caption text-ink-600">
@@ -1239,6 +1244,42 @@ function AgainstBronze({ output, busy, onChange }: { output: ValidationOutput; b
         )}
       </div>
     </section>
+  );
+}
+
+/** An incremental file's earlier months: each against what Bronze currently holds for that
+ * PC+month, with a checkbox to also replace it when close enough (±10%). */
+function LookbackMonths({ output, busy, onChange }: { output: ValidationOutput; busy: boolean; onChange: (change: OutputChange) => void }) {
+  const toggle = (month: string, checked: boolean) => {
+    const next = checked ? [...output.replace_months, month] : output.replace_months.filter((m) => m !== month);
+    onChange({ replace_months: next });
+  };
+  return (
+    <div className="mt-4 overflow-hidden rounded-md border border-ink-200">
+      <p className="bg-ink-50 px-3 py-2 text-caption font-medium text-ink-700">
+        This file also carries earlier months: choose which to truncate and reload in Bronze too.
+      </p>
+      <div className="divide-y divide-ink-100">
+        {output.lookback_months.map((item) => (
+          <div key={item.month} className={clsx("flex items-center justify-between gap-3 px-3 py-2",
+            item.eligible && output.replace_months.includes(item.month) && "bg-brand-50/40")}>
+            <div className="min-w-0">
+              <span className="font-mono text-body text-ink-900">{monthLabel(`${item.month}-01`)}</span>
+              <span className="ml-2 text-caption text-ink-500">
+                {formatNumber(item.file_rows)} in this file vs {formatNumber(item.bronze_rows)} in Bronze
+                {item.percent !== null && ` (${item.percent > 0 ? "+" : ""}${item.percent}%)`}
+              </span>
+            </div>
+            {item.eligible ? (
+              <LabeledCheckbox label="Replace" checked={output.replace_months.includes(item.month)} disabled={busy}
+                onChange={(checked) => toggle(item.month, checked)} />
+            ) : (
+              <Badge tone="neutral">Not close enough to replace</Badge>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1292,6 +1333,7 @@ function SchemaChangeView({ schema }: { schema: NonNullable<ValidationOutput["sc
         <span className="text-caption font-semibold text-ink-700">Columns against {schema.against}</span>
         <Badge tone={kind.tone}>{kind.label}</Badge>
         {schema.reordered && schema.kind === "evolved" && <Badge tone="neutral">Reordered too</Badge>}
+        <span className="text-caption text-ink-500">{schema.common_percent}% of the columns in common</span>
       </div>
       <p className="mt-1 text-caption text-ink-500">{kind.note}</p>
       {schema.added.length > 0 && (

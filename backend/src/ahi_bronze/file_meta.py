@@ -33,6 +33,12 @@ from . import period_tokens
 # two-digit sub-office suffix is not the month of a date ("PC796_06-2026" is PC0796).
 _PC = re.compile(r"(?<![a-z0-9])pc[\s_\-]?(\d{1,5})(?:_(\d{2})(?![\d\-/.]))?(?!\d)", re.IGNORECASE)
 
+# A consolidated file naming several profit centers together, as a list of three or more:
+# "0005,0077,0133,...". No ``pc`` prefix on these (the parent one, named on its own with
+# ``_PC`` above, carries that); each number is 1-4 digits, comma-separated, a little
+# whitespace around the comma allowed.
+_PC_LIST = re.compile(r"(?<![0-9.])\d{1,4}(?:\s*,\s*\d{1,4}){2,}(?![0-9.])")
+
 _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
@@ -90,6 +96,32 @@ def pc_tokens(filename: str) -> list[str]:
         if pc and pc not in found:
             found.append(pc)
     return found
+
+
+def multi_pc_tokens(filename: str) -> list[str]:
+    """Every ``PCnnn`` token, *and* every number of a comma-separated list of three or
+    more a consolidated file names together (``PC0173_0005,0077,0133,...``), normalised,
+    in the order written and deduplicated. A list's numbers carry no ``pc`` of their own;
+    the parent (first in the name, by convention also the only one tagged ``PCnnn``) is
+    first here too, so it decides the file's profit center (:func:`divisions_for` and the
+    rest follow from it, the same as a single-PC file)."""
+    found: list[tuple[int, str]] = []
+    for match in _PC.finditer(Path(filename or "").stem):
+        pc = normalize_pc_id(f"{match.group(1)}_{match.group(2)}" if match.group(2) else match.group(1))
+        if pc:
+            found.append((match.start(), pc))
+    for match in _PC_LIST.finditer(Path(filename or "").stem):
+        position = match.start()
+        for number in match.group(0).split(","):
+            pc = normalize_pc_id(number.strip())
+            if pc:
+                found.append((position, pc))
+            position += len(number) + 1
+    seen: list[str] = []
+    for _, pc in sorted(found, key=lambda item: item[0]):
+        if pc not in seen:
+            seen.append(pc)
+    return seen
 
 
 def pc_id_from_filename(filename: str) -> str | None:
