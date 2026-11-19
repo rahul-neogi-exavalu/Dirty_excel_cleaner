@@ -35,6 +35,7 @@ database.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import traceback
@@ -165,6 +166,9 @@ class OutputCheck:
     # The reviewer's word on what the table holds: "aggregate" or "transaction" (None: detected).
     grain: str | None = None
     choice: str | None = None
+    # An incremental file's earlier months (YYYY-MM) the reviewer opts to also truncate and
+    # reload in Bronze, besides its declared data collection month.
+    replace_months: list[str] = field(default_factory=list)
     staged: dict | None = None
     result: dict = field(default_factory=dict, repr=False)
     decision: Decision | None = field(default=None, repr=False)
@@ -430,13 +434,25 @@ def _build(session: Session, jobs: list) -> None:
     prepared = []
     for index, job in enumerate(jobs):
         tokens = file_meta.pc_tokens(job.source_name)
-        pc = tokens[0] if len(tokens) == 1 else None
+        combined = file_meta.multi_pc_tokens(job.source_name)
+        if len(tokens) == 1:
+            pc = tokens[0]
+        elif combined and len(combined) > len(tokens):
+            # A consolidated file naming several profit centers together (a list, not
+            # two separately-tagged ones): the first named is the parent, so this file
+            # loads, and its division looks up, under it.
+            pc = combined[0]
+        else:
+            pc = None
         received, note = file_meta.received_date_from_filename(job.source_name)
         file = FileCheck(job_id=job.id, file_name=job.source_name, file_sha256=job.source_sha256 or job.id,
                          pc_id=pc, detected_pc_id=pc, received=received, detected_received=received,
                          received_note=note)
-        if len(tokens) > 1:
+        if pc is None and len(tokens) > 1:
             file.warnings.append(f"The file name names {' and '.join(tokens)}: enter the profit center this file is for.")
+        elif pc and len(combined) > 1:
+            file.warnings.append(f"The file name lists {len(combined)} profit centers: using the first, {pc}, "
+                                 "as this file's (and for its division).")
         _lookup_scope(session, file)
         _prefill_from_control(session, file)
         _lookup_division(session, file)
@@ -803,9 +819,7 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
                                "pick a different date basis, or complete the data.")
         elif basis_stat is not None and basis_stat.populated and file.reporting_file_type:
             a_start, a_end = rules.role_range(basis_stat)
-            actual_kind, note, blocking = rules.actual_period_type(file.reporting_file_type, a_start, a_end)
-            if note and blocking:
-                flag_reasons.append(note)
+            actual_kind, note = rules.actual_period_type(file.reporting_file_type, a_start, a_end)
     primary_waiting = isinstance(primary, OutputCheck) and primary.result.get("reporting_start_date") is None
     if primary is not None:
         # A companion reports what the file it came with reports.
@@ -853,6 +867,24 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
                 flag_reasons.append(f"{month_key}: {note}")
     flag = "; ".join(flag_reasons) if flag_reasons else None
 
+    # An incremental file's earlier months (never later ones): each checked against what
+    # Bronze currently holds for that month, so the reviewer can choose, month by month,
+    # whether this file's data for it is close enough to also replace, or just informational.
+    lookback_months = []
+    if (primary is None and not aggregated and file.reporting_file_type == rules.INCREMENTAL
+            and start and end and file.pc_id):
+        declared = rules.month_key(start)
+        old_counts = session.bronze_counts.get(file.pc_id, {})
+        for month_key in sorted(m for m in months if m < declared):
+            file_rows = (months.get(month_key) or {}).get("rows", 0)
+            bronze_rows = old_counts.get(month_key, 0)
+            variance = rules.month_variance(file_rows, bronze_rows)
+            lookback_months.append({
+                "month": month_key, "file_rows": file_rows, "bronze_rows": bronze_rows,
+                "percent": round(variance * 100, 1) if variance is not None else None,
+                "eligible": variance is not None and abs(variance) <= 0.10,
+            })
+
     # This profit center's files in Bronze of the same kind: aggregates against aggregates.
     loaded = [item for item in session.loaded.get(file.source_system or "", []) if item.aggregated == aggregated]
     # The loaded files a revision of these dates may name, and the one the reviewer did.
@@ -874,6 +906,21 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     else:
         decision = None
 
+    # The reviewer's opted-in earlier months, resolved to the loaded files holding them --
+    # only still-eligible ones, in case the data changed since the reviewer picked them.
+    if decision is not None and decision.action == rules.APPEND and output.replace_months:
+        eligible_now = {item["month"] for item in lookback_months if item["eligible"]}
+        replace_months_map: dict[str, list[int]] = {}
+        for month in output.replace_months:
+            if month not in eligible_now:
+                continue
+            ids = [item.control_id for item in loaded if month in item.months]
+            if ids:
+                replace_months_map[month] = ids
+        if replace_months_map:
+            decision.replace_months = replace_months_map
+            decision.confirm = True
+
     # What the file continues in Bronze (the months it is appended after, or the file it
     # replaces): its columns against that file's, for the reviewer to see before Ingest.
     schema = _schema_change(output, decision)
@@ -889,8 +936,8 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
                         "reporting dates.")
     if not aggregated and actual_kind is None and basis_stat is not None and basis_stat.complete \
             and file.reporting_file_type:
-        _, note, blocking = rules.actual_period_type(file.reporting_file_type, *rules.role_range(basis_stat))
-        if note and not blocking:
+        _, note = rules.actual_period_type(file.reporting_file_type, *rules.role_range(basis_stat))
+        if note:
             warnings.append(note)
     if left_out:
         warnings.append(f"Left out of ingestion on Results: {', '.join(left_out)}. Include it there, or map "
@@ -982,6 +1029,8 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
         "revisable": [{"control_id": item.control_id, "file_name": item.file_name, "start": item.start,
                        "end": item.end, "period_type": item.period_type, "rows": item.rows} for item in revisable],
         "replace_month": decision.replace_month if decision else None,
+        "lookback_months": lookback_months,
+        "replace_months": sorted(decision.replace_months) if decision and decision.replace_months else [],
         "compare": compare,
         "companion_of": output.companion_of if primary is not None else None,
         "companion": _partner_view(session, primary) if primary is not None else None,
@@ -1116,7 +1165,7 @@ def _evaluate_file(file: FileCheck, outputs: list[OutputCheck]) -> None:
             needs = [PC_NEEDED] if not file.pc_id else []
             result.update(verdict=NEEDS_INPUT if needs else REJECTED, needs=needs, action=rules.REJECTED,
                           reasons=output.decision.reasons, options=[], confirm=False, file_replaced=None,
-                          replace_month=None, compare=None)
+                          replace_month=None, replace_months=[], compare=None)
             for check in result["checks"]:
                 if check["id"] == "bronze":
                     check.update(ok=False, detail=rules.REJECTED)
@@ -1270,7 +1319,8 @@ def update_output(session_id: str, key: str, fields: set[str], mapping: dict[str
                   reporting_start_date: str | None = None, reporting_end_date: str | None = None,
                   choice: str | None = None, use_control_dates: bool | None = None,
                   date_role: str | None = None, replaces_file: str | None = None,
-                  companion_of: str | None = None, grain_choice: str | None = None) -> Session:
+                  companion_of: str | None = None, grain_choice: str | None = None,
+                  replace_months: list[str] | None = None) -> Session:
     session = ready(session_id)
     with session.lock:
         output = session.output(key)
@@ -1318,6 +1368,13 @@ def update_output(session_id: str, key: str, fields: set[str], mapping: dict[str
             output.replaces_file = _revised_file(session, output, replaces_file) if choice == rules.REVISE else None
             output.companion_of = _companion_ref(session, output, companion_of) if choice == rules.COMPANION else None
             output.choice = choice
+        if "replace_months" in fields:
+            months = sorted(dict.fromkeys(replace_months or []))
+            for month in months:
+                if not re.fullmatch(r"\d{4}-\d{2}", month):
+                    raise ApiError(422, "invalid_replace_month", f"'{month}' is not a YYYY-MM month.",
+                                   field="replace_months")
+            output.replace_months = months
         _evaluate(session)
     return session
 
@@ -1465,6 +1522,7 @@ def _stage_one(conn, session: Session, output: OutputCheck, user_name: str, comp
         "fitness": result["fitness"], "reasons": result["reasons"], "warnings": result["warnings"],
         "replaces": [item.control_id for item in decision.replaces],
         "overlaps": [item.control_id for item in decision.overlaps],
+        "replace_months": decision.replace_months,
         "output_name": output.name,
         "companion_of": companion_of,
         "aggregated": result["aggregated"], "sheet_months": result["sheet_months"],

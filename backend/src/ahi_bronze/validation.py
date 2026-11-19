@@ -236,24 +236,22 @@ def computed_period_type(file_type: str) -> str:
     return YTD if file_type == CUMULATIVE else MONTHLY
 
 
-def actual_period_type(file_type: str, start: date, end: date) -> tuple[str | None, str | None, bool]:
+def actual_period_type(file_type: str, start: date, end: date) -> tuple[str | None, str | None]:
     """The date basis column's real scanned range, classified for display only -- never
     what decides INSERT/APPEND/REPLACE, which uses the declared, computed range instead.
-    (period_type, note, blocking). CUMULATIVE is always YTD, never inspected: a cumulative
-    file's wrong shape is caught by ``mismatch`` instead. INCREMENTAL: one calendar month ->
-    MONTHLY; several months of one year -> (None, note, False), the business's "Invalid
-    YTD" -- noted, but not rejected; different years -> (None, note, True), still rejected:
-    a much stronger sign of the wrong date basis or the wrong file than a few stray months,
-    and incremental files have no cross-check of their own the way CUMULATIVE does."""
+    (period_type, note). CUMULATIVE is always YTD, never inspected: a cumulative file's
+    wrong shape is caught by ``mismatch`` instead. INCREMENTAL: one calendar month ->
+    MONTHLY; anything wider, even across years -> (None, note), the business's "Invalid
+    YTD" -- noted, never rejected: the file still loads, filtered to its declared month,
+    and any other month it carries can still be offered for replacement via the ±10%
+    lookback check (``month_variance``)."""
     if file_type == CUMULATIVE:
-        return YTD, None, False
+        return YTD, None
     if (start.year, start.month) == (end.year, end.month):
-        return MONTHLY, None, False
+        return MONTHLY, None
     if start.year != end.year:
-        return None, (f"The date basis column runs from {start:%b %Y} to {end:%b %Y}, across years -- check the "
-                      "date basis and the data collection period, or this file is rejected."), True
-    return None, (f"The date basis column runs {start:%b}–{end:%b %Y}, more than this incremental file's "
-                  "one month. Check the date basis and the data collection period."), False
+        return None, f"The date basis column runs from {start:%b %Y} to {end:%b %Y}, across years."
+    return None, f"The date basis column runs {start:%b}–{end:%b %Y}, more than this incremental file's one month."
 
 
 def in_range(parsed: pl.Series, start: date, end: date) -> pl.Series:
@@ -274,6 +272,12 @@ def mismatch(new_count: int, old_count: int, threshold: float = 0.10) -> str | N
     return (f"has {new_count} row(s) where Bronze currently has {old_count} ({change:+.0%}). A cumulative file "
             "should carry roughly the same rows for a month it already has; this file might actually be "
             "incremental. Check the date basis and reporting file type, or correct the data.")
+
+
+def month_variance(new_count: int, old_count: int) -> float | None:
+    """The fractional change of new_count from old_count (e.g. 0.07 = +7%), or None when
+    there's nothing in Bronze yet for that PC+month to compare against."""
+    return (new_count - old_count) / old_count if old_count > 0 else None
 
 
 def row_months(frame: pl.DataFrame, column: str | None, fixed: str | None = None,
@@ -373,6 +377,9 @@ class Decision:
     appends: list[Loaded] = field(default_factory=list)
     # Rejected for a reason the reviewer is shown prominently (a month loaded twice).
     flagged: bool = False
+    # Month (YYYY-MM) -> control_ids of the earlier loads it is trimmed from: the
+    # reviewer's opted-in earlier months of an incremental file, resolved.
+    replace_months: dict[str, list[int]] = field(default_factory=dict)
 
     def file_replaced(self) -> str | None:
         files = self.replaces or (self.overlaps if self.replace_month else [])

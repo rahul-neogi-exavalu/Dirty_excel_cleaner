@@ -243,15 +243,18 @@ def test_the_reviewer_can_override_which_column_is_checked_for_this_sheet(client
     assert back["date_detail"] == "TED" and back["date_role"] is None
 
 
-def test_a_cross_year_span_is_rejected_but_cumulative_is_never_shape_checked(client, context):
-    # TED spans Dec 2025 to Jan 2026: across years.
+def test_a_cross_year_span_is_noted_not_rejected_but_cumulative_is_never_shape_checked(client, context):
+    # TED spans Dec 2025 to Jan 2026: across years -- noted as "Invalid YTD", never
+    # rejected, the same as a same-year multi-month span; the file still loads, filtered
+    # to its declared month.
     rows = [(date(2025, 12, 10), date(2025, 12, 20), date(2025, 7, 1)),
             (date(2026, 1, 10), date(2026, 1, 20), date(2025, 7, 1))]
     data, output = _validate(client, "PC0101_CrossYear_07132026.xlsx", _dated_book(rows))
     file = data["files"][0]
     incremental = _set_period(client, data, file["job_id"], "INCREMENTAL", "2026-01", date_basis="TED")["outputs"][0]
-    assert incremental["verdict"] == "flagged" and "across years" in incremental["flag"]
-    # Cumulative never inspects the actual shape at all: always YTD, never flagged by it.
+    assert incremental["verdict"] == "ready" and not incremental["flag"] and incremental["period_type"] is None
+    assert any("across years" in warning for warning in incremental["warnings"])
+    # Cumulative never inspects the actual shape at all: always YTD, never noted by it.
     cumulative = _set_period(client, data, file["job_id"], "CUMULATIVE", "2026-01", date_basis="TED")["outputs"][0]
     assert cumulative["verdict"] == "ready" and not cumulative["flag"] and cumulative["period_type"] == "YTD"
 
@@ -309,6 +312,29 @@ def test_a_month_after_the_year_to_date_file_is_appended_and_its_schema_compared
     data2, same = _validate(client, "PC0101_July_08142026.xlsx", _book([7]))
     same = _set_period(client, data2, data2["files"][0]["job_id"], "INCREMENTAL", "2026-07")["outputs"][0]
     assert same["schema"]["kind"] == "identical"
+
+
+def test_an_incremental_files_earlier_months_offer_a_replace_when_close_enough(client, context):
+    from ahi_bronze.validation import Loaded
+
+    # April's Bronze count matches the file closely; May's does not.
+    context.loaded = {"EXT_PC0101": [
+        Loaded(10, "PC0101_April_05012026.xlsx", "MONTHLY", date(2026, 4, 1), date(2026, 4, 30), rows=2,
+              months={"2026-04": {"rows": 2}}),
+        Loaded(11, "PC0101_May_06012026.xlsx", "MONTHLY", date(2026, 5, 1), date(2026, 5, 31), rows=10,
+              months={"2026-05": {"rows": 10}}),
+    ]}
+    context.bronze_counts = {"PC0101": {"2026-04": 2, "2026-05": 10}}
+    # The file is declared incremental for June, but its AED column also carries April and May.
+    data, output = _validate(client, "PC0101_Report_07012026.xlsx", _book([4, 5, 6]))
+    output = _set_period(client, data, data["files"][0]["job_id"], "INCREMENTAL", "2026-06")["outputs"][0]
+    lookback = {item["month"]: item for item in output["lookback_months"]}
+    assert lookback["2026-04"]["eligible"] is True and lookback["2026-04"]["file_rows"] == 2
+    assert lookback["2026-05"]["eligible"] is False and lookback["2026-05"]["file_rows"] == 2
+    assert "2026-06" not in lookback  # the declared month is never a lookback item
+    # May is silently dropped: it was never eligible, even though the reviewer picked it too.
+    picked = _patch(client, data, output, {"replace_months": ["2026-04", "2026-05"]})["outputs"][0]
+    assert picked["replace_months"] == ["2026-04"] and picked["confirm"] is True and picked["action"] == "APPEND"
 
 
 # --- the profit center's own aggregates --------------------------------------------------
@@ -413,6 +439,16 @@ def test_a_revision_names_the_loaded_file_it_replaces(client, context):
     assert undone["action"] == "DECIDE" and undone["replaces_file"] is None
 
 
+def test_a_consolidated_files_profit_center_and_division_come_from_its_parent(client, context):
+    # A combined file naming several profit centers: PC0101 (also in the division table)
+    # is the parent, named first.
+    data, output = _validate(
+        client, "PC0101_0202,0303,0404,0505_AHI Programs Combined Data 202607_08172026.xlsx", _book(range(1, 7)))
+    file = data["files"][0]
+    assert file["pc_id"] == "PC0101" and file["division_name"] == "AH Programs"
+    assert any("lists 5 profit centers" in warning and "PC0101" in warning for warning in file["warnings"])
+
+
 def test_no_profit_center_or_received_date_needs_input(client, context):
     data, output = _validate(client, "Report_without_codes.xlsx", _book(range(1, 7)))
     assert output["verdict"] == "needs_input" and data["files"][0]["pc_id"] is None
@@ -438,7 +474,7 @@ def test_either_column_of_a_one_of_pair_is_enough(client, context):
     assert _required(output, "commission_pct")["one_of"] == ["gross_commission_amount"]
     assert _required(output, "producer_commission_pct")["one_of"] == ["producer_commission_amount"]
     assert _required(output, "premium")["one_of"] == []
-    assert _check(output, "columns")["detail"] == "9 of 9 found"
+    assert _check(output, "columns")["detail"] == "7 of 7 found"
 
 
 def test_neither_column_of_a_one_of_pair_rejects_the_file(client, context):

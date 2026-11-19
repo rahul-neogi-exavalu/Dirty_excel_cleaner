@@ -271,6 +271,8 @@ export const api = {
       companion_of?: string | null;
       /** What the table holds, over the detection; null: back to the detection. */
       grain?: "aggregate" | "transaction" | null;
+      /** An incremental file's earlier months to also truncate and reload in Bronze. */
+      replace_months?: string[];
     },
   ) =>
     request<Validation>(`/api/validations/${id}/outputs/${encodeURIComponent(key)}`, {

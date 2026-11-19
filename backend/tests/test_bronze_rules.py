@@ -106,6 +106,21 @@ def test_case_4_different_schema():
     assert compare(COLS, ["a", "b", "c"]).kind == DIFFERENT
 
 
+def test_added_and_missing_together_still_evolves_if_anything_is_shared():
+    # Some columns added, some missing, but still sharing the rest: evolves, not a new
+    # table -- there is no cutoff on how much may differ, only on sharing nothing at all.
+    mixed = compare(COLS, ["profitcentername", "profitcenternumber", "newcolumn"])
+    assert mixed.kind == EVOLVED
+    assert mixed.added == ["newcolumn"] and mixed.missing == ["premium", "accountingeffectivedate"]
+    assert mixed.common_percent == 40.0  # 2 shared over a union of 5
+
+
+def test_common_percent_reflects_the_actual_overlap():
+    assert compare(COLS, COLS).common_percent == 100.0
+    assert compare(COLS, list(reversed(COLS))).common_percent == 100.0
+    assert compare(COLS, ["a", "b", "c"]).common_percent == 0.0
+
+
 # --- periods ------------------------------------------------------------------
 
 
@@ -193,6 +208,16 @@ def test_july_different_schema_goes_to_its_own_table():
     item = only(planner.plan([candidate(period=JULY, cols=["a", "b"])], tables, history))
     assert item.action == planner.NEW_TABLE and item.requires_confirmation
     assert item.table_name == "ext_pc0515_arr_v2"
+
+
+def test_july_added_and_missing_columns_together_still_evolves():
+    # Some of COLS missing, one new column added -- still shares the rest: evolves into
+    # the same table instead of being routed to a new one.
+    tables, history = _loaded()
+    item = only(planner.plan([candidate(period=JULY, cols=COLS[:-1] + ["commission"])], tables, history))
+    assert item.action == planner.EVOLVE and item.requires_confirmation
+    # The table's own columns stay (missing ones left empty), the new one is appended.
+    assert item.columns_after == COLS + ["commission"]
 
 
 def test_revised_jan_jun_file_replaces_after_confirmation():
@@ -396,11 +421,26 @@ def test_a_month_replacement_keeps_the_earlier_load_and_appends():
     june = Period("2025-06", "2025-06")
     plain = only(planner.plan([candidate(sha="june", period=june)], tables, history))
     assert plain.action == planner.REPLACE and plain.blockers  # without a decision: only partly
-    item = only(planner.plan([candidate(sha="june", period=june, replace_month="2025-06",
-                                        month_replace_ids=("ing-1",))], tables, history))
+    item = only(planner.plan([candidate(sha="june", period=june,
+                                        replace_months=(("2025-06", ("ing-1",)),))], tables, history))
     assert item.action == planner.APPEND and not item.blockers and not item.replaces
-    assert item.replace_month == "2025-06" and [ref["id"] for ref in item.month_replaces] == ["ing-1"]
-    assert item.requires_confirmation and item.as_dict()["month_replaces"][0]["table_name"] == "ext_pc0515_arr"
+    assert [ref["id"] for ref in item.replace_months["2025-06"]] == ["ing-1"]
+    assert item.requires_confirmation and item.as_dict()["replace_months"]["2025-06"][0]["table_name"] == "ext_pc0515_arr"
+
+
+def test_several_months_can_be_replaced_across_different_loads_at_once():
+    tables, history = [TableState("ext_pc0515_arr", list(COLS))], [
+        Ingested("ing-apr", "ext_pc0515_arr", "April_pc0515.xlsx", "apr", Period("2025-04", "2025-04")),
+        Ingested("ing-may", "ext_pc0515_arr", "May_pc0515.xlsx", "may", Period("2025-05", "2025-05")),
+    ]
+    june = Period("2025-06", "2025-06")
+    item = only(planner.plan([candidate(sha="june", period=june, replace_months=(
+        ("2025-04", ("ing-apr",)), ("2025-05", ("ing-may",)),
+    ))], tables, history))
+    assert item.action == planner.APPEND and not item.blockers and not item.replaces
+    assert [ref["id"] for ref in item.replace_months["2025-04"]] == ["ing-apr"]
+    assert [ref["id"] for ref in item.replace_months["2025-05"]] == ["ing-may"]
+    assert item.requires_confirmation
 
 
 def test_a_year_to_date_file_supersedes_loads_in_other_tables_too():

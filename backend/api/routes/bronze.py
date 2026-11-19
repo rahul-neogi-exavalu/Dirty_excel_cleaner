@@ -37,7 +37,7 @@ def plan_out(plan: Plan) -> PlanOut:
                 date_detail=file.date_detail,
                 processing_action=file.processing_action,
                 file_replaced=file.file_replaced,
-                replace_month=file.replace_month,
+                replace_months=sorted(file.replace_months),
                 rows=file.rows,
                 fitness=file.fitness,
                 staging_table=file.staging_table,

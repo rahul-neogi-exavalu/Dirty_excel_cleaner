@@ -502,6 +502,42 @@ def test_pc_id_and_file_date_come_from_the_file_name(name, pc, when):
     assert file_meta.file_date_from_filename(name) == when
 
 
+def test_a_consolidated_file_lists_its_profit_centers_the_parent_first():
+    from ahi_bronze import file_meta
+
+    name = ("PC0173_0005,0077,0133,0165,0173,0186,0189,0192,0418,0552, 0628,0629,0631,0632,0673,0753"
+            "_AHI Programs Data 202607_08172026")
+    tokens = file_meta.multi_pc_tokens(name)
+    assert tokens[0] == "PC0173"
+    assert tokens[1:5] == ["PC0005", "PC0077", "PC0133", "PC0165"]
+    assert len(tokens) == 16  # PC0173 named once, though it appears twice in the name
+    # A single PC file names nothing extra: unaffected.
+    assert file_meta.multi_pc_tokens("PC0796_2026-06 Data.xlsx") == ["PC0796"]
+    # Two numbers alone are not a list (a date, a range): no false positive.
+    assert file_meta.multi_pc_tokens("Report_2026,2027_08172026.xlsx") == []
+    # No file name at all, or one naming nothing: empty.
+    assert file_meta.multi_pc_tokens("") == []
+    assert file_meta.multi_pc_tokens("customer_data.xlsx") == []
+
+
+def test_a_consolidated_file_with_no_pc_prefix_still_names_its_first_as_parent():
+    from ahi_bronze import file_meta
+
+    # The business's convention tags the parent with PCnnn; without it, the list's own
+    # first number is still the one to use.
+    name = "0005,0077,0133,0165,0186_AHI Programs Data 202607_08172026"
+    assert file_meta.multi_pc_tokens(name) == ["PC0005", "PC0077", "PC0133", "PC0165", "PC0186"]
+
+
+def test_two_separately_tagged_profit_centers_are_still_ambiguous():
+    from ahi_bronze import file_meta
+
+    # Two PCnnn tokens of their own, not a list: multi_pc_tokens finds nothing extra, so
+    # the reviewer is still asked (validation_service._build doesn't auto-pick either).
+    name = "PC0796_PC0515_Combined_08172026.xlsx"
+    assert file_meta.pc_tokens(name) == file_meta.multi_pc_tokens(name) == ["PC0796", "PC0515"]
+
+
 @pytest.mark.parametrize("value, normalized", [("796", "PC0796"), ("PC796", "PC0796"), ("pc0796", "PC0796"),
                                                ("0796.0", "PC0796"), ("PC069_01", "PC0069_01"), ("null", None),
                                                ("abc", None), (None, None)])
