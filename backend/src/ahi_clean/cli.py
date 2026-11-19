@@ -14,7 +14,7 @@ from pathlib import Path
 
 import zipfile
 
-from . import audit, contracts, failures, metadata, orchestrate
+from . import __version__, audit, contracts, failures, metadata, orchestrate
 from .extract import extract_sheet
 from .failures import Failure
 from .reader import DEFAULT_MAX_CELLS, count_embedded_images, read_workbook
@@ -333,6 +333,7 @@ def main(argv=None) -> int:
         default=DEFAULT_MAX_CELLS,
         help="Refuse a sheet larger than this many cells rather than attempting it.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args(argv)
 
     paths = resolve_inputs(args.inputs, args.recursive, args.exclude)
