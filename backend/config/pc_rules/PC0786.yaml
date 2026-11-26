@@ -1,0 +1,20 @@
+profit_center: PC0786
+rules:
+  - key: pc0786.billing_address
+    kind: derive
+    column: producer_billing_address
+    spec:
+      expr: {op: concat, args: ["src:ProducerBillingAddress", "src:ProducerBillingAddress2"], sep: " "}
+    source_ref: ext_pc786_silver_cleansed.py:683-686
+  - key: pc0786.office_location
+    kind: derive
+    column: producer_office_location
+    spec:
+      expr: {op: concat, args: ["src:ProducerOfficeLocation1", "src:ProducerOfficeLocation2"], sep: " "}
+    source_ref: ext_pc786_silver_cleansed.py:698-701
+  - key: pc0786.commission_pct
+    kind: derive
+    column: commission_pct
+    spec:
+      expr: {op: div_safe, args: ["silver:gross_commission_amount", "silver:premium"]}
+    source_ref: ext_pc786_silver_cleansed.py:741-748

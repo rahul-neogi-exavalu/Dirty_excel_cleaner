@@ -18,12 +18,17 @@ table, never summed again). Used for the reviewer's dry run and for the load, li
   them itself;
 * **system columns**: record grain, report type, data source, the profit center (from
   the load, completed from the LOTL), the reporting month (each row's sheet month, else
-  the load's reporting dates), lineage, hashes and timestamps.
+  the load's reporting dates), lineage, hashes and timestamps;
+* **the profit center's rules** (``rules.py``): a filter drops bronze rows before they
+  are unpivoted; lookups, translations, derivations and constants run last, and may set
+  any column but the key, hashes and lineage (record grain, report type, a dimension's
+  name). The hashes are taken from the values the rules leave.
 """
 
 from __future__ import annotations
 
 import calendar
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
@@ -33,8 +38,9 @@ import polars as pl
 from ahi_bronze import grain
 
 from . import cleanse, hashing, profit_center
+from . import rules as pc_rules
 from .catalog import MAPPED, SilverColumn
-from .transform import Context, LoadInfo, _period, _series, _unreadable_names
+from .transform import Context, LoadInfo, _period, _scope, _series, _unreadable_names
 
 IDENTITY = "ahi_aggregate_id"
 RECORD_GRAIN = "AS_REPORTED"
@@ -106,6 +112,8 @@ def transform(
     context: Context | None = None,
     headers: dict[str, str] | None = None,
     extras: bool = False,
+    rules: list | None = None,
+    lookups: dict[str, list[dict]] | None = None,
 ) -> tuple[pl.DataFrame, dict]:
     """``frame``: bronze rows as text (data columns plus LINEAGE). ``mapping``: (bronze,
     aggregate column) pairs for the dimensions and single measures. ``spread``: columns
@@ -115,6 +123,9 @@ def transform(
     context = context or Context()
     headers = headers or {}
     by_name = {column.name: column for column in catalog}
+    run = pc_rules.Run(rules, pc_rules.AGGREGATE, context.source_table,
+                       {name: column for name, column in by_name.items() if name not in pc_rules.AGGREGATE_PROTECTED},
+                       lookups, headers)
     pairs = [(bronze, target) for bronze, target in mapping if target in by_name and bronze in frame.columns]
     spread_columns = [name for name in (spread.columns if spread else []) if name in frame.columns]
     measure_columns = [bronze for bronze, target in pairs if is_measure(by_name[target])] + spread_columns
@@ -124,6 +135,12 @@ def transform(
     rows_in = frame.height
     if dropped:
         frame = frame.with_row_index("_row").filter(~pl.col("_row").is_in(dropped)).drop("_row")
+    filtered = 0
+    if run:
+        keep = run.filter(frame, _scope(frame, context, pc))
+        if keep is not None:
+            filtered = int((~keep).sum())
+            frame = frame.filter(keep)
 
     # One measure spread across columns: one row per cell.
     spread_measure = spread.measure if spread and spread.measure in by_name and spread_columns else None
@@ -135,6 +152,7 @@ def transform(
                          .with_columns(pl.lit(headers.get(name) or name).alias("_header")))
         frame = pl.concat(parts, how="vertical_relaxed") if parts else frame
     height = frame.height
+    scope = _scope(frame, context, pc) if run else None
 
     columns: dict[str, pl.Series] = {}
     invalid: dict[str, int] = {}
@@ -143,6 +161,9 @@ def transform(
     def typed(name: str, series: pl.Series) -> None:
         column = by_name[name]
         value, failures = cleanse.by_type(series.alias(name), column)
+        if run and column.kind in ("date", "timestamp"):
+            value, reread = run.reparse(name, series, value, frame, scope)
+            failures = failures if reread is None else reread
         columns[name] = value
         if failures:
             invalid[name] = invalid.get(name, 0) + failures
@@ -225,16 +246,26 @@ def transform(
         system[f"aggregation_dimension_{number}_name"] = [name] * height
         system[f"aggregation_dimension_{number}_value"] = series.to_list()
 
-    ordered = []
+    final: dict[str, pl.Series] = {}
     for column in catalog:
         if column.name == IDENTITY:
             continue
         if column.name in columns:
-            ordered.append(columns[column.name].alias(column.name))
+            final[column.name] = columns[column.name].alias(column.name)
         elif column.name in system:
-            ordered.append(_series(column, system[column.name]))
+            final[column.name] = _series(column, system[column.name])
         else:
-            ordered.append(_series(column, [None] * height))
+            final[column.name] = _series(column, [None] * height)
+
+    # The profit center's rules last: they may set what the load would (record grain, a
+    # dimension's name); the hashes then follow the values they leave.
+    ruled = run.apply(final, frame, scope) if run else []
+    if ruled:
+        _rehash(final, context, len(slots), ruled,
+                [name for name in measure_names] + [name for name in ruled
+                                                    if name in by_name and is_measure(by_name[name])
+                                                    and name not in measure_names])
+    ordered = list(final.values())
     if extras:
         ordered += [pl.Series("_ingestion_id", ids, dtype=pl.String), pl.Series("_pc_status", statuses, dtype=pl.String),
                     _unreadable_names(unreadable, height)]
@@ -243,6 +274,7 @@ def transform(
         "rows": rows_in,
         "rows_loaded": height,
         "rollup_rows": len(dropped),
+        "rows_filtered": filtered,
         "spread": {"columns": spread_columns, "measure": spread_measure,
                    "dimension": (spread.dimension or spread.label) if spread_measure else None},
         "invalid_values": invalid,
@@ -250,4 +282,23 @@ def transform(
         "measures": {name: float(columns[name].cast(pl.Float64).sum() or 0) for name in measure_names},
         "dimensions": [name for name, _ in slots],
     }
+    if run:
+        quality["rules"] = run.report()
+        quality["rules_applied"] = run.applied()
     return result, quality
+
+
+def _rehash(final: dict[str, pl.Series], context: Context, slots: int, ruled: list[str], measures: list[str]) -> None:
+    """The business-key and row hashes, as ``transform`` takes them, from ``final``."""
+    for name in ruled:
+        match = re.fullmatch(r"aggregation_dimension_(\d)_value", name)
+        if match:
+            slots = max(slots, int(match.group(1)))
+    keys = zip(final["profit_center_number"].to_list(), final["reporting_start_date"].to_list(),
+               final["reporting_end_date"].to_list(),
+               *(final[f"aggregation_dimension_{n}_value"].to_list() for n in range(1, slots + 1)))
+    final["business_key_hash"] = pl.Series("business_key_hash",
+                                           [hashing.digest([context.source_system, number, f"{start}..{end}", *values])
+                                            for number, start, end, *values in keys], dtype=pl.String)
+    rows = pl.DataFrame({name: final[name] for name in measures}).rows() if measures         else [()] * len(final["business_key_hash"])
+    final["row_hash"] = pl.Series("row_hash", [hashing.digest(row) for row in rows], dtype=pl.String)

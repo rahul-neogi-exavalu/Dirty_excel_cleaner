@@ -22,6 +22,7 @@ import {
   TriangleAlert,
   Undo2,
   UserCheck,
+  Wand2,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -55,6 +56,7 @@ import { Select, type SelectOption } from "../components/ui/Select";
 import { TabPanel, Tabs } from "../components/ui/Tabs";
 import { formatNumber, humanize, plural } from "../lib/format";
 import { useAuth } from "../state/auth";
+import { RuleQuality, RulesView } from "./SilverRules";
 
 const METHOD: Record<MatchMethod, string> = {
   saved: "Saved", exact: "Exact", fuzzy: "Fuzzy", semantic: "Semantic", ai: "AI", regex: "Regex",
@@ -81,7 +83,7 @@ export function SilverPage() {
   const [status, setStatus] = useState<BronzeStatus | null>(null);
   const [catalog, setCatalog] = useState<SilverCatalog | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
-  const [tab, setTab] = useState<"run" | "mapping" | "aggregate">("run");
+  const [tab, setTab] = useState<"run" | "mapping" | "rules" | "aggregate">("run");
 
   const load = useCallback(() => {
     setError(null);
@@ -118,6 +120,7 @@ export function SilverPage() {
                 // "Load", not "Run": the workflow's own Run step (cleaning) is in the sidebar.
                 { id: "run", label: "Load", icon: <ListChecks /> },
                 { id: "mapping", label: "Mapping", icon: <BookCheck /> },
+                { id: "rules", label: "Rules", icon: <Wand2 /> },
                 { id: "aggregate", label: "Aggregate", icon: <Sigma /> },
               ]}
             />
@@ -136,6 +139,9 @@ export function SilverPage() {
           </TabPanel>
           <TabPanel idPrefix="silver" id="mapping" active={tab === "mapping"}>
             {tab === "mapping" && <MappingView catalog={catalog} />}
+          </TabPanel>
+          <TabPanel idPrefix="silver" id="rules" active={tab === "rules"}>
+            {tab === "rules" && <RulesView />}
           </TabPanel>
           <TabPanel idPrefix="silver" id="aggregate" active={tab === "aggregate"}>
             {tab === "aggregate" && <AggregateView />}
@@ -853,6 +859,7 @@ function TableMapping({
             {(quality.unmapped_silver_columns ?? []).map((column) => <Badge key={column} tone="neutral">{column}</Badge>)}
           </QualityBlock>
         </div>
+        <RuleQuality quality={quality} />
       </TabPanel>
     </SectionCard>
   );

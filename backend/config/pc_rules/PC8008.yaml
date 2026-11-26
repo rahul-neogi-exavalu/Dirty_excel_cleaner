@@ -1,0 +1,20 @@
+profit_center: PC8008
+# The Arrowhead transaction report carries 8008-8032; 'Profit Centre' is "<number> <name>".
+rules:
+  - key: pc8008.number
+    kind: derive
+    seq: 10
+    column: profit_center_number
+    spec:
+      expr: {op: lpad, args: [{op: regex_extract, args: ["src:Profit Centre"], pattern: '^(\d+)'}], width: 4}
+    source_ref: ext_pc8008_output_silver_cleansed.py:395-404,700
+  - key: pc8008.name
+    kind: derive
+    seq: 20
+    column: profit_center_name
+    spec:
+      expr:
+        op: when
+        cases: [{if: {op: eq, args: ["silver:profit_center_number", "8022"]}, then: Equinox Global GmbH}]
+        else: {op: regex_replace, args: ["src:Profit Centre"], pattern: '^\S+\s*'}
+    source_ref: ext_pc8008_output_silver_cleansed.py:406-416,701

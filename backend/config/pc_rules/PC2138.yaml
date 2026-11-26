@@ -1,0 +1,20 @@
+profit_center: PC2138
+rules:
+  - key: pc2138.broker_fee_pct
+    kind: derive
+    column: commission_pct
+    spec:
+      expr:
+        op: when
+        cases: [{if: {op: eq, args: ["src:Fee Type", Broker Fee]}, then: "src:Fee Percent"}]
+        else: null
+    source_ref: ext_pc2138_silver_cleansed.py:754
+  - key: pc2138.broker_fee_amount
+    kind: derive
+    column: gross_commission_amount
+    spec:
+      expr:
+        op: when
+        cases: [{if: {op: eq, args: ["src:Fee Type", Broker Fee]}, then: "src:Fee Amount"}]
+        else: null
+    source_ref: ext_pc2138_silver_cleansed.py:755

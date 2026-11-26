@@ -58,6 +58,10 @@ def pool():
                     # Every DRT column of the Silver schema, and the mapping rows' DRT columns.
                     reference_service.sync_drt_columns(conn, silver_service.catalog())
                     reference_service.seed_control_table(conn)
+                    # Rules stored before their SQL was: give each its SQL view.
+                    from .services import pc_rules_service
+
+                    pc_rules_service.backfill_sql(conn)
                     # Bronze tables made before file_received_date and the reporting dates.
                     bronze_service.upgrade_tables(conn)
             except Exception as error:

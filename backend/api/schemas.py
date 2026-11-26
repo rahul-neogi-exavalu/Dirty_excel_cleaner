@@ -280,9 +280,18 @@ class ValidationFileUpdate(BaseModel):
     data_collection_period: str | None = None
 
 
+class RequiredFill(BaseModel):
+    # null: the column is staged without a value; value: ``value`` on every row.
+    kind: str
+    value: str | None = None
+
+
 class ValidationOutputUpdate(BaseModel):
     # Required column (Silver name) -> the output's column (original name), or null: missing.
     mapping: dict[str, str | None] | None = None
+    # Required column -> filled instead of mapped (any but the dates, premium and policy
+    # number); null clears the fill.
+    fills: dict[str, RequiredFill | None] | None = None
     # YYYY-MM (whole months); both null: back to what the data says.
     reporting_start_date: str | None = None
     reporting_end_date: str | None = None

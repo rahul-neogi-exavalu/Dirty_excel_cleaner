@@ -1,0 +1,30 @@
+profit_center: PC2004
+rules:
+  - key: pc2004.broker_address
+    kind: lookup
+    scope_file_like: "*5in5*"
+    spec:
+      source: bronze_table
+      table: "*pc2004*broker*"
+      key: "src:Producer/Broker Name"
+      key_to: AccountName
+      columns:
+        producer_billing_address: Address1
+        producer_billing_city: City
+        producer_billing_state: Statecode
+        producer_billing_zipcode: Zipcode
+        producer_office_location: Address1
+        producer_office_city: City
+        producer_office_state: Statecode
+        producer_office_zipcode: Zipcode
+      default:
+        producer_billing_address: "3606 Wedgewood Dr"
+        producer_billing_city: Trent Woods
+        producer_billing_state: NC
+        producer_billing_zipcode: "28562"
+        producer_office_location: "3606 Wedgewood Dr"
+        producer_office_city: Trent Woods
+        producer_office_state: NC
+        producer_office_zipcode: "28562"
+    note: "From the Broker Addresses file that comes with the report; a broker not listed gets the default address."
+    source_ref: ext_pc2004_sheet1_silver_cleansed.py:670-700,829-866

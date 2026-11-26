@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 
 from . import naming
 from .periods import Period
-from .schema_compare import DIFFERENT, EVOLVED, IDENTICAL, REORDERED, compare, evolved_columns
+from .schema_compare import DIFFERENT, EVOLVED, IDENTICAL, REORDERED, compare, evolved_columns, recommend
 
 CREATE = "create"
 APPEND = "append"
@@ -147,6 +147,13 @@ class PlanItem:
     # An incremental file's opted-in earlier months, each replacing that month of earlier
     # loads (which keep their other months): month (YYYY-MM) -> the refs it replaces.
     replace_months: dict[str, list[dict]] = field(default_factory=dict)
+    # A schema mismatch (EVOLVED or DIFFERENT): which of evolve/new_table/reject the
+    # configured similarity bands recommend -- advisory only, never restricting the
+    # reviewer's choice among allowed_actions.
+    recommendation: str | None = None
+    # The table this item was first compared against, before any redirect to another
+    # table or a new one -- what "evolve" means if the reviewer picks it after that.
+    mismatch_table: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -171,6 +178,7 @@ class PlanItem:
             "blockers": self.blockers,
             "column_map": self.column_map,
             "replace_months": self.replace_months,
+            "recommendation": self.recommendation,
         }
 
 
@@ -184,7 +192,8 @@ class _Table:
     provenance: set[str] = field(default_factory=set)
 
 
-def plan(candidates: list[Candidate], tables: list[TableState], history: list[Ingested]) -> list[PlanItem]:
+def plan(candidates: list[Candidate], tables: list[TableState], history: list[Ingested],
+         bands: tuple = ()) -> list[PlanItem]:
     state: dict[str, _Table] = {
         table.name: _Table(list(table.columns), True, [], dict(table.headers), set(table.provenance)) for table in tables
     }
@@ -205,7 +214,7 @@ def plan(candidates: list[Candidate], tables: list[TableState], history: list[In
     covered = _covered_in_batch(ordered, state)
     # The same file uploaded twice in one batch: (content hash, sheets, regions) -> first file name.
     seen: dict[tuple, str] = {}
-    return [_plan_one(candidate, state, by_hash, seen, covered.get(candidate.key)) for candidate in ordered]
+    return [_plan_one(candidate, state, by_hash, seen, covered.get(candidate.key), bands) for candidate in ordered]
 
 
 def _years(c: Candidate) -> set[int] | None:
@@ -254,7 +263,7 @@ def _covered_in_batch(ordered: list[Candidate], state: dict[str, _Table]) -> dic
 
 
 def _plan_one(c: Candidate, state: dict[str, _Table], by_hash: dict[str, list[Ingested]],
-              seen: dict[tuple, str], covered_by: str | None = None) -> PlanItem:
+              seen: dict[tuple, str], covered_by: str | None = None, bands: tuple = ()) -> PlanItem:
     source = naming.clean_source_system(c.source_system) or None
     home = _home(c, state)
     suggested = home[0] if home else _suggested(c, state)
@@ -298,7 +307,7 @@ def _plan_one(c: Candidate, state: dict[str, _Table], by_hash: dict[str, list[In
         if c.table_override and c.table_override != suggested:
             item.reasons.append(f"New table named by the reviewer instead of {suggested}.")
     else:
-        _existing(item, c, table, state)
+        _existing(item, c, table, state, bands)
 
     _apply_override(item, c, state)
     if item.action != SKIP:
@@ -391,7 +400,7 @@ def _column_map(c: Candidate, table: _Table) -> dict[str, str]:
     return mapping
 
 
-def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Table]) -> None:
+def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Table], bands: tuple = ()) -> None:
     item.columns_before = list(table.columns)
     item.column_map = _column_map(c, table)
     if item.column_map:
@@ -445,9 +454,10 @@ def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Tab
             return
         if comparison.kind == DIFFERENT:
             # The earlier file's rows still go, from the table they are in.
+            item.mismatch_table = item.table_name
             _new_table(item, c, state, "Columns differ from the rest of the table.")
             if item.action == NEW_TABLE:
-                item.allowed_actions = [NEW_TABLE, SKIP]
+                _apply_band(item, c, comparison, state, bands)
             return
         item.action = REPLACE
         item.columns_after = evolved_columns(table.columns, incoming)
@@ -460,10 +470,11 @@ def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Tab
         item.reasons.append(f"Same reporting dates as {names} in this batch; both will be kept.")
 
     if comparison.kind == DIFFERENT:
+        item.mismatch_table = item.table_name
         _new_table(item, c, state, "Columns, order and count differ from the existing table.")
         item.requires_confirmation = item.requires_confirmation or table.in_database
         if item.action == NEW_TABLE:
-            item.allowed_actions = [NEW_TABLE, SKIP]
+            _apply_band(item, c, comparison, state, bands)
         return
     item.action = _kind_action(comparison.kind)
     item.columns_after = evolved_columns(table.columns, incoming)
@@ -476,6 +487,8 @@ def _existing(item: PlanItem, c: Candidate, table: _Table, state: dict[str, _Tab
         if comparison.missing:
             item.reasons.append(f"{len(comparison.missing)} column(s) not in this file are left empty: {', '.join(comparison.missing)}.")
         item.requires_confirmation = item.requires_confirmation or table.in_database
+        item.mismatch_table = item.table_name
+        _apply_band(item, c, comparison, state, bands)
 
 
 def _control_decisions(item: PlanItem, c: Candidate, state: dict[str, _Table]) -> None:
@@ -502,6 +515,39 @@ def _control_decisions(item: PlanItem, c: Candidate, state: dict[str, _Table]) -
 
 def _kind_action(kind: str) -> str:
     return {IDENTICAL: APPEND, REORDERED: REORDER, EVOLVED: EVOLVE}.get(kind, NEW_TABLE)
+
+
+def _evolve_original(item: PlanItem, c: Candidate, table: _Table) -> None:
+    """Evolve ``item.mismatch_table`` -- the table a schema mismatch was first compared
+    against -- undoing any redirect ``_new_table`` made to another table or a new one."""
+    item.table_name = item.mismatch_table
+    item.column_map = _column_map(c, table)
+    item.columns_before = list(table.columns)
+    incoming = [item.column_map.get(name, name) for name in c.columns]
+    item.columns_after = evolved_columns(table.columns, incoming)
+    item.action = EVOLVE
+
+
+def _apply_band(item: PlanItem, c: Candidate, comparison, state: dict[str, _Table], bands: tuple) -> None:
+    """A schema mismatch (EVOLVED or DIFFERENT): the reviewer always keeps all three
+    choices -- evolve, a separate table, or skip -- and the default among them is only
+    ever a recommendation, read from the configured similarity bands, never a number
+    picked here. With no bands, this only widens the choices; the default is unchanged."""
+    item.allowed_actions = [EVOLVE, NEW_TABLE, SKIP]
+    band = recommend(comparison.common_percent, bands) if bands else None
+    if band is None:
+        return
+    item.recommendation = band.recommendation
+    item.reasons.append(f"{comparison.common_percent}% of columns in common with {item.mismatch_table}; "
+                        f"recommended: {band.label}.")
+    if band.recommendation == "evolve" and item.action != EVOLVE:
+        base = state.get(item.mismatch_table)
+        if base is not None:
+            _evolve_original(item, c, base)
+    elif band.recommendation == "new_table" and item.action != NEW_TABLE:
+        _new_table(item, c, state, f"{comparison.common_percent}% of columns in common: not similar enough to evolve automatically.")
+    elif band.recommendation == "reject":
+        item.action = SKIP
 
 
 def _new_table(item: PlanItem, c: Candidate, state: dict[str, _Table], why: str) -> None:
@@ -557,6 +603,11 @@ def _apply_override(item: PlanItem, c: Candidate, state: dict[str, _Table]) -> N
         remaining = [load for load in (table.loads if table else []) if load[0] not in {r["id"] for r in item.replaces}]
         item.action, item.rebuild = REPLACE, not remaining
         item.columns_after = list(c.columns) if not remaining else evolved_columns(item.columns_before or [], c.columns)
+    elif wanted == EVOLVE and item.mismatch_table and item.table_name != item.mismatch_table:
+        # Undo a redirect to another table or a new one: evolve the one first compared.
+        base = state.get(item.mismatch_table)
+        if base is not None:
+            _evolve_original(item, c, base)
     elif wanted in (APPEND, REORDER, EVOLVE):
         # Keep the overlapping earlier load instead of replacing it.
         item.action = wanted

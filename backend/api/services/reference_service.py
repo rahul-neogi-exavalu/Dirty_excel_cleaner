@@ -436,6 +436,26 @@ def scope_by_pc(conn) -> dict[str, str]:
     return found
 
 
+def period_choices_by_pc(conn) -> dict[str, dict[str, str]]:
+    """Each profit center's last date basis and reporting file type, each from its most
+    recent control-table row that has one -- staged by a reviewer, not rejected."""
+    from psycopg import sql
+
+    table = sql.SQL("{}.{}").format(_ident(config.CONTROL_SCHEMA), _ident(CONTROL_TABLE))
+    rows = conn.execute(sql.SQL(
+        "SELECT pc_id, date_basis, reporting_file_type FROM {} WHERE pc_id IS NOT NULL "
+        "AND (date_basis IS NOT NULL OR reporting_file_type IS NOT NULL) "
+        "AND processing_action IS DISTINCT FROM 'REJECTED' ORDER BY control_id DESC").format(table))
+    found: dict[str, dict[str, str]] = {}
+    for pc_id, date_basis, reporting_file_type in rows:
+        choices = found.setdefault(pc_id, {})
+        if date_basis:
+            choices.setdefault("date_basis", date_basis)
+        if reporting_file_type:
+            choices.setdefault("reporting_file_type", reporting_file_type)
+    return found
+
+
 def lotl(conn) -> list[tuple]:
     """Every (profit_center_number, legacy_office_name, status) row; [] when the table is absent."""
     from psycopg import sql

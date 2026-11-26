@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from ahi_bronze import schema_compare
+
 # backend/ -- the API's own files live under here; the UI is a sibling folder.
 ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = ROOT.parent
@@ -126,6 +128,14 @@ STAGING_SCHEMA = os.environ.get("AHI_STAGING_SCHEMA", "staging").strip()
 # AED / PED / TED among them decide the reporting dates (backend/config).
 BRONZE_REQUIRED_COLUMNS_FILE = Path(os.environ.get(
     "AHI_BRONZE_REQUIRED_COLUMNS_FILE", ROOT / "config" / "bronze_required_columns.csv"))
+# How similar a file's columns must be to a bronze table's before evolving it, making it
+# a table of its own, or rejecting it is recommended -- advisory only; the reviewer keeps
+# every choice regardless. backend/config/schema_similarity_bands.csv.
+SCHEMA_SIMILARITY_BANDS_FILE = Path(os.environ.get(
+    "AHI_SCHEMA_SIMILARITY_BANDS_FILE", ROOT / "config" / "schema_similarity_bands.csv"))
+SCHEMA_SIMILARITY_BANDS = (
+    schema_compare.load_bands(SCHEMA_SIMILARITY_BANDS_FILE) if SCHEMA_SIMILARITY_BANDS_FILE.exists() else ()
+)
 # The team adds the source system to the file name as a suffix, e.g. ARR_pc0515.xlsx.
 # One capture group; the last match in the file stem wins.
 SOURCE_SYSTEM_PATTERN = os.environ.get(

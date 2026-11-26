@@ -360,7 +360,13 @@ export interface PlanItem {
   table_name: string;
   action: IngestAction;
   allowed_actions: IngestAction[];
-  comparison: { kind: "identical" | "reordered" | "evolved" | "different"; added: string[]; missing: string[] } | null;
+  comparison: {
+    kind: "identical" | "reordered" | "evolved" | "different";
+    added: string[];
+    missing: string[];
+    reordered: boolean;
+    common_percent: number;
+  } | null;
   columns_after: string[];
   columns_before: string[] | null;
   replaces: PlanReplaceRef[];
@@ -370,6 +376,8 @@ export interface PlanItem {
   blockers: string[];
   /** Month (YYYY-MM) -> the earlier loads it replaces that month of, which keep their other months. */
   replace_months: Record<string, PlanReplaceRef[]>;
+  /** A schema mismatch only: which action the configured similarity bands recommend -- advisory, not a restriction. */
+  recommendation: "evolve" | "new_table" | "reject" | null;
 }
 
 export interface IngestPlan {
@@ -478,6 +486,9 @@ export interface SchemaChange {
   reordered: boolean;
   /** The shared columns over their union, as a percentage: how much the two overlap. */
   common_percent: number;
+  /** Which action the configured similarity bands recommend -- advisory, not a restriction. */
+  recommendation: "evolve" | "new_table" | "reject" | null;
+  recommendation_label: string | null;
 }
 
 export interface ValidationFile {
@@ -497,11 +508,13 @@ export interface ValidationFile {
   scope: string | null;
   detected_scope: string | null;
   scope_options: string[];
-  /** AED | TED | PED: always a manual pick. */
+  /** AED | TED | PED: starts as the profit center's last staged choice, if any. */
   date_basis: string | null;
+  detected_date_basis: string | null;
   date_basis_options: string[];
-  /** INCREMENTAL | CUMULATIVE. */
+  /** INCREMENTAL | CUMULATIVE: starts as the profit center's last staged choice, if any. */
   reporting_file_type: string | null;
+  detected_reporting_file_type: string | null;
   reporting_file_type_options: string[];
   /** YYYY-MM. */
   data_collection_period: string | null;
@@ -528,7 +541,17 @@ export interface RequiredColumn {
   vote: { methods: MatchMethod[]; method: MatchMethod | "reviewer" | null; score: number | null; reason: string } | null;
   options: { column: string; methods: MatchMethod[]; score: number }[];
   reviewer: boolean;
+  /** Filled by the reviewer instead of a file column: left null, or one value on every row. */
+  fill: RequiredFill | null;
+  /** Whether it may be filled (not the dates, premium or policy number). */
+  fillable: boolean;
+  /** Worked out at staging from this required column and the premium (rate × premium, amount ÷ premium). */
+  derived_from: string | null;
+  /** A typed rate as it is read, e.g. "12%". */
+  reads_as: string | null;
 }
+
+export type RequiredFill = { kind: "null" } | { kind: "value"; value: string };
 
 export interface DateRange {
   start: string;
@@ -834,11 +857,76 @@ export interface SilverMappingRow {
   candidates: SilverCandidate[];
 }
 
+export type SilverRuleKind = "filter" | "date_format" | "lookup" | "translate" | "derive" | "constant";
+export type SilverRuleTarget = "transaction" | "aggregate" | "both";
+
+/** A profit center's Silver rule (backend/src/ahi_silver/rules.py). */
+export interface SilverRule {
+  id?: number;
+  profit_center: string;
+  key: string;
+  kind: SilverRuleKind;
+  target: SilverRuleTarget;
+  /** The Silver column written; null for a filter or a lookup (its spec names its columns). */
+  column: string | null;
+  scope_bronze_table: string | null;
+  scope_file_like: string | null;
+  scope_sheet: string | null;
+  seq: number;
+  spec: Record<string, unknown>;
+  enabled: boolean;
+  note: string | null;
+  source_ref: string | null;
+  /** "seed" until a person edits it. */
+  approved_by?: string | null;
+  approved_at?: string | null;
+  /** The rule's logic as SQL: sent when it was written as SQL (the spec is read from it);
+   * as stored, the SQL it reads as (null: no exact SQL form). */
+  sql?: string | null;
+  has_sql?: boolean;
+  created_at?: string | null;
+  modified_at?: string | null;
+  /** Deleted rules are kept as history, listed only when asked for. */
+  is_deleted?: boolean;
+  deleted_at?: string | null;
+  deleted_by?: string | null;
+}
+
+/** A spec as SQL, or why it has none. */
+export interface RuleSqlView {
+  sql: string | null;
+  reason: string | null;
+}
+
+/** The spec SQL means, or where and why it cannot be read. */
+export interface RuleSqlParse {
+  spec: Record<string, unknown> | null;
+  error: { message: string; start: number | null; end: number | null } | null;
+}
+
+/** What one rule did in a dry run or a load. */
+export interface SilverRuleStat {
+  key: string;
+  kind: SilverRuleKind;
+  columns: string[];
+  rows_in_scope: number;
+  rows_changed: number;
+  rows_dropped: number;
+  /** Values the rule produced that the column's type could not hold (loaded as NULL). */
+  unreadable: number;
+  /** Columns the rule names that the file does not have. */
+  missing_sources: string[];
+}
+
 export interface SilverQuality {
   rows: number;
   invalid_values: Record<string, number>;
   profit_center: Record<string, number>;
   unmapped_silver_columns?: string[];
+  /** The profit center's rules: rows a filter dropped, what each rule did, rules left out. */
+  rows_filtered?: number;
+  rules?: SilverRuleStat[];
+  rule_notes?: string[];
   /** Aggregated tables: rows loaded (after the unpivot), roll-up rows left out, each measure's total. */
   rows_loaded?: number;
   rollup_rows?: number;

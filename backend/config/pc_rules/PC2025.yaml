@@ -1,0 +1,9 @@
+profit_center: PC2025
+rules:
+  - key: pc2025.number_from_name
+    kind: translate
+    column: profit_center_number
+    spec:
+      source: "src:ProfitCenterName"
+      cases: [{when: Corieri, then: "2025"}]
+    source_ref: ext_pc2025_corieri_silver_cleansed.py:360,402,681

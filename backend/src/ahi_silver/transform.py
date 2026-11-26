@@ -11,6 +11,8 @@ generated key ``ahi_policy_transaction_id``:
   "EffectiveDate" for both the policy and the accounting date);
 * profit_center_name / profit_center_number: completed from the LOTL (the document's
   four cases);
+* the profit center's rules (``rules.py``): row filters, date formats, lookups,
+  translations, derivations and constants, applied before the profit center is settled;
 * policy_effective_year / month: taken from policy_effective_date when not mapped;
 * system columns: source_system, source_table, source_file, ingestion_timestamp (the
   bronze load's processing_date), processed / insert / update timestamps, the source
@@ -30,6 +32,7 @@ from datetime import date, datetime
 import polars as pl
 
 from . import cleanse, hashing, profit_center
+from . import rules as pc_rules
 from .catalog import MAPPED, SilverColumn
 
 NAME, NUMBER = "profit_center_name", "profit_center_number"
@@ -103,16 +106,31 @@ def transform(
     lotl: profit_center.Lotl,
     context: Context | None = None,
     extras: bool = False,
+    rules: list | None = None,
+    lookups: dict[str, list[dict]] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[pl.DataFrame, dict]:
     """``frame``: bronze rows as text (data columns plus LINEAGE). ``mapping``: which bronze
     column feeds which Silver column (see ``_pairs``). ``pc``: the loads' pc_id (PC0796),
-    used for a row whose load does not name its own.
+    used for a row whose load does not name its own. ``rules``: the profit centers'
+    rules (``rules.Rule``); each applies only to the rows of its own profit center, file
+    and sheet. ``lookups``: a bronze_table lookup rule's rows, by rule key. ``headers``:
+    bronze column -> the header the file wrote, which rules name columns by.
 
     Returns the Silver frame (catalog columns in order, without the generated key) and a
     quality report. With ``extras``, the frame also ends with EXTRAS: each row's load,
     how its profit center was settled, and which of its values could not be read.
     """
     context = context or Context()
+    mapped = [column for column in catalog if column.role == MAPPED]
+    run = pc_rules.Run(rules, pc_rules.TRANSACTION, context.source_table, {c.name: c for c in mapped}, lookups,
+                       headers)
+    rows_in = frame.height
+    if run:
+        keep = run.filter(frame, _scope(frame, context, pc))
+        if keep is not None:
+            frame = frame.filter(keep)
+        scope = _scope(frame, context, pc)
     height = frame.height
     source_for: dict[str, str] = {}
     for bronze, silver in _pairs(mapping):
@@ -120,15 +138,21 @@ def transform(
     columns: dict[str, pl.Series] = {}
     invalid: dict[str, int] = {}
     unreadable: dict[str, pl.Series] = {}
-    mapped = [column for column in catalog if column.role == MAPPED]
     for column in mapped:
         bronze = source_for.get(column.name)
         series = frame[bronze] if bronze in frame.columns else pl.Series(column.name, [None] * height, dtype=pl.String)
         typed, failures = cleanse.by_type(series.alias(column.name), column)
+        if run and column.kind in ("date", "timestamp"):
+            typed, reread = run.reparse(column.name, series, typed, frame, scope)
+            failures = failures if reread is None else reread
         columns[column.name] = typed
         if failures:
             invalid[column.name] = failures
             unreadable[column.name] = cleanse.text(series).is_not_null() & typed.is_null()
+
+    # The profit center's own rules, before the profit center itself is settled, so a
+    # name or number a rule gives is completed and checked against the LOTL like any other.
+    ruled = run.apply(columns, frame, scope) if run else []
 
     ids = frame["_ingestion_id"].to_list() if "_ingestion_id" in frame.columns else [None] * height
     loads = [context.loads.get(i) or LoadInfo() for i in ids]
@@ -205,9 +229,19 @@ def transform(
         "rows": height,
         "invalid_values": invalid,
         "profit_center": dict(Counter(status for status in statuses if status)),
-        "unmapped_silver_columns": [name for name in names if name not in source_for],
+        "unmapped_silver_columns": [name for name in names if name not in source_for and name not in ruled],
     }
+    if run:
+        quality["rows_filtered"] = rows_in - height
+        quality["rules"] = run.report()
+        quality["rules_applied"] = run.applied()
     return silver, quality
+
+
+def _scope(frame: pl.DataFrame, context: Context, pc: str | None) -> pc_rules.RowScope:
+    """Each row's profit center, file and sheet, for the rules' scopes."""
+    ids = frame["_ingestion_id"].to_list() if "_ingestion_id" in frame.columns else [None] * frame.height
+    return pc_rules.RowScope.of(frame, [context.loads.get(i) or LoadInfo() for i in ids], pc)
 
 
 def _unreadable_names(unreadable: dict[str, pl.Series], height: int) -> pl.Series:

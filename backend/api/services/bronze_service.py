@@ -376,7 +376,7 @@ def _planned(plan: Plan, conn=None) -> list[planner.PlanItem]:
             keep_ids=file.keep_ids,
             pc_id=file.pc_id,
         ))
-    return planner.plan(candidates, tables, history)
+    return planner.plan(candidates, tables, history, bands=config.SCHEMA_SIMILARITY_BANDS)
 
 
 def _editable(plan: Plan) -> None:
@@ -780,7 +780,8 @@ def _audit(conn, control, plan: Plan, item: planner.PlanItem, file: StagedFile, 
         ).format(control),
         [ingestion_id, plan.id, item.table_name, file.file_name, file.file_sha256, item.source_system,
          list(file.sheet_names), file.period.start, file.period.end, item.action,
-         Jsonb(item.comparison) if item.comparison else None, rows, status, plan.reviewed_by, file.job_id,
+         Jsonb({**item.comparison, "recommendation": item.recommendation}) if item.comparison else None,
+         rows, status, plan.reviewed_by, file.job_id,
          file.output_id, file.pc_id, file.file_received_date, file.division_name, processing_date,
          Jsonb({column["name"]: column["header"] for column in file.columns if column.get("header")}),
          list(file.regions), file.control_id, file.reporting_start_date, file.reporting_end_date,

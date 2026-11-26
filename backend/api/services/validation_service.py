@@ -48,9 +48,10 @@ from functools import lru_cache
 import polars as pl
 from fastapi.encoders import jsonable_encoder
 
-from ahi_bronze import file_meta, grain, naming
+from ahi_bronze import commission, file_meta, grain, naming
 from ahi_bronze import validation as rules
 from ahi_bronze.schema_compare import compare as compare_schema
+from ahi_bronze.schema_compare import recommend as recommend_schema
 from ahi_bronze.validation import Decision, Loaded
 from ahi_clean.orchestrate import SOURCE_SHEET_COLUMN
 from ahi_silver import matching, semantic
@@ -78,6 +79,18 @@ def required() -> tuple[rules.Required, ...]:
     """Every column the business ever requires, with its label, date role and one_of group.
     What applies to one file is a scope's subset of these (``required_for``)."""
     return tuple(rules.load_required(config.BRONZE_REQUIRED_COLUMNS_FILE))
+
+
+# Required columns the reviewer may not fill: the dates (AED / PED / TED), which decide the
+# reporting period, and the columns that identify and value a transaction, which come from
+# the file. The commission amounts come from the file or from their rate x premium, never
+# typed. Every other one may instead be filled -- left null, or one value on every row.
+NOT_FILLABLE = frozenset({"premium", "policy_number"}) | commission.AMOUNTS
+FILL_NULL, FILL_VALUE = "null", "value"
+
+
+def fillable(item: rules.Required) -> bool:
+    return not item.date_role and item.name not in NOT_FILLABLE
 
 
 def required_for(session: Session, scope: str | None) -> tuple[rules.Required, ...]:
@@ -125,9 +138,12 @@ class FileCheck:
     detected_scope: str | None = None
     # AED / TED / PED: the date column rows are filtered by. INCREMENTAL / CUMULATIVE, and
     # the year and month this file reports: together they compute the reporting dates.
-    # Always the reviewer's own pick -- never detected.
+    # The first two start as this profit center's last staged choice (the detected_*
+    # fields), for the reviewer to confirm; the period is always the reviewer's own.
     date_basis: str | None = None
+    detected_date_basis: str | None = None
     reporting_file_type: str | None = None
+    detected_reporting_file_type: str | None = None
     data_collection_period: date | None = None  # always the 1st of the month
     warnings: list[str] = field(default_factory=list)
 
@@ -154,6 +170,9 @@ class OutputCheck:
     # Required column -> the columns any method proposed for it, best first.
     options: dict[str, list[dict]]
     reviewer: set[str] = field(default_factory=set)
+    # Required column -> how the reviewer filled it instead of mapping a file column:
+    # {"kind": "null"} (staged without it) or {"kind": "value", "value": ...} (on every row).
+    fills: dict[str, dict] = field(default_factory=dict)
     # Reporting dates the reviewer entered, or the control table's when adopted.
     entered: tuple[date, date] | None = None
     use_control_dates: bool = False
@@ -189,6 +208,8 @@ class Session:
     # scope -> its required columns; profit_center -> its detected scope.
     scope_required: dict[str, tuple[rules.Required, ...]] = field(default_factory=dict, repr=False)
     scope_by_pc: dict[str, str] = field(default_factory=dict, repr=False)
+    # profit_center -> its last staged date_basis / reporting_file_type.
+    period_choices_by_pc: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
     # pc_id -> month (YYYY-MM) -> rows currently in Bronze: for a cumulative file's
     # mismatch check, against the month it is about to replace.
     bronze_counts: dict[str, dict[str, int]] = field(default_factory=dict, repr=False)
@@ -229,6 +250,7 @@ class Context:
     loaded: dict[str, list[Loaded]] = field(default_factory=dict)
     scope_required: dict[str, tuple[rules.Required, ...]] = field(default_factory=dict)
     scope_by_pc: dict[str, str] = field(default_factory=dict)
+    period_choices_by_pc: dict[str, dict[str, str]] = field(default_factory=dict)
     bronze_counts: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
@@ -293,6 +315,7 @@ def _read(file_names: list[str], conn=None, tracker: progress.Tracker | None = N
     }
     done("Reading each profit center's scope")
     context.scope_by_pc = reference_service.scope_by_pc(conn)
+    context.period_choices_by_pc = reference_service.period_choices_by_pc(conn)
     done(f"Reading the control rows of {len(file_names)} file{'s' if len(file_names) != 1 else ''}")
     context.pending = [dict(zip(_CONTROL_FIELDS, row)) for row in conn.execute(sql.SQL(
         "SELECT {} FROM {} WHERE file_name = ANY(%s) AND bronze_load_flag = 'N' "
@@ -412,6 +435,7 @@ def _build(session: Session, jobs: list) -> None:
     context = _read([job.source_name for job in jobs], tracker=tracker)
     session.divisions, session.pending, session.loaded = context.divisions, context.pending, context.loaded
     session.scope_required, session.scope_by_pc = context.scope_required, context.scope_by_pc
+    session.period_choices_by_pc = context.period_choices_by_pc
     session.bronze_counts = context.bronze_counts
     from . import silver_service
 
@@ -435,25 +459,21 @@ def _build(session: Session, jobs: list) -> None:
     for index, job in enumerate(jobs):
         tokens = file_meta.pc_tokens(job.source_name)
         combined = file_meta.multi_pc_tokens(job.source_name)
-        if len(tokens) == 1:
-            pc = tokens[0]
-        elif combined and len(combined) > len(tokens):
-            # A consolidated file naming several profit centers together (a list, not
-            # two separately-tagged ones): the first named is the parent, so this file
-            # loads, and its division looks up, under it.
-            pc = combined[0]
-        else:
-            pc = None
+        # Several profit centers in the name -- a consolidated list (PC0005,0077,...) or
+        # separately tagged (PC2018_PC0679): the first named is the file's, so it loads,
+        # and its division looks up, under that one. The reviewer can change it.
+        named = combined if combined and len(combined) > len(tokens) else tokens
+        pc = named[0] if named else None
         received, note = file_meta.received_date_from_filename(job.source_name)
         file = FileCheck(job_id=job.id, file_name=job.source_name, file_sha256=job.source_sha256 or job.id,
                          pc_id=pc, detected_pc_id=pc, received=received, detected_received=received,
                          received_note=note)
-        if pc is None and len(tokens) > 1:
-            file.warnings.append(f"The file name names {' and '.join(tokens)}: enter the profit center this file is for.")
-        elif pc and len(combined) > 1:
-            file.warnings.append(f"The file name lists {len(combined)} profit centers: using the first, {pc}, "
-                                 "as this file's (and for its division).")
+        if len(named) > 1:
+            listed = f"lists {len(named)} profit centers" if len(named) > 2 else f"names {' and '.join(named)}"
+            file.warnings.append(f"The file name {listed}: using the first, {pc}, as this file's (and for its "
+                                 "division). Change it if the file is for another.")
         _lookup_scope(session, file)
+        _lookup_period_choices(session, file)
         _prefill_from_control(session, file)
         _lookup_division(session, file)
         session.files.append(file)
@@ -658,6 +678,19 @@ def _lookup_scope(session: Session, file: FileCheck) -> None:
         file.scope = file.detected_scope
 
 
+def _lookup_period_choices(session: Session, file: FileCheck) -> None:
+    """The date basis and reporting file type this profit center's last staged file used,
+    as a starting point. Like the scope, never overwrites the reviewer's own pick (only one
+    that matched what was detected before)."""
+    found = session.period_choices_by_pc.get(file.pc_id, {}) if file.pc_id else {}
+    for name in ("date_basis", "reporting_file_type"):
+        detected = f"detected_{name}"
+        previous = getattr(file, detected)
+        setattr(file, detected, found.get(name))
+        if getattr(file, name) is None or getattr(file, name) == previous:
+            setattr(file, name, getattr(file, detected))
+
+
 def _rematch_file(session: Session, file: FileCheck) -> None:
     """Re-run column matching for this file's outputs: required columns depend on scope, and
     ``_match`` only ran once, in ``_build``, against whatever scope was known then. A scope
@@ -685,6 +718,7 @@ def _rematch_file(session: Session, file: FileCheck) -> None:
                 if target in previous_votes:
                     votes[target] = previous_votes[target]
         output.mapping, output.votes, output.options = mapping, votes, options
+        output.fills = {target: fill for target, fill in output.fills.items() if target in mapping}
 
 
 def division_options(session: Session, file: FileCheck) -> list[str]:
@@ -718,7 +752,114 @@ def _present(session: Session, output: OutputCheck) -> set[str]:
     excluded = {column["original"] for column in output.columns if column["excluded"]}
     file = session.file(output.job_id)
     return {item.name for item in required_for(session, file.scope)
-            if output.mapping.get(item.name) is not None and output.mapping[item.name] not in excluded}
+            if item.name in output.fills
+            or (output.mapping.get(item.name) is not None and output.mapping[item.name] not in excluded)}
+
+
+@dataclass
+class CommissionPair:
+    """One rate / amount pair of an output against its premium (``ahi_bronze.commission``)."""
+
+    rate: str
+    amount: str
+    # Required column -> where its values come from: "column" or "value".
+    have: dict[str, str]
+    # The values, the rate as a fraction, one per row of the output's frame; None: neither.
+    rates: pl.Series | None
+    amounts: pl.Series | None
+    premium: pl.Series
+    # 0.01 when the file writes the rate as a percent (25 for 25%), else 1.
+    scale: float = 1.0
+    # The required column worked out at staging, from the other and the premium.
+    derive: str | None = None
+    agreement: commission.Agreement | None = None
+
+
+def _commission_source(output: OutputCheck, name: str, frame: pl.DataFrame, excluded: set[str]) -> tuple[str, pl.Series] | None:
+    """Where a rate or amount comes from: the reviewer's value, or a file column kept for Bronze."""
+    fill = output.fills.get(name)
+    if fill and fill.get("kind") == FILL_VALUE:
+        value = commission.typed_rate(fill["value"]) if name in commission.RATES else commission.number(fill["value"])
+        return "value", pl.Series([value] * frame.height, dtype=pl.Float64)
+    column = output.mapping.get(name)
+    if column and column not in excluded and column in frame.columns and not fill:
+        return "column", commission.numbers(frame[column])
+    return None
+
+
+def _commission_pairs(session: Session, output: OutputCheck, frame: pl.DataFrame,
+                      excluded: set[str]) -> list[CommissionPair]:
+    """Each rate / amount pair the scope requires, when the premium is in the file: checked
+    row by row when both are there, the other one to derive when only one is."""
+    file = session.file(output.job_id)
+    wanted = {item.name for item in required_for(session, file.scope)}
+    premium_column = output.mapping.get(commission.PREMIUM)
+    if not premium_column or premium_column in excluded or premium_column not in frame.columns:
+        return []
+    premium = commission.numbers(frame[premium_column])
+    pairs = []
+    for rate_name, amount_name in commission.PAIRS:
+        if rate_name not in wanted and amount_name not in wanted:
+            continue
+        rate, amount = (_commission_source(output, name, frame, excluded) for name in (rate_name, amount_name))
+        if rate is None and amount is None:
+            continue
+        pair = CommissionPair(rate_name, amount_name, {}, None, None, premium)
+        if amount is not None:
+            pair.have[amount_name], pair.amounts = amount
+        if rate is not None:
+            pair.have[rate_name], rates = rate
+            if pair.have[rate_name] == "column":
+                pair.scale = commission.scale(rates, pair.amounts, premium)
+            pair.rates = rates * pair.scale
+        if pair.rates is not None and pair.amounts is not None:
+            pair.agreement = commission.check(pair.rates, pair.amounts, premium)
+        else:
+            # Only one of them: the other is derived, unless the reviewer set it to null.
+            other = amount_name if pair.rates is not None else rate_name
+            if other in wanted and not output.fills.get(other):
+                pair.derive = other
+        pairs.append(pair)
+    return pairs
+
+
+def _commission_notes(pairs: list[CommissionPair], labels: dict[str, str]) -> tuple[list[str], dict | None]:
+    """The warnings the pairs raise and the check that sums them up (None: nothing to say)."""
+    warnings, details, ok = [], [], True
+
+    def label(name):
+        return labels.get(name, name)
+
+    for pair in pairs:
+        rule = f"{label(pair.rate)} × Premium = {label(pair.amount)}"
+        if pair.derive:
+            source = pair.amount if pair.derive == pair.rate else pair.rate
+            how = f"{label(pair.amount)} ÷ Premium" if pair.derive == pair.rate else f"{label(pair.rate)} × Premium"
+            details.append(f"{label(pair.derive)} derived as {how}")
+            if pair.derive == pair.amount and pair.scale != 1:
+                details[-1] += f" ({label(source)} read as a percent)"
+            continue
+        agreement = pair.agreement
+        if agreement is None:
+            continue
+        if not agreement.rows:
+            details.append(f"{rule}: no row has a premium to check against")
+            continue
+        if agreement.disagree:
+            ok = False
+            details.append(f"{rule} fails on {agreement.disagree:,} of {agreement.rows:,} rows")
+            row, rate, premium, expected, stated = agreement.examples[0]
+            warnings.append(
+                f"{label(pair.rate)} × Premium does not give {label(pair.amount)} on {agreement.disagree:,} of "
+                f"{agreement.rows:,} rows (row {row}: {rate:.6g} × {premium:,.2f} = {expected:,.2f}, "
+                f"but {label(pair.amount)} is {stated:,.2f}).")
+        else:
+            details.append(f"{rule} on all {agreement.rows:,} rows")
+        if agreement.no_premium:
+            details[-1] += f"; {agreement.no_premium:,} without a premium not checked"
+    if not details:
+        return warnings, None
+    return warnings, {"id": "commission", "label": "Commission arithmetic", "ok": ok, "detail": "; ".join(details)}
 
 
 def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, control: dict | None) -> None:
@@ -944,6 +1085,9 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
                         "another column.")
     if listed and start and origin not in ("entered", "control") and listed != (start, end):
         warnings.append(f"The control table lists {_span(*listed)}; the data says {_span(start, end)}.")
+    pairs = [] if aggregated else _commission_pairs(session, output, frame, excluded)
+    commission_warnings, commission_check = _commission_notes(pairs, labels)
+    warnings += commission_warnings
     needs = []
     if not file.pc_id:
         needs.append(PC_NEEDED)
@@ -996,6 +1140,8 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
         {"id": "bronze", "label": "Against Bronze", "ok": bool(decision) and decision.action in (rules.INSERT, rules.APPEND),
          "detail": decision.action if decision else "Needs the reporting dates"},
     ]
+    if commission_check:
+        checks.append(commission_check)
     compare = None
     if decision and decision.overlaps and start:
         month = rules.month_key(start)
@@ -1010,6 +1156,9 @@ def _evaluate_one(session: Session, file: FileCheck, output: OutputCheck, contro
     # The whole-file check and the fitness follow in _evaluate_file.
     output.result = {
         "verdict": verdict, "needs": needs, "warnings": warnings, "missing": missing, "checks": checks,
+        # Required column -> the one it is derived from at staging (rate x premium, or amount / premium).
+        "derived": {pair.derive: pair.amount if pair.derive == pair.rate else pair.rate
+                    for pair in pairs if pair.derive},
         "dates": {role: stat.as_dict() for role, stat in stats.items()},
         # period_type is the actual, possibly-NULL ("Invalid YTD") shape for a transactional
         # file; computed_period_type is the clean YTD/MONTHLY the declared file type and
@@ -1227,7 +1376,10 @@ def _schema_change(output: OutputCheck, decision: Decision | None) -> dict | Non
     kept = bronze_service.ingested_columns(_record(output))
     sheet = {name for original, name in kept if original == SOURCE_SHEET_COLUMN}
     comparison = compare_schema(list(home.column_names), [name for _, name in kept], ignore=sheet)
-    return {"against": home.file_name, "control_id": home.control_id, **comparison.as_dict()}
+    band = recommend_schema(comparison.common_percent, config.SCHEMA_SIMILARITY_BANDS)
+    return {"against": home.file_name, "control_id": home.control_id,
+            "recommendation": band.recommendation if band else None,
+            "recommendation_label": band.label if band else None, **comparison.as_dict()}
 
 
 def _origin_label(origin: str | None, detail: str | None = None) -> str:
@@ -1279,6 +1431,7 @@ def update_file(session_id: str, job_id: str, fields: set[str], pc_id: str | Non
                 file.pc_id = normalized
                 previous_scope = file.scope
                 _lookup_scope(session, file)
+                _lookup_period_choices(session, file)
                 _lookup_division(session, file)
                 if file.scope != previous_scope:
                     _rematch_file(session, file)
@@ -1320,7 +1473,8 @@ def update_output(session_id: str, key: str, fields: set[str], mapping: dict[str
                   choice: str | None = None, use_control_dates: bool | None = None,
                   date_role: str | None = None, replaces_file: str | None = None,
                   companion_of: str | None = None, grain_choice: str | None = None,
-                  replace_months: list[str] | None = None) -> Session:
+                  replace_months: list[str] | None = None,
+                  fills: dict[str, dict | None] | None = None) -> Session:
     session = ready(session_id)
     with session.lock:
         output = session.output(key)
@@ -1335,9 +1489,15 @@ def update_output(session_id: str, key: str, fields: set[str], mapping: dict[str
                 if column is not None and column not in known:
                     raise ApiError(422, "unknown_column", f"{output.name} has no column '{column}'.")
                 output.mapping[target] = column
+                output.fills.pop(target, None)
                 output.reviewer.add(target)
                 output.votes[target] = {"methods": [], "method": "reviewer", "score": None,
                                         "reason": "Chosen by the reviewer."}
+        if "fills" in fields and fills:
+            file = session.file(output.job_id)
+            items = {item.name: item for item in required_for(session, file.scope)}
+            for target, fill in fills.items():
+                _set_fill(output, items, target, fill)
         if fields & {"reporting_start_date", "reporting_end_date"}:
             if not reporting_start_date and not reporting_end_date:
                 output.entered = None
@@ -1431,6 +1591,44 @@ def _parse_day(value: str | None, name: str) -> date | None:
         raise ApiError(422, "invalid_date", "Enter the date as YYYY-MM-DD.", field=name) from None
 
 
+def _set_fill(output: OutputCheck, items: dict[str, rules.Required], target: str, fill: dict | None) -> None:
+    """Fill a required column instead of mapping it (null, or one value), or clear the fill
+    (``None``: back to missing, for a file column to be chosen again)."""
+    item = items.get(target)
+    if item is None:
+        raise ApiError(422, "unknown_required_column", f"'{target}' is not a required column.")
+    if fill is None:
+        output.fills.pop(target, None)
+        return
+    if not fillable(item):
+        if target in commission.AMOUNTS:
+            rate = next(rate for rate, amount in commission.PAIRS if amount == target)
+            raise ApiError(422, "not_fillable", f"{item.label} cannot be entered: it is worked out from "
+                           f"{items[rate].label if rate in items else rate} × Premium.",
+                           "Choose its file column, or enter the rate instead.")
+        raise ApiError(422, "not_fillable", f"{item.label} must come from a column of the file.",
+                       "Choose the file column that holds it.")
+    kind = fill.get("kind")
+    if kind == FILL_NULL:
+        stored = {"kind": FILL_NULL}
+        reason = "Left null by the reviewer."
+    elif kind == FILL_VALUE:
+        value = str(fill.get("value") or "").strip()
+        if not value:
+            raise ApiError(422, "empty_fill_value", f"Enter the value {item.label} should have.")
+        if target in commission.RATES and commission.number(value) is None:
+            raise ApiError(422, "fill_not_a_number", f"{item.label} is a rate: '{value}' is not a number.",
+                           "Enter it as 12, 12% or 0.12.")
+        stored = {"kind": FILL_VALUE, "value": value}
+        reason = f"'{value}' on every row, entered by the reviewer."
+    else:
+        raise ApiError(422, "invalid_fill", f"'{kind}' is neither null nor value.")
+    output.fills[target] = stored
+    output.mapping[target] = None
+    output.reviewer.add(target)
+    output.votes[target] = {"methods": [], "method": "reviewer", "score": None, "reason": reason}
+
+
 def _parse_month(value: str | None, name: str) -> date:
     text = (value or "").strip()
     for fmt, size in (("%Y-%m-%d", 10), ("%Y-%m", 7)):
@@ -1505,6 +1703,8 @@ def _stage_one(conn, session: Session, output: OutputCheck, user_name: str, comp
     action = decision.action
     kept = bronze_service.ingested_columns(record)
     by_original = {column["original"]: column for column in output.columns}
+    extras = _extra_columns(session, output, record)
+    extra_of = {target: (name, how) for name, _, target, how in extras}
 
     if action in (rules.INSERT, rules.APPEND):
         _save_mapping(conn, file, output, by_original, user_name)
@@ -1512,11 +1712,12 @@ def _stage_one(conn, session: Session, output: OutputCheck, user_name: str, comp
     control = sql.SQL("{}.{}").format(sql.Identifier(config.CONTROL_SCHEMA), sql.Identifier("control_table"))
     details = {
         "columns": [{"name": name, "header": by_original[original]["header"],
-                     "datatype": by_original[original]["dtype"]} for original, name in kept],
+                     "datatype": by_original[original]["dtype"]} for original, name in kept]
+        + [{"name": name, "header": _label_of(session, output, target), "datatype": "String"}
+           for name, _, target, _ in extras],
         "provenance": next((name for original, name in kept if original == SOURCE_SHEET_COLUMN), None),
         "regions": list(record.tables), "rows": record.frame.height, "sheets": list(record.sheet_names),
-        "mapping": {target: ({"column": by_original[column]["name"], "header": by_original[column]["header"],
-                              "method": output.votes.get(target, {}).get("method")} if column else None)
+        "mapping": {target: _staged_mapping(output, target, column, by_original, extra_of)
                     for target, column in output.mapping.items()},
         "dates": result["dates"], "months": result["months"], "checks": result["checks"],
         "fitness": result["fitness"], "reasons": result["reasons"], "warnings": result["warnings"],
@@ -1560,7 +1761,7 @@ def _stage_one(conn, session: Session, output: OutputCheck, user_name: str, comp
             sql.SQL(", ").join(sql.Placeholder() for _ in names)), [values[name] for name in names]).fetchone()[0]
 
     table = _staging_name(conn, file, record, result, control_id)
-    _write_staging(conn, table, record, kept, result)
+    _write_staging(conn, table, record, kept, result, extras)
     conn.execute(sql.SQL("UPDATE {} SET staging_table = %s WHERE control_id = %s").format(control), [table, control_id])
     return {"control_id": control_id, "staging_table": table, "processing_action": action,
             "seeded": bool(result["control"] and result["control"]["seeded"])}
@@ -1599,7 +1800,69 @@ def _save_mapping(conn, file: FileCheck, output: OutputCheck, by_original: dict,
             [file.pc_id, by_original[column]["header"], target, method, user_name])
 
 
-def _write_staging(conn, table: str, record: OutputRecord, kept: list[tuple[str, str]], result: dict) -> None:
+def _label_of(session: Session, output: OutputCheck, target: str) -> str:
+    file = session.file(output.job_id)
+    return next((item.label for item in required_for(session, file.scope) if item.name == target), target)
+
+
+def _extra_columns(session: Session, output: OutputCheck,
+                   record: OutputRecord) -> list[tuple[str, str | pl.Series, str, str]]:
+    """(staged column, values, required column, how) for each required column that is not
+    a column of the file: a value the reviewer typed ("value", one for every row; a rate as
+    a fraction) or one derived from its commission pair ("derived", row by row). Each is a
+    column of its own, named for the required column (never the name of one of the file's
+    columns), so Bronze carries it and Silver matches it by name."""
+    taken = set(naming.column_names(record.columns))
+    wanted = {item.name for item in required_for(session, session.file(output.job_id).scope)}
+
+    def named(target):
+        name, number = target, 1
+        while name in taken:
+            number += 1
+            name = f"{target}_{number}"
+        taken.add(name)
+        return name
+
+    found = []
+    for target, fill in output.fills.items():
+        if fill.get("kind") != FILL_VALUE or target not in wanted:
+            continue
+        value = fill["value"]
+        if target in commission.RATES:
+            value = f"{round(commission.typed_rate(value), 6):g}"
+        found.append((named(target), value, target, "value"))
+    if not output.result.get("aggregated"):
+        excluded = {column["original"] for column in output.columns if column["excluded"]}
+        for pair in _commission_pairs(session, output, record.frame, excluded):
+            if pair.derive == pair.amount:
+                found.append((named(pair.amount), commission.derive_amount(pair.rates, pair.premium), pair.amount, "derived"))
+            elif pair.derive == pair.rate:
+                found.append((named(pair.rate), commission.derive_rate(pair.amounts, pair.premium), pair.rate, "derived"))
+    return found
+
+
+def _staged_mapping(output: OutputCheck, target: str, column: str | None, by_original: dict,
+                    extra_of: dict[str, tuple[str, str]]) -> dict | None:
+    """What the control row records for one required column: the file column, the column
+    made for it (a typed value, or derived from its commission pair), the reviewer's null,
+    or None (missing)."""
+    fill = output.fills.get(target)
+    name, how = extra_of.get(target, (None, None))
+    if how == "value" and fill:
+        return {"column": name, "header": None, "method": "value", "value": fill["value"]}
+    if how == "derived":
+        return {"column": name, "header": None, "method": "derived",
+                "from": (output.result.get("derived") or {}).get(target)}
+    if fill and fill.get("kind") == FILL_NULL:
+        return {"column": None, "header": None, "method": "null"}
+    if column:
+        return {"column": by_original[column]["name"], "header": by_original[column]["header"],
+                "method": output.votes.get(target, {}).get("method")}
+    return None
+
+
+def _write_staging(conn, table: str, record: OutputRecord, kept: list[tuple[str, str]], result: dict,
+                   extras: list[tuple[str, str | pl.Series, str, str]] = ()) -> None:
     """The output's kept columns as text, each row's sheet, and each row's month -- only
     rows whose date basis column falls in the declared reporting period (the file may
     carry extra rows outside it, for a cumulative file as much as an incremental one)."""
@@ -1614,6 +1877,12 @@ def _write_staging(conn, table: str, record: OutputRecord, kept: list[tuple[str,
         mask = rules.in_range(rules.parse_dates(record.frame[basis_column]), start, end)
     source = record.frame.filter(mask) if mask is not None else record.frame
     frame = bronze_service._as_text(record, rows=mask)
+    if extras:
+        # A typed value on every row; a derived column's rows kept as the file's are.
+        frame = frame.with_columns([
+            (values.filter(mask) if mask is not None else values).alias(name) if isinstance(values, pl.Series)
+            else pl.lit(values, dtype=pl.String).alias(name)
+            for name, values, _, _ in extras])
     sheets = list(dict.fromkeys(record.sheet_names))
     if SOURCE_SHEET_COLUMN in source.columns:
         sheet = source[SOURCE_SHEET_COLUMN].cast(pl.String)
@@ -1636,6 +1905,13 @@ def _write_staging(conn, table: str, record: OutputRecord, kept: list[tuple[str,
 # --- the API's view ------------------------------------------------------------------
 
 
+def _reads_as(name: str, fill: dict | None) -> str | None:
+    if name not in commission.RATES or not fill or fill.get("kind") != FILL_VALUE:
+        return None
+    rate = commission.typed_rate(fill["value"])
+    return None if rate is None else f"{rate * 100:.6g}%"
+
+
 def session_out(session: Session) -> dict:
     files = []
     for file in session.files:
@@ -1646,8 +1922,10 @@ def session_out(session: Session) -> dict:
             "received_note": file.received_note, "division_name": file.division_name,
             "division_matches": file.division_matches, "division_options": division_options(session, file),
             "scope": file.scope, "detected_scope": file.detected_scope, "scope_options": list(rules.SCOPE_VALUES),
-            "date_basis": file.date_basis, "date_basis_options": list(rules.DATE_BASIS_VALUES),
+            "date_basis": file.date_basis, "detected_date_basis": file.detected_date_basis,
+            "date_basis_options": list(rules.DATE_BASIS_VALUES),
             "reporting_file_type": file.reporting_file_type,
+            "detected_reporting_file_type": file.detected_reporting_file_type,
             "reporting_file_type_options": list(rules.FILE_TYPE_VALUES),
             "data_collection_period": rules.month_key(file.data_collection_period)
                 if file.data_collection_period else None,
@@ -1667,7 +1945,13 @@ def session_out(session: Session) -> dict:
                  "one_of": [other.name for other in scoped if item.one_of and other.one_of == item.one_of
                             and other.name != item.name],
                  "column": output.mapping.get(item.name), "vote": output.votes.get(item.name),
-                 "options": output.options.get(item.name, []), "reviewer": item.name in output.reviewer}
+                 "options": output.options.get(item.name, []), "reviewer": item.name in output.reviewer,
+                 # The reviewer's null or value in place of a file column; whether it may have one.
+                 "fill": output.fills.get(item.name), "fillable": fillable(item),
+                 # Worked out at staging from this required column (rate x premium, amount / premium).
+                 "derived_from": (output.result.get("derived") or {}).get(item.name),
+                 # A typed rate, as it is read: "12%".
+                 "reads_as": _reads_as(item.name, output.fills.get(item.name))}
                 for item in scoped
             ],
             "entered": bool(output.entered), "use_control_dates": output.use_control_dates,
