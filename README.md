@@ -1,0 +1,677 @@
+# AHI POC — Schema-free Excel cleaning pipeline
+
+Turns report-shaped Excel exports and delimited text files — banners, merged titles, footers, page breaks, blank
+gutters, subtotals, repeated headers, transposed layouts, side-by-side tables — into flat,
+table-ready CSVs, with an audit report explaining every structural decision and a
+per-column metadata summary beside every cleaned file.
+
+**No schema, no aliases, no field names.** The pipeline has no idea what a "premium" is.
+Every decision comes from the data's own shape, types, distinctness, density and
+arithmetic, so a file with column names it has never seen goes through the same code path
+as a known one. Output columns are the file's own labels, normalized.
+
+**Every scenario workbook produces the correct records.** A few carry an advisory — the
+pipeline reporting honest uncertainty, not an error.
+
+Built on **polars**. **1,000,000 rows in 93 seconds** on one sheet. A bad workbook costs
+you that workbook and nothing else.
+
+- [BUSINESS_GUIDE.md](BUSINESS_GUIDE.md) — how it decides, in plain language, no code
+- [ARCHITECTURE.md](ARCHITECTURE.md) — the full design, diagrams and the ablation study
+
+## Run
+
+```bash
+pip install -r requirements.txt
+```
+
+Run from the project root. `clean.py` puts `backend/src/` on the path itself, so nothing
+needs setting first — this works the same in PowerShell, cmd and bash.
+
+```bash
+python clean.py
+```
+
+With no arguments it cleans every `.xlsx`, `.csv` and `.tsv` in
+`backend/sample_files_uncleaned/` into `backend/cleaned/` and `backend/audit/`. That folder
+is git-ignored — the scenario corpus is expected to be swapped, so supply your own files
+there. (`backend/legacy/` keeps the six original POC workbooks, which are tracked.) Paths
+you pass are relative to where you run the command. To point it at other files:
+
+```bash
+python clean.py "some_folder/*.xlsx" --out cleaned --audit audit
+```
+
+`--workers 0` uses one worker per CPU. `--max-cells` sets the per-sheet ceiling (default
+20,000,000). Process several workbooks at once:
+
+```bash
+python clean.py "inbox/*.xlsx" --workers 8
+```
+
+Score the cleaner against every scenario workbook:
+
+```bash
+python backend/tools/scorecard.py
+```
+
+Run the tests (from the project root; `pytest.ini` points at `backend/tests`):
+
+```bash
+python -m pytest
+```
+
+Measure it, and check which signals the current corpus actually exercises:
+
+```bash
+python backend/tools/benchmark.py
+```
+
+```bash
+python backend/tools/ablation.py
+```
+
+## Web app
+
+A browser UI over the same cleaner: upload a workbook, pick sheets, run, review, rename
+headers, export. The API (`backend/api/`) calls the `ahi_clean` functions in
+`backend/src/` directly and changes none of them. Run from the project root:
+
+```bash
+.venv\Scripts\python -m uvicorn api.main:app --app-dir backend --reload --port 8080
+```
+
+```bash
+npm --prefix frontend install
+```
+
+```bash
+npm --prefix frontend run dev
+```
+
+Open http://localhost:5173 (Vite proxies `/api` to port 8080; set `VITE_API_TARGET` to use
+another address). For a single-origin
+deployment, `npm --prefix frontend run build` and uvicorn then serves `frontend/dist` itself.
+
+What the UI can and cannot know, and when:
+
+- **Before a run** only sheet names are shown. A dirty sheet's raw extent — banners,
+  subtotals, blank rows — says nothing reliable about the table inside it, so row and
+  column counts are left to the cleaner.
+- **Appending** is a setting, not a prediction. With it on, sheets whose *cleaned*
+  headers match exactly are stacked (`orchestrate.plan_workbook`); with it off, each table
+  ships alone. Which sheets actually combined is reported after the run.
+- **Header renames** are stored per output and applied at export time, so a CSV or
+  metadata file downloaded after a rename always carries the new names. The metadata is
+  still built from the original frame, so appended tables stay described per sheet.
+
+Uploads, job outputs and exports go to `backend/.workspace/` (git-ignored). Jobs live in memory,
+so a server restart means uploading again.
+
+### Sign-in, users and job history
+
+Every `/api` route except `/api/health` and sign-in needs a signed-in user. Users and the
+job history live in the app database (`APP_DB_*` in `.env`, schema `APP_DB_SCHEMA`); their
+tables are created on first use from `backend/migrations_app/`. Create the first admin
+once, then add everyone else from **Users** in the app:
+
+```bash
+.venv\Scripts\python backend\tools\create_user.py --name "Your Name" --email you@example.com --admin
+```
+
+- **Hashing is SHA-256 throughout.** Passwords use PBKDF2-HMAC-SHA256 (salted, 600,000
+  rounds); the session cookie (HttpOnly, SameSite=Lax) is signed with HMAC-SHA256 using
+  `APP_SESSION_SECRET`; files are fingerprinted with SHA-256.
+- **Signing in always opens Configure.** Admin-issued passwords are temporary: the user
+  sets their own (8 characters minimum) before the app opens.
+- **One job id per run.** Every CSV and metadata file a run writes carries the run's id
+  (`{table}_{job_id}.csv`), and the `jobs` table holds one row per output, all sharing that
+  id. Bronze ingests and Silver loads are recorded the same way, with `source_job_id`
+  pointing back to the cleaning run. **History** shows them grouped by run, with the log.
+- Deactivation, expiry and password resets apply within 30 seconds; accounts are never
+  deleted, so history keeps pointing at whoever ran each job.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/workbooks` | Upload; validates type, size and readability; lists sheets |
+| `POST /api/jobs` | Start cleaning `{workbook_id, sheets, append}` |
+| `GET /api/jobs/{id}` | Live status: stage, current sheet, rows kept/removed |
+| `POST /api/jobs/{id}/cancel` | Stop after the current sheet |
+| `GET /api/jobs/{id}/results` | Outputs, per-sheet report, append decisions, warnings |
+| `GET /api/jobs/{id}/outputs/{oid}/preview` | Paginated rows, server-side search/sort |
+| `GET /api/jobs/{id}/outputs/{oid}/columns` | Column profile (the metadata) |
+| `PUT /api/jobs/{id}/outputs/{oid}/headers` | Rename headers `{renames: {old: new}}` |
+| `GET /api/jobs/{id}/outputs/{oid}/export/csv` · `/metadata` | Downloads with current headers |
+| `GET /api/jobs/{id}/export/audit` · `/export/zip` | Audit report; everything zipped |
+
+## Ingest (File → Bronze)
+
+Step 4 of the UI loads cleaned tables into a Postgres **bronze** layer, following
+`enhancements/AHI-File-Bronze-Scenario-Doc.docx`. A person stays in the loop for every
+decision that can lose or reshape data.
+
+> **Full write-up:** [enhancements/FILE_TO_BRONZE.md](enhancements/FILE_TO_BRONZE.md) covers the
+> architecture, the data model, and every business requirement mapped to the code and test that
+> satisfies it.
+
+**Setup:** copy `.env.example` to `backend/.env` (or `.env` in the project root; both are
+git-ignored, and `backend/.env` wins) and fill in `AHI_DB_HOST`, `AHI_DB_PORT`,
+`AHI_DB_NAME`, `AHI_DB_USER`, `AHI_DB_PASSWORD` (`AHI_DB_SSLMODE=require` for cloud).
+Never put real values in `.env.example`; it is committed.
+The control tables (`ingest.bronze_table`, `ingest.ingestion`, `ingest.ingest_plan`)
+are created on first use from `backend/migrations/`. Until the database is set, the
+step shows "Database not configured" and cleaning works as before.
+
+**What it decides** (`backend/src/ahi_bronze/planner.py`, pure and unit-tested):
+
+| Situation | Action | Confirmation |
+|---|---|---|
+| New table | Create `ext_{source}_{sheet}`, or `ext_{source}_data` for month/date sheets | — |
+| Later period, identical columns | Append | — |
+| Later period, same columns reordered | Reorder to the table's order, append | — |
+| Later period, columns added or missing (in any order) | Evolve (`ADD COLUMN`; missing load as NULL) | Required |
+| Later period, different schema | Another table of the same source it fits, else a new table `…_v2` (never a date in the name) | Required |
+| Period covering the loaded one (revised Jan–Jun, or Jan–Jul) | Replace the earlier load(s), in whichever table they are | Required |
+| Period overlapping the loaded one only partly (May–Jul after Jan–Jun) | Blocked until the reviewer chooses Replace, Append, a new table or Skip | Required |
+| Same file content again | Skip (can be overridden to Replace) | Required if overridden |
+
+- **Detection:** the source system and `pc_id` come from the same `PC` token in the file name, zero-padded (`ARR_PC515.xlsx` → `pc0515`, `PC0515`). A name with two different PC tokens is left for the reviewer; a name with none falls back to `AHI_SOURCE_SYSTEM_PATTERN`, never taking a period (`fy2025`, `jun2025`) or a version (`v12`). The period comes from the file name when it states one in words (`JanJun_2026`, `Q2 2026`, `H1`), else from the accounting / transaction date columns, then month-named sheets. All are pre-filled and editable, and the review warns when the data's dates fall outside the period the name states, or the profit center has no division.
+- **File-level values** (the business's bronze schema), detected and editable in the Files step:
+  - `pc_id`: `PC` plus the 4-digit profit center, from the file name (`PC796_2026-06 …` → `PC0796`).
+  - `file_date`: from the file name (`2026-06` → 2026-06-01; `Jun 2026` and `202606` also work).
+  - `division_name`: from `division_mapping` by profit center. The reviewer picks when the table lists two divisions.
+
+  A missing pc_id or file date, or an unchosen division, blocks approval.
+- **Atomic loads:** an approved plan loads in **one transaction**, so either all of it lands or none of it does. Rows are checked against the cleaned row count before commit.
+- **Columns:** every bronze table is `pc_id`, then the file's columns, then `file_date`, `division_name`, `file_name` (exact) and `processing_date` (the load time, a timestamp, one per load). Internal lineage follows: `_ingestion_id`, `_source_file`, `_source_sheet`, `_ingested_at`. Tables created earlier gain the five columns on their next load. The file's columns are `text`; typing is left to Silver.
+- **Tests:** run the unit tests with `python -m pytest backend/tests -k bronze`. The end-to-end test runs when `AHI_TEST_DATABASE_URL` points at a scratch Postgres.
+- **Duplicates:** a file is identified by its content hash plus the table regions an output came from, so two tables on one sheet are two loads. Each table of a multi-table workbook is matched to its own earlier load, and the same file twice in one batch is loaded once. When a batch holds Jan–Jun and Jan–Jul of the same table, only Jan–Jul loads by default.
+- **Repeated headers:** headers that clean to the same name are numbered (`Amount ($)` → `amount`, `Amount (%)` → `amount_2`). A later file that lists them the other way round is matched by the headers as written, so each loads into its own column.
+- **Source headers:** every bronze column's header as the file wrote it is kept in the registry and the audit table; Silver shows it and saves it in the DRT column mapping.
+- **Approval is re-checked:** on approve, and again inside the load under its lock, the plan is rebuilt against the bronze layer as it is now. If anything the reviewer confirmed has changed (action, target table, columns, or the loads it replaces), the plan is refused with `plan_changed` and must be reviewed again.
+- **Errors:** an unreachable database, or a user that can't create schemas, returns a 503 with advice rather than a server error.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/bronze/status` | Configured / reachable |
+| `POST /api/bronze/plans` | Build a plan `{job_ids, batch_id}` |
+| `PATCH /api/bronze/plans/{id}/files/{job_id}` | Edit pc_id, file date, division, source system, period |
+| `PATCH /api/bronze/plans/{id}/items/{key}` | Edit table name / action |
+| `POST /api/bronze/plans/{id}/approve` | `{reviewed_by, confirmed}`; 409 until every risky item is confirmed |
+| `GET /api/bronze/tables` | Registry with ingestion history |
+
+## Silver (Bronze → Silver)
+
+Step 5 of the UI follows `enhancements/AHI-Bronze-Silver-Scenario-Doc.docx`. It takes bronze loads that have no successful Silver run yet (the ingestion audit table), maps their columns onto one common schema, cleanses them, and loads them. A person approves the whole mapping first.
+
+> **Full write-up:** [enhancements/BRONZE_TO_SILVER.md](enhancements/BRONZE_TO_SILVER.md) covers the
+> architecture, the voting matcher, cleansing, and every business requirement mapped to the
+> code and test that satisfies it.
+
+**Stages:** Bronze → **Silver Cleansed** → **Final Silver**, as the document describes. Each bronze table has a source-specific cleansed table of the same name in `AHI_CLEANSED_SCHEMA` (e.g. `ahi_bronze_cleansed.ext_pc0101_arr`): its rows mapped onto the Silver columns and typed, with the load they came from, how the profit center was settled and which values could not be read. Final Silver (`silver_transaction`) is loaded from it in the same transaction.
+
+**Tables in `AHI_SILVER_SCHEMA`:**
+
+| Table | Holds |
+|---|---|
+| `drt_column_mapping` | The business's DRT column mapping (`profit_center, pc_column, drt_column`) plus `silver_column_name`, the silver_transaction column it means. It is seeded from `assets/drt_column_mapping.xlsx` and grows with every approved mapping. `pc_column` is the header as the file wrote it. `drt_column` is the business's DRT column for the row's Silver column (one of the 48 in `<control>.drt_label`). One source column may have two rows (two Silver columns). Ignores are never saved: an ignored column is asked about again next time. |
+| `silver_transaction` | **Exactly** the 69 columns of the business's `silver_schema` (`backend/config/silver_columns.csv`), typed as it states. A bronze load's rows are identified by `source_table`, `source_file` and `ingestion_timestamp` (the load's `processing_date`). |
+| `silver_aggregate` | **Exactly** the 75 columns of `silver_aggregate_schema` (`backend/config/silver_aggregate_columns.csv`). It holds two kinds of rows, told apart by `agg_data_source`: the roll-up of `silver_transaction` (`silver_transaction`), and the profit center's own aggregates, loaded as reported from an `_agg` bronze table (`bronze_aggregate`, `record_grain` `AS_REPORTED`). Rebuilding the roll-up never touches the second kind. The roll-up is rebuilt from `silver_transaction` per source system at profit center × accounting month grain: sums of premium, fees, commissions and revenue, plus the policy count. Columns the detail cannot supply stay NULL. |
+
+**Reference data** (`assets/`, loaded into empty tables on first use; reload with `python backend/tools/seed_reference.py --replace`):
+
+| Table | Workbook | Used for |
+|---|---|---|
+| `<control>.division_mapping` | `division_table_details.xlsx` | bronze `division_name` |
+| `<control>.lotl` | `pc_name_pc_number_from_lotl.xlsx` (`profit_center_number, legacy_office_name, status`) | Silver profit center name and number |
+| `<silver>.drt_column_mapping` | `drt_column_mapping.xlsx` | the saved vote and the approved mapping |
+| `<control>.drt_label` | `drt_column_mapping.xlsx` (distinct `DRT_Column`), then every DRT column of `silver_columns.csv` | the DRT columns, each with its `silver_column_name`; the only labels written to `drt_column`. Kept in step at startup, which also fills `drt_column` on rows saved without one |
+
+**The Silver columns** are listed in `backend/config/silver_columns.csv` (`silver_column_name, drt_column_name, data_type, business_key, role, description`), mirroring `assets/silver_schema.xlsx`:
+- **Roles:** 50 are `mapped` (a bronze column can map to them); 19 are `system` (keys, hashes, lineage, timestamps and periods, filled by the pipeline).
+- **Matching help:** synonyms written in the description's parentheses help matching.
+
+**Matching: independent votes.** The methods do not run one after another. Each one votes on every column (`backend/src/ahi_silver/matching.py`):
+
+1. **Saved:** the rows in `drt_column_mapping` of the profit centers the table's loads carry, or the same column name approved for another profit center. A bronze column meets a row by its source header as written (case and spacing aside); a load made before headers were kept meets it on normalized words ("Net Premium" ~ `net_premium`).
+2. **Exact:** same words as the Silver or DRT name, after splitting run-together names (`profitcentername`) and expanding abbreviations (`acct_eff_dt`).
+3. **Fuzzy:** rapidfuzz WRatio of at least `AHI_MATCH_FUZZY_MIN` (85). The match must share a distinctive word, beat the runner-up by 5 points and agree on the kind of value, so a column that shares only "name" is never guessed.
+4. **Semantic:** word2vec cosine of at least `AHI_MATCH_SEMANTIC_MIN` (0.72) against the name, DRT name and synonyms, with the same margin and kind rule. Names with an unexpanded abbreviation (`acc`, `incp`) get no word2vec vote.
+   - Vectors are read straight from `AHI_WORD2VEC_PATH` (word2vec `.bin`, `.txt` or gzipped). There is no gensim dependency: gensim has no working build for this Python.
+   - The 200,000 most frequent words are loaded on first use, about 9 seconds for the Google News model.
+5. **AI:** one structured-output call per table over all its columns.
+   - **Azure OpenAI** is the default (`AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_DEPLOYMENT_NAME`), called through the official `openai` SDK.
+   - **Gemini** is the alternative (`AHI_AI_PROVIDER=gemini`, `GEMINI_API_KEY`).
+   - `AHI_AI_ENABLED=false` turns the AI vote off.
+   - The prompt is **few-shot** (`backend/src/ahi_silver/llm.py`):
+     - a decoding method;
+     - 21 worked contrast examples (`eff_dt` = `effective_date`; `acc_eff_dt` = `accountingeffectivedate`; a carrier code is not a carrier name; the insured is not the insurer);
+     - the mappings reviewers have approved, as precedents.
+   - The AI may answer "nothing fits", or add a second choice for an ambiguous name.
+   - Only column names and the Silver list are sent. Sample values go too only if `AHI_AI_SEND_SAMPLES=true`. Answers outside the Silver list are dropped.
+
+**Ranking and the reviewer:**
+
+- Votes for the same Silver column form a candidate. Candidates rank by this profit center's saved mapping first, then the number of methods that agree, then the strongest vote.
+- **One column, two targets:** one bronze column can fill several DRT columns: choose it for each. The DRT mapping does this for some profit centers, e.g. one `EffectiveDate` for both the policy and the accounting date.
+- **The review is made from the Silver side.** The business's 48 DRT columns are fixed; each takes one bronze column from a dropdown, or none. A table of 100 bronze columns is still 48 choices, and a bronze column no DRT column takes is not loaded (listed on its own tab, with a *Load into* shortcut). The tabs: *Mapped*, *Not mapped* (no recommendation, kept apart), *Bronze not loaded* and *Data quality*; each pages at least three bands at a time.
+- Each DRT column's dropdown lists the bronze columns voted for it, best first, with the methods behind each (`total_premium`, recommended, Semantic + AI), then every other bronze column, then *None* (it loads empty). Type a few letters to jump to a column.
+- Rows where methods disagree are flagged **Split**.
+- Approval is blocked only when two bronze columns feed one DRT column.
+- **Approving saves the whole mapping, pre-filled rows included,** for every profit center in the table. Suggestions and ignores are never saved. A saved row is replaced only by an approval for the same header, so two headers that normalize alike ("Agent Commission", "Agent Commission%") never overwrite each other.
+- Saved rows stay editable in the Mapping tab, and can be removed there.
+- **Reviews live in the database** (`<control>.silver_draft`): any API process can serve them and they survive a restart. An unapproved review expires after `AHI_SILVER_DRAFT_TTL_HOURS` (72) of inactivity.
+
+**Cleansing:**
+
+- **Text:** trimmed, and blank becomes NULL.
+- **Dates:** the document's formats in its order (also with fractional seconds or an ISO `T`), then Excel serials. A year is always four digits (`1/5/26` is unreadable, not the year 26); `yyyyMMdd` and serials count only between 1900 and 2100.
+- **Decimals:** `$1,200.50`, `(250.00)` and `$(250.00)` forms are understood, read exactly (no floating point) and rounded half up to each column's own scale (`decimal(18,2)`, `decimal(10,6)`). A percent sign divides by 100: `12%` is 0.12. Anything else (`1 200,50`, `USD 100`) is unreadable.
+- **Integers, booleans, timestamps:** whole numbers (and month names for a `*_month` column); `Y`/`no`/`true`/`0`; ISO date-times.
+- **Derived:** `policy_effective_year` and `policy_effective_month` come from `policy_effective_date` when the file does not give them.
+- **Unreadable values** become NULL and are counted in the review.
+
+**Profit center:** follows the document's four cases against the LOTL, which is the business's `pc_name_pc_number_from_lotl` table.
+- **Padding:** numbers are padded to 4 digits (`94` becomes `0094`, `069_01` becomes `0069_01`).
+- **Duplicates:** when a name or number appears twice, the Active row wins.
+- **Both missing:** the name comes from the row's own load's pc_id (`PC0303` → `0303`), so a table holding several profit centers' loads gets each one right.
+- **Matching names:** case, extra spaces, line breaks and dash styles are ignored; the text `null` or `N/A` is a missing value; a number written `PC0094` is read as `0094`.
+- **Location:** `AHI_LOTL_TABLE` points at another table if needed.
+- **Test offices:** the test workbooks use offices the real LOTL does not know. Add them with:
+
+```bash
+python backend/tools/seed_reference.py --add-lotl enhancements/test-files/lotl_seed.csv
+```
+
+**Loading:** one transaction. It saves the mapping into `drt_column_mapping`, deletes the Silver rows of bronze loads that were replaced (`status='superseded'`, found by table, file and processing date, and by load in their cleansed table), `COPY`s the new rows into the cleansed table, checks the counts per load, inserts them from there into `silver_transaction`, rebuilds the aggregate, and sets `ingest.ingestion.silver_status`. A failed run is rolled back and then recorded: `silver_status = 'failed'` on its loads (they stay eligible) and a `silver_run` row with the mapping it tried. `ingest.silver_run` keeps every run with its reviewer and the mapping they approved, including, per row, whether it was the recommendation or a manual choice, and every method's vote.
+
+- **Removal-only runs:** a run with no loads selected is allowed. It only removes the rows of loads replaced in Bronze.
+- **Stale approvals are refused** with `409 plan_changed`. Approval (and the load, under its lock) checks that the loads are still eligible (not replaced in Bronze, not loaded by another run), that the bronze tables' columns are unchanged, and that every mapped Silver column still exists.
+- **No database connection is held during matching.** Bronze rows, the saved mapping and the LOTL are read once and the connection is released before word2vec or the AI is consulted. Mapping edits re-check quality against those rows, kept briefly in a small per-process cache.
+
+**Word2vec vectors:** Google's pretrained Google News vectors (1.7 GB, gzipped) go in `backend/models/`, which is git-ignored. Download them from the gensim-data releases on GitHub (`word2vec-google-news-300.gz`) and set `AHI_WORD2VEC_PATH=backend/models/word2vec-google-news-300.gz`.
+
+**Test data:** 14 workbooks covering every scenario are in `enhancements/test-files/`; its README gives the order and the expected outcome of each.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/silver/eligible` | Loads to process, plus replaced loads whose rows will be removed |
+| `POST /api/silver/runs` | Suggest a mapping and a dry-run quality report `{ingestion_ids}` |
+| `PATCH /api/silver/runs/{id}/targets` | From the Silver side: `{table_name, silver_column, bronze_column}` (`null`: none) |
+| `PATCH /api/silver/runs/{id}/mapping` | Change one bronze column `{table_name, bronze_column, silver_column, ignored}`, or its extra targets `{also: [...]}` |
+| `POST /api/silver/runs/{id}/approve` | `{reviewed_by}`; returns 409 while two bronze columns feed one DRT column |
+| `GET` / `PATCH` / `DELETE /api/silver/mapping` | The DRT column mapping; a row is named by `{profit_center, pc_column, drt_column, silver_column_name}`, and an edit adds `new_silver_column_name` |
+| `GET /api/silver/aggregate`, `GET /api/silver/catalog` | The aggregate table; the Silver columns (with their role) and which matchers are active |
+
+## Outputs
+
+Each run writes three kinds of file:
+
+| File | Where | What |
+|---|---|---|
+| `<source>_<job_id>.csv` | `--out` | a cleaned table |
+| `<source>_metadata_<job_id>.csv` | `--out` | one row per column of that table (below) |
+| `<source>.audit.json` | `--audit` | every structural decision, with its score and reason |
+
+`<job_id>` is a fresh UUID4, fixed when the file is written and shared by a cleaned CSV and
+its metadata file. `<source>` is the input file's stem. A workbook that yields several
+tables produces one CSV and one metadata file per table, so n sheets with different
+headers give n CSVs and n metadata files. The audit lists each output under its final
+names (`file`, `metadata_file`, `job_id`, plus `table`, the cleaner's own name for it).
+`python clean.py` and `python -m ahi_clean` (with `backend/src` on the path) produce exactly
+the same files.
+
+### The metadata file
+
+Built from the typed table at the moment it is written, so it never re-guesses types:
+
+| Column | Meaning |
+|---|---|
+| `header_name` | the cleaned column name |
+| `datatype` | the type the cleaner decided (`Int64`, `Float64`, `Date`, `String`, ...) |
+| `inferred_datatype` | what polars infers from the written CSV's first 1,000 rows (`infer_schema_length=1000`) |
+| `distinct_count` | distinct non-empty values |
+| `count` | non-empty values |
+| `total_row_count` | rows in the table, or in this sheet's block |
+| `min`, `max` | numeric and date columns; `NA` otherwise |
+| `sum` | numeric columns, summed exactly as decimals; `NA` otherwise |
+| `null_percentage` | empty cells as a % of rows, any type, 2 decimals |
+| `excel_name` | the source file |
+| `sheet_name` | the sheet the rows came from |
+| `type_flag` | every edge case on the column (below), joined with ` \| `; `NA` when there is none |
+
+A statistic that does not apply is written as `NA`: `min`/`max`/`sum` of a text column,
+`sum` of a date column, or any of them for a column with no values. An appended table gets one
+block of rows per sheet, each labelled with its `sheet_name`.
+
+**How codes and numbers are told apart**, from values only, never names:
+
+- **any value mixing letters and digits** (`12AB`, `A7`) → the column is text.
+- **a value with a leading zero** (`08085`) → a code, kept as text.
+- **same-width, all-different whole numbers** (`1005, 1006, 1007`) could be codes (ZIPs,
+  account or centre numbers) or amounts; the values cannot say which. **More than 10
+  values** → read as a code (`String`); **10 or fewer** → read as a number (`Int64`).
+  Either way the column is **flagged** in the metadata's `type_flag`, so someone can
+  check it against its header.
+
+### `type_flag`: every edge case, flagged
+
+The last metadata column lists everything about a column a reader should know. Each flag
+starts with its kind:
+
+- **`CHECK`**: the cleaner guessed, or had to leave values empty. Look at the column
+  (usually its header) and confirm.
+- **`INFO`**: the cleaner changed something on purpose and was sure. Nothing to decide.
+
+Several flags on one column are joined with ` | `. On an appended table each flag is
+prefixed with its sheet (`Jan: CHECK: ...`), because sheets can differ.
+
+| Flag | Kind | When |
+|---|---|---|
+| same-width, all-different whole numbers; read as code / as number | CHECK | could be ZIPs, account numbers or amounts; more than 10 values → code, 10 or fewer → number |
+| every value is a 5-digit number; read as dates because the header names a date | CHECK | ZIP or Excel serial? the header (`Txn Dt`, `created_at`, ...) broke the tie |
+| every value is a 5-digit number; the header does not name a date, so kept as number | CHECK | could be ZIP codes, amounts or Excel date serials |
+| every value is an 8-digit valid yyyyMMdd date | CHECK | read as dates, but could be identifiers |
+| mostly numbers, but N value(s) mix letters and digits | CHECK | whole column kept as text |
+| mixes identifiers (like POL-1) with plain numbers | CHECK | whole column kept as text |
+| N value(s) are not numbers and were left empty | CHECK | e.g. `N/A` in a number column |
+| N value(s) could not be read as dates and were left empty | CHECK | stragglers in a date column |
+| looked like dates, but none could be read | CHECK | kept as text |
+| dates such as 01/02/2026 fit both month-first and day-first | CHECK | nothing in the column decided the order |
+| percent signs removed: 99% is stored as 99 | CHECK | not 0.99 |
+| no header row was found / the header cell was blank | CHECK | column named by position (`column_3`) |
+| the header appears more than once; this copy renamed `x_2` | CHECK | duplicate labels |
+| column names borrowed from another sheet | CHECK | a continuation sheet with no header |
+| which way up this table is was a close call | CHECK | decided by shape; check it is not sideways |
+| entirely empty: formulas with no saved results | CHECK | open and re-save the workbook in Excel |
+| numbers with leading zeros; kept as text | INFO | e.g. `08085` |
+| dates read as day-first / month-first | INFO | only that reading fits every value |
+| dates written in several formats; normalised to YYYY-MM-DD | INFO | |
+| N Excel serial number(s) converted to dates | INFO | e.g. `46030 = 2026-01-08` |
+| N value(s) written as yyyyMMdd read as dates | INFO | inside a date column |
+| time of day dropped from N value(s) | INFO | `2026-01-08 10:30:00` → `2026-01-08` |
+| formatted numbers; removed currency symbols, separators, brackets | INFO | `(500)` = -500 |
+| European number format: comma is the decimal mark | INFO | `1.234,56` read as 1234.56, `99,5` as 99.5; decided per column from the values |
+| thousands separators removed | INFO | `1,234.56` read as 1234.56 |
+| values such as 1,234 fit both number formats; read as US | CHECK | `1,234` is 1234 (US) or 1.234 (European); nothing in the column decides |
+| mixes US and European number formats | CHECK | read by the majority; the other values may be wrong |
+| N value(s) with a trailing minus read as negative | INFO | `500-` = -500 |
+| N value(s) in scientific notation | CHECK | `1.23E+05`: Excel may already have rounded off an ID's digits |
+| about N% of the values read as dates / numbers, too few; kept as text | CHECK | a partly mixed column (20–60%) |
+| 8-digit numbers kept as text because the header names an identifier | CHECK | `20240101` under `PolicyNo`; under a date header or neither, read as dates, CHECK |
+| the header was the number 2024; named `col_2024` | INFO | |
+| the header spanned two rows; the labels were joined | INFO | |
+| values were moved back under their labels | INFO | header and data had different gaps |
+| the table was sideways; it was turned upright | INFO | |
+| created by unpivoting N columns / the cells of the unpivoted columns | INFO | on the new `period`/`category` and `value` columns |
+| added by the cleaner: the sheet each row came from | INFO | `source_sheet` on appended tables |
+| entirely empty in the source | INFO | |
+| the separator was a close call | CHECK | CSV: two separators split the lines equally well |
+| the file is not UTF-8; read as Windows-1252 | INFO | CSV |
+| read as Latin-1, so accented or special characters may be wrong | CHECK | CSV: last-resort encoding |
+| N Excel error value(s) (#REF!, #N/A ...) were left empty | CHECK | lists the cells |
+| N formula cell(s) have no saved result and are empty in the output | CHECK | open and re-save in Excel |
+| N merged cell range(s) spanning several rows were filled in every row | INFO | `A5:A7`; title merges across one row are not flagged |
+| the header row was chosen with low confidence | CHECK | header score under 0.65 (cut-off 0.55) |
+| the header and the data could not be lined up | CHECK | each side has columns the other lacks |
+| table boundary was a close call | CHECK | rows joined or split across a gap, or a blank column treated as a gap or a split, within 10% of the threshold |
+| N sheets with different names matched equally well | CHECK | a continuation sheet with two possible donors |
+| N row(s) kept although they look incomplete | CHECK | sparse rows that are not totals; lists the sheet rows |
+| N row(s) labelled as totals were dropped although their figures did not add up | CHECK | lists the sheet rows |
+
+Flags about the file, the sheet, the table and its rows are not about any one column,
+so they are attached to every column of the table they affect.
+
+**`datatype` is the schema to load with**, after checking any flagged column.
+`inferred_datatype` shows what a loader that guesses types would get instead. Where the
+two differ, typically a code column inferred as `Int64`, loading with inference would
+drop leading zeros or add up identifiers. Pass `datatype` as an explicit schema.
+
+## Delimited files
+
+`.csv`, `.tsv` and `.txt` go through the same pipeline. A delimited file is one sheet by
+definition, and it produces the same grid of cells, so every structural rule below applies
+unchanged — banners, footers, subtotals, transposed layouts and all.
+
+The delimiter is **detected, not assumed**: whichever of comma, semicolon, tab or pipe
+yields the most *consistent* column count across the opening lines. Frequency alone picks
+the comma out of a semicolon-delimited file full of prose. Encoding is tried in order
+(UTF-8 with or without a BOM, then cp1252, then latin-1), so a file always opens rather
+than failing on a bad guess.
+
+What a CSV cannot carry: cell types, formatting, merged ranges, formulas. That costs less
+than it sounds — the type lattice already classifies by *shape*, the emphasis signal is
+additive, and a merged title arrives as one value followed by empties, which is exactly
+what the banner rule looks for. One thing a CSV does **better**: a leading zero survives,
+where Excel had already destroyed it before the pipeline saw the file.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | every workbook cleaned, no contract violated |
+| 1 | no input matched |
+| 2 | some workbooks could not be read, or an output file was locked (usually open in Excel) |
+| 3 | an output contract was violated — the data may be wrong |
+
+## How it decides, in one line each
+
+**Pivots, first of all.** A month-per-column matrix reads consistently in *both* directions,
+so orientation would flip it on a tiebreak. It is recognised before that happens — by a run
+of same-typed, all-distinct headings over a single numeric measure — and melted into long
+form, one row per cell.
+
+**Sheet orientation, next.** Each column of an upright table holds one type and its header
+labels are distinct; a transposed table reverses both. This is settled *before* the sheet is
+cut into regions — in a sideways sheet a blank row is a blank field, not a table separator.
+
+**Regions.** A sheet may hold several tables. Row gaps are judged by whether both sides use
+the same columns (*coverage*) and hold the same kinds of value (*type agreement*). **Gap
+size is never an input** — one blank row and twelve behave identically.
+
+**Header.** Scored on type contrast with the columns below, textness, uniqueness, fill and
+brevity, plus bold/fill/border as a bonus. Below 0.55 the pipeline **refuses to pick one**
+and names columns positionally, because naming a data row as the header is the worse failure.
+
+**Alignment.** When the header and the data disagree about where the gutters are, the body
+is re-seated under the header rather than left to land under the wrong labels.
+
+**Junk rows.** Sparsity finds candidates; **arithmetic confirms them** — a total is a row
+whose number equals the sum of the rows above it. A repeated header is caught three ways:
+verbatim, as a fragment, or restated in different words (text sitting where its columns hold
+numbers).
+
+**Multiple sheets.** Every table ships as its own CSV. Tables are appended only when their
+column headers match 100% (same set of names, any order), with a `source_sheet` column
+added; nothing partial counts. Tables are never joined.
+
+**Types.** Inferred per column. Alphanumeric values and leading zeros stay text;
+same-width, all-different whole numbers are a code above 10 values and a number at 10 or
+fewer, and flagged either way; a column in four different date formats is recognised by what parses, not by how it
+looks; formula cells with no cached value are reported rather than shipped as nulls.
+
+**Dates are written as `YYYY-MM-DD`.** Every value in a date column is normalised,
+whichever of these it arrived in: `yyyy-MM-dd HH:mm:ss` (time dropped), `yyyy-MM-dd`,
+`MM/dd/yyyy`, `M/d/yyyy`, `yyyyMMdd`, `MM-dd-yyyy`, `M-d-yyyy`, the written forms
+(`08 Jan 2026`, `Jan 8, 2026`, `08.01.2026`), day-first slashes when the column proves it,
+and five-digit Excel serial numbers (`46030` → `2026-01-08`, i.e. 1899-12-30 plus n days).
+Two numeric guards: a column of nothing but numbers is a date column only if *every* value
+is a real `yyyyMMdd` date in 1900–2100, and a serial is only read as a date in a column
+that already holds dates written some other way. A column of *only* 5-digit numbers is
+settled by its header (below).
+
+**The one place a header is read: ZIP code or Excel date serial.** A column of nothing
+but 5-digit numbers that are all plausible serials (years 1900–2100) is a genuine tie:
+`46030` is an Indiana ZIP code and also `2026-01-08`. The values cannot settle it, so the
+column's header does, and the column is flagged `CHECK` either way:
+
+- the header names a date → read as Excel serials and converted to `YYYY-MM-DD`;
+- otherwise → kept as a number.
+
+The header counts as a date in three ways (`coerce.header_names_a_date`):
+
+| Match | Words | Examples that match |
+|---|---|---|
+| **anywhere**, like SQL `LIKE '%date%'` | `date`, `dt`, `time`, `day`, `period`, `expir`, `effectiv`, `matur`, `birth`, `fecha`, `datum`, `giorno`, `tarih` | `TxnDate`, `txndt`, `TXN_DTTM`, `Timestamp`, `PeriodEnd`, `ExpiryDt` |
+| **whole word only**, after splitting on separators and camelCase | `at`, `on`, `ts`, `dob`, `doj`, `when`, `since`, `until`, `due`, `asof`, `eff`, `tag`, `dia`, `jour` | `created_at`, `CreatedAt`, `Posted On`, `updated_ts`, `DOB` |
+| **event word**, unless a person or id is named beside it | `created`, `updated`, `modified`, `posted`, `issued`, `closed`, `opened` | `LastUpdated`, `Closed`; but not `created_by` or `updated_by`, which hold user ids |
+
+The words follow common naming conventions: dbt and GitLab use `<event>_at` for
+timestamps and `<event>_date` for dates, Oracle uses `_dt` and `_dttm`, `_on` marks
+date-only columns, and `_ts` marks timestamps.
+
+**Ordinary words containing a date fragment are set aside first.** Otherwise `width`
+would match `%dt%`, `lifetime` `%time%`, and `update_count` or `candidate` `%date%`. The
+list is `NOT_DATE_FRAGMENTS` in `coerce.py`.
+
+**Why `at`, `on` and `ts` are whole words and not `%at%`.** As a substring, `at` matches
+`rate`, `state`, `status`, `category`, `format`, `vat`, `latitude` and `location`. That
+would turn a ZIP column under a `State` header into dates. The short words are matched
+only when they stand alone, so they still catch `created_at`, `CreatedAt` and
+`Posted On`. The same applies to `dia` (`media`, `india`), `tag` (`stage`) and `jour`
+(`journal`).
+
+**Continuation sheets.** A sheet with no header at all adopts the column names of a sibling
+with the same width and the same per-column types — matched on shape, not on sheet order.
+
+## Robustness
+
+**A bad file costs you that file.** Every workbook is processed inside its own error
+boundary, so one corrupt workbook in a folder of five hundred no longer takes the run
+down and skips everything after it. Failures are classified into things you can act on —
+corrupt, password-protected, unsupported format, missing, too large — each with advice,
+and an unexpected error keeps its traceback in a file rather than spilling into the
+console.
+
+**Output contracts.** The pipeline refuses to look trustworthy when it is not. Before
+anything is written it checks that every row is accounted for as kept or
+dropped-with-a-reason, that no key column came out empty, that no column emptied without
+a stated cause, and that a removed grand total still reconciles with the rows that were
+kept. A violation writes the CSV — withholding it would hide the evidence — and fails the
+run with its own exit code.
+
+**A documented ceiling.** `--max-cells` refuses a sheet too large to attempt rather than
+hanging. The reader also trims the sheet to its genuinely populated rectangle first, so a
+stray styled cell at row 100,000 does not make a ten-row report allocate a dense grid of
+a hundred thousand.
+
+## Two rules that keep it safe
+
+**A sparse row that fails the arithmetic and carries no total-ish wording is kept**, flagged
+at low confidence. A record with several empty fields is ordinary in real data, and silently
+losing one is the worst failure available.
+
+**Wording alone can never drop a row.** The row must be sparse on structure first; the
+wording only decides which kind of non-record it is.
+
+## One deliberate concession, stated plainly
+
+Real reports carry totals whose figures are stale or hand-edited — one test file states a
+total of `48,387.01` against rows summing to `48,383.11`. Keeping those as data
+corrupts every downstream sum, so a row that is *both* sparse and labelled a total is
+dropped into its own `UNVERIFIED_TOTAL` class and flagged for review.
+
+The cost is measured, not assumed: deleting every text pattern now breaks the files that
+carry a wrong total. In an earlier version it changed nothing at all. That is a trade, and
+the ablation table in [ARCHITECTURE.md §9](ARCHITECTURE.md#9-ablation-what-is-actually-load-bearing)
+shows exactly what it bought.
+
+## Verification
+
+**Objective oracle.** Every genuine record in the corpus carries a `POL-nnnnnn` policy
+number; banners, totals, footers and repeated headers do not. Counting those tokens in the
+raw grid gives an expected record count that owes nothing to the code being tested.
+
+For a pivot, which carries no policy numbers, conservation is the oracle instead: unfolding
+must produce exactly one row per value cell. A workbook the oracle cannot check at all is
+**reported as unchecked**, never scored as a pass.
+
+**Ablation.** Every signal is disabled in turn and re-scored, so no assumption can quietly
+become load-bearing without showing up. The harness has itself been wrong three times —
+each time an ablation "passed" because the scorecard could not see the damage, and each gap
+is now closed with a direct check. A benchmark that cannot fail is not measuring anything.
+
+**Performance, measured not claimed.** 1,000,000 rows in 93 seconds, from ~34 minutes
+before the polars migration — 22x. The win came from deciding a column's type once and
+applying it vectorised, rather than calling a scalar parser per cell: profiling showed 51%
+of the old runtime inside pandas' date parser, more than half of that re-guessing the
+format on every single call.
+
+**Parallelism, defaulted on measurement.** Threads, not processes. Over 24 workbooks, four
+threads ran 1.4x faster than sequential while four processes ran **3.6x slower** — on
+Windows each process is a fresh interpreter that must re-import polars before doing any
+work, and for report-sized files that startup dwarfs the job. `--executor process` remains
+available for batches of genuinely large files.
+
+**170 tests with an empty corpus, in two suites.** `backend/tests/test_scenarios.py` runs against
+whatever workbooks are in `backend/sample_files_uncleaned/` and adds tests per workbook
+automatically. With that folder empty, the 16 tests that need real workbooks (there and in
+the orchestration and resilience suites) are skipped rather than failed. Everything else builds its sheets in
+memory and never names a file, so swapping the corpus cannot break what they pin.
+
+## Layout
+
+```
+clean.py                 entry point (no PYTHONPATH needed)
+requirements.txt         Python dependencies (cleaner + API)
+pytest.ini               runs backend/tests from the project root
+frontend/                React + Vite UI (Configure → Run → Results → Ingest → Silver)
+.env.example             bronze database settings template (copy to .env)
+design-system/           UI design system (MASTER.md): tokens, type, copy rules
+enhancements/            AHI scenario documents (File → Bronze, Bronze → Silver)
+assets/                  the business's reference workbooks: division mapping, LOTL, DRT column mapping, Silver schemas
+backend/
+  api/                   FastAPI service: routes, validation, jobs, exports, bronze ingest
+  migrations/            SQL for the control and reference tables, applied on first use
+  legacy/                the original six POC workbooks
+  sample_files_uncleaned/  the scenario corpus (git-ignored; supply your own)
+  tests/                 cleaner and API test suites
+  tools/scorecard.py     scores the cleaner against every scenario workbook
+  tools/benchmark.py     single-sheet throughput and executor comparison
+  tools/ablation.py      disables each signal in turn to show what is load-bearing
+  src/ahi_bronze/        File → Bronze rules, pure: naming, periods, schema cases, planner
+  src/ahi_silver/        Bronze → Silver rules, pure: voting matcher, AI prompt, cleansing, profit center, hashes
+  config/silver_columns.csv  the 69 silver_transaction columns (the business's silver_schema)
+  config/silver_aggregate_columns.csv  the 75 silver_aggregate columns
+  models/                word2vec vectors (git-ignored)
+  tools/make_silver_test_files.py  writes the 10 scenario workbooks
+  tools/seed_reference.py  (re)loads the reference tables from assets/
+  src/ahi_clean/
+    signals.py        scoring primitives (fill, uniqueness, type profile, coverage, contrast)
+    typing_utils.py   fine-grained type inference
+    reader.py         workbook -> cell grid + formatting + formulas; nulls error cells
+    delimited.py      csv/tsv -> the same grid; sniffs delimiter and encoding
+    geometry.py       sheet -> table regions; all blank-gap handling
+    header.py         header scoring, the no-header path, column naming
+    rowclass.py       sparsity + arithmetic row classification
+    pivot.py          wide-matrix detection and the melt to long form
+    coerce.py         vectorised type decisions: one strategy per column, not per cell
+    contracts.py      checks that refuse, rather than merely report
+    failures.py       why a workbook could not be read, in actionable terms
+    extract.py        orientation, regions, realignment, types, validation
+    orchestrate.py    table roles, exact-header appends, one CSV per table otherwise
+    metadata.py       per-column metadata, from the typed table as it is written
+    audit.py          trace -> JSON report
+    cli.py            batch isolation, parallel workers, CSV + metadata writing, job ids
+```
+
+## Known limits
+
+- **Semantic mapping is out of scope by construction.** Deciding that `Producer` in one file
+  and `Agent Name` in another belong in the same target column needs a schema, a config, an
+  LLM or a human. The pipeline stops at per-file-correct structure and records every
+  inferred type.
+- A leading zero already destroyed in the source (a ZIP stored as the number `8085`) is
+  unrecoverable.
+- Orientation needs ≥2 data rows; near-square tables fall back to a shape tiebreak and are
+  flagged `confident: false`.
+- A gutter ≥2 columns wide inside one table is read as a table boundary unless both sides
+  span exactly the same rows.
+- Pivot detection needs at least three value columns; a two-month matrix is indistinguishable
+  from an ordinary table with two numeric columns.
+- Output file names carry the source stem and a job ID, not the sheet; the sheet is in the
+  metadata's `sheet_name` and the audit's `source_sheets`.
+- The decimal mark is decided per column from the values (`1.234,56` or `99,5` settles
+  European; `1,234.56` or `10.5` settles US). A column whose values fit both, such as
+  `1,234` only, is read as US and flagged.
+- `backend/tools/scorecard.py` scores `.xlsx` only; delimited files are covered by the tests.
