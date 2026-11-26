@@ -71,8 +71,8 @@ def context(monkeypatch):
 DATES = ("AccountingEffectiveDate", "Pol_Ef_Dt", "TransactionEffectiveDate")
 
 
-def _fill(sheet, months, headers=HEADERS, blank=(), ped=None):
-    """``blank``: the columns left empty on the first row."""
+def _fill(sheet, months, headers=HEADERS, blank=(), ped=None, edit=None):
+    """``blank``: the columns left empty on the first row; ``edit(n, row)``: changes a row."""
     sheet.append(headers)
     n = 0
     for month in months:
@@ -80,14 +80,16 @@ def _fill(sheet, months, headers=HEADERS, blank=(), ped=None):
             n += 1
             row = {
                 "AccountingEffectiveDate": date(2026, month, day),
-                "CommissionPct": 0.1, "GrossCommissionAmount": 100.5 + n, "InsuranceCompany Name": "Harrier",
+                "CommissionPct": 0.1, "GrossCommissionAmount": round(0.1 * (1000 + n), 2), "InsuranceCompany Name": "Harrier",
                 "MarketProvider": "Market A", "Pol_Ef_Dt": ped or date(2026, month, 1), "PolicyNumber": f"POL-{n:04d}",
-                "Premium": 1000 + n, "Producer/Agency Name": "Brown & Brown", "ProducerCommissionAmount": 50 + n,
+                "Premium": 1000 + n, "Producer/Agency Name": "Brown & Brown", "ProducerCommissionAmount": round(0.05 * (1000 + n), 2),
                 "ProducerCommissionPct": 0.05, "Revenue": 40 + n, "Transaction Detail": "New",
                 "TransactionEffectiveDate": date(2026, month, day), "Notes": f"note {n}",
             }
             if n == 1:
                 row.update(dict.fromkeys(blank))
+            if edit:
+                edit(n, row)
             sheet.append([row.get(name) for name in headers])
 
 
@@ -97,10 +99,10 @@ def _save(book):
     return buffer.getvalue()
 
 
-def _book(months, headers=HEADERS, blank_aed=False, ped=None):
+def _book(months, headers=HEADERS, blank_aed=False, ped=None, edit=None):
     book = openpyxl.Workbook()
     book.active.title = "Data"
-    _fill(book.active, months, headers, ("AccountingEffectiveDate",) if blank_aed else (), ped)
+    _fill(book.active, months, headers, ("AccountingEffectiveDate",) if blank_aed else (), ped, edit)
     return _save(book)
 
 
@@ -202,9 +204,9 @@ def _dated_book(rows):
     sheet.append(HEADERS)
     for n, (aed, ted, ped) in enumerate(rows, 1):
         values = {"AccountingEffectiveDate": aed, "TransactionEffectiveDate": ted, "Pol_Ef_Dt": ped,
-                  "CommissionPct": 0.1, "GrossCommissionAmount": 100.5 + n, "InsuranceCompany Name": "Harrier",
+                  "CommissionPct": 0.1, "GrossCommissionAmount": round(0.1 * (1000 + n), 2), "InsuranceCompany Name": "Harrier",
                   "MarketProvider": "Market A", "PolicyNumber": f"POL-{n:04d}", "Premium": 1000 + n,
-                  "Producer/Agency Name": "Brown & Brown", "ProducerCommissionAmount": 50 + n,
+                  "Producer/Agency Name": "Brown & Brown", "ProducerCommissionAmount": round(0.05 * (1000 + n), 2),
                   "ProducerCommissionPct": 0.05, "Revenue": 40 + n, "Transaction Detail": "New"}
         sheet.append([values.get(name) for name in HEADERS])
     return _save(book)
@@ -450,6 +452,36 @@ def test_a_consolidated_files_profit_center_and_division_come_from_its_parent(cl
     file = data["files"][0]
     assert file["pc_id"] == "PC0101" and file["division_name"] == "AH Programs"
     assert any("lists 5 profit centers" in warning and "PC0101" in warning for warning in file["warnings"])
+
+
+def test_the_date_basis_and_file_type_start_as_the_profit_centers_last_choice(client, context):
+    context.period_choices_by_pc = {"PC0101": {"date_basis": "TED", "reporting_file_type": "INCREMENTAL"}}
+    data, output = _validate(client, "PC0101_Prefill_07132026.xlsx", _book(range(1, 7)))
+    file = data["files"][0]
+    assert (file["date_basis"], file["detected_date_basis"]) == ("TED", "TED")
+    assert (file["reporting_file_type"], file["detected_reporting_file_type"]) == ("INCREMENTAL", "INCREMENTAL")
+    # The data collection period is never prefilled: it is all the file still needs.
+    assert file["data_collection_period"] is None
+    assert output["needs"] == ["Enter the data collection period."]
+
+    # The reviewer's pick stands, even when the profit center is looked up again.
+    url = f"/api/validations/{data['id']}/files/{file['job_id']}"
+    client.patch(url, json={"date_basis": "AED"})
+    again = client.patch(url, json={"pc_id": "PC0101 "}).json()["files"][0]
+    assert again["date_basis"] == "AED" and again["reporting_file_type"] == "INCREMENTAL"
+    # A profit center with no history: the detected choice is dropped, the reviewer's kept.
+    other = client.patch(url, json={"pc_id": "PC0202"}).json()["files"][0]
+    assert other["detected_date_basis"] is None and other["reporting_file_type"] is None
+    assert other["date_basis"] == "AED"
+
+
+def test_two_tagged_profit_centers_use_the_first(client, context):
+    data, _ = _validate(client, "PC0101_PC0679 2018_7.1_7.30 Income Production_20260910_v2_09102026.xlsx",
+                        _book(range(1, 7)))
+    file = data["files"][0]
+    assert file["pc_id"] == file["detected_pc_id"] == "PC0101"
+    assert file["division_name"] == "AH Programs"  # looked up under the first
+    assert any("names PC0101 and PC0679: using the first, PC0101" in warning for warning in file["warnings"])
 
 
 def test_no_profit_center_or_received_date_needs_input(client, context):
@@ -818,3 +850,171 @@ def test_files_that_cannot_be_validated_are_refused_at_once(client, context):
     response = client.post("/api/validations", json={"job_ids": ["no-such-job"]})
     assert response.status_code == 404
     assert client.get("/api/validations/no-such-session/events").status_code == 404
+
+
+# --- filling a required column instead of mapping one ------------------------------------
+
+
+def test_a_missing_column_filled_with_a_value_or_null_is_met(client, context):
+    headers = [name for name in HEADERS if name not in ("InsuranceCompany Name", "CommissionPct", "GrossCommissionAmount")]
+    data, output = _validate(client, "PC0101_Filled_07132026.xlsx", _book(range(1, 7), headers=headers))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
+    assert output["verdict"] == "rejected"
+    assert _required(output, "insurance_company_name")["fillable"] is True
+    assert not any(_required(output, name)["fillable"] for name in
+                   ("premium", "policy_number", "accounting_effective_date", "policy_effective_date",
+                    "transaction_effective_date", "gross_commission_amount", "producer_commission_amount"))
+    assert _required(output, "commission_pct")["fillable"] is True
+
+    filled = _patch(client, data, output, {"fills": {"insurance_company_name": {"kind": "value", "value": " Acme Re "},
+                                                     "commission_pct": {"kind": "null"}}})["outputs"][0]
+    assert filled["missing"] == [] and filled["verdict"] == "ready"
+    assert _required(filled, "insurance_company_name")["fill"] == {"kind": "value", "value": "Acme Re"}
+    assert _required(filled, "commission_pct")["fill"] == {"kind": "null"}
+    assert _required(filled, "commission_pct")["reviewer"] is True
+
+    # Clearing a fill makes it missing again; choosing a file column replaces the fill.
+    cleared = _patch(client, data, output, {"fills": {"commission_pct": None}})["outputs"][0]
+    assert cleared["missing"] == ["CommissionPct or GrossCommissionAmount"]
+    column = _required(filled, "premium")["column"]
+    mapped = _patch(client, data, output, {"mapping": {"insurance_company_name": column}})["outputs"][0]
+    assert _required(mapped, "insurance_company_name")["fill"] is None
+    assert _required(mapped, "insurance_company_name")["column"] == column
+
+
+def test_the_dates_premium_and_policy_number_cannot_be_filled(client, context):
+    data, output = _validate(client, "PC0101_NoFill_07132026.xlsx", _book(range(1, 7)))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
+    for name in ("premium", "policy_number", "accounting_effective_date"):
+        response = client.patch(f"/api/validations/{data['id']}/outputs/{output['key']}",
+                                json={"fills": {name: {"kind": "null"}}})
+        assert response.status_code == 422 and response.json()["error"]["code"] == "not_fillable", response.text
+    blank = client.patch(f"/api/validations/{data['id']}/outputs/{output['key']}",
+                         json={"fills": {"insurance_company_name": {"kind": "value", "value": "  "}}})
+    assert blank.status_code == 422
+
+
+def _staged(validation_service, data, output):
+    """What staging would add for an output, and what it would record per required column."""
+    session = validation_service.get(data["id"])
+    check = session.output(output["key"])
+    extras = validation_service._extra_columns(session, check, validation_service._record(check))
+    by_original = {column["original"]: column for column in check.columns}
+    extra_of = {target: (name, how) for name, _, target, how in extras}
+    return extras, lambda target: validation_service._staged_mapping(
+        check, target, check.mapping.get(target), by_original, extra_of)
+
+
+def test_a_filled_value_is_staged_as_a_column_of_its_own(client, context):
+    from api.services import validation_service
+
+    headers = [name for name in HEADERS if name not in ("InsuranceCompany Name", "CommissionPct")]
+    data, output = _validate(client, "PC0101_FilledStage_07132026.xlsx", _book(range(1, 7), headers=headers))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
+    _patch(client, data, output, {"fills": {"insurance_company_name": {"kind": "value", "value": "Acme Re"},
+                                            "commission_pct": {"kind": "null"}}})
+    extras, staged = _staged(validation_service, data, output)
+    assert extras == [("insurance_company_name", "Acme Re", "insurance_company_name", "value")]
+    assert staged("insurance_company_name") == {
+        "column": "insurance_company_name", "header": None, "method": "value", "value": "Acme Re"}
+    # Null is the reviewer's word: the rate is not derived from the amount.
+    assert staged("commission_pct")["method"] == "null"
+
+
+# --- commission arithmetic: rate x premium = amount -------------------------------------
+
+
+def test_commission_amounts_that_agree_with_rate_times_premium_pass(client, context):
+    data, output = _validate(client, "PC0101_CommissionOk_07132026.xlsx", _book(range(1, 7)))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
+    check = _check(output, "commission")
+    assert check["ok"] is True and "on all 12 rows" in check["detail"]
+    assert not any("does not give" in warning for warning in output["warnings"])
+
+
+def test_commission_amounts_that_disagree_are_warned_about(client, context):
+    def wrong(n, row):
+        if n in (2, 5):
+            row["GrossCommissionAmount"] = 999.0
+
+    data, output = _validate(client, "PC0101_CommissionBad_07132026.xlsx", _book(range(1, 7), edit=wrong))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
+    check = _check(output, "commission")
+    assert check["ok"] is False and "fails on 2 of 12 rows" in check["detail"]
+    warning = next(warning for warning in output["warnings"] if "does not give" in warning)
+    assert "CommissionPct × Premium does not give GrossCommissionAmount on 2 of 12 rows" in warning
+    assert "row 2: 0.1 × 1,002.00 = 100.20, but GrossCommissionAmount is 999.00" in warning
+    # A warning, not a rejection: the reviewer decides.
+    assert output["verdict"] == "ready"
+
+
+def test_a_rate_written_as_a_percent_is_read_as_one(client, context):
+    def percent(n, row):
+        row["CommissionPct"] = 10  # 10%, against amounts of 0.1 x premium
+
+    data, output = _validate(client, "PC0101_CommissionPercent_07132026.xlsx", _book(range(1, 7), edit=percent))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
+    assert _check(output, "commission")["ok"] is True
+
+
+def test_a_missing_amount_is_derived_from_the_rate(client, context):
+    from api.services import validation_service
+
+    headers = [name for name in HEADERS if name != "GrossCommissionAmount"]
+    data, output = _validate(client, "PC0101_DeriveAmount_07132026.xlsx", _book(range(1, 7), headers=headers))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
+    assert _required(output, "gross_commission_amount")["derived_from"] == "commission_pct"
+    assert "GrossCommissionAmount derived as CommissionPct × Premium" in _check(output, "commission")["detail"]
+    extras, staged = _staged(validation_service, data, output)
+    name, values, target, how = extras[0]
+    assert (name, target, how) == ("gross_commission_amount", "gross_commission_amount", "derived")
+    assert values.to_list()[:2] == ["100.1", "100.2"]
+    assert staged("gross_commission_amount") == {"column": "gross_commission_amount", "header": None,
+                                                 "method": "derived", "from": "commission_pct"}
+
+
+def test_a_missing_rate_is_derived_from_the_amount(client, context):
+    from api.services import validation_service
+
+    headers = [name for name in HEADERS if name != "ProducerCommissionPct"]
+    data, output = _validate(client, "PC0101_DeriveRate_07132026.xlsx", _book(range(1, 7), headers=headers))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
+    assert _required(output, "producer_commission_pct")["derived_from"] == "producer_commission_amount"
+    extras, _ = _staged(validation_service, data, output)
+    derived = {target: values for _, values, target, how in extras if how == "derived"}
+    assert set(derived["producer_commission_pct"].to_list()) == {"0.05"}
+
+
+def test_a_typed_rate_derives_the_amount(client, context):
+    from api.services import validation_service
+
+    headers = [name for name in HEADERS if name not in ("CommissionPct", "GrossCommissionAmount")]
+    data, output = _validate(client, "PC0101_TypedRate_07132026.xlsx", _book(range(1, 7), headers=headers))
+    output = _set_period(client, data, data["files"][0]["job_id"], "CUMULATIVE", "2026-06")["outputs"][0]
+    typed = _patch(client, data, output, {"fills": {"commission_pct": {"kind": "value", "value": "12"}}})["outputs"][0]
+    assert _required(typed, "commission_pct")["reads_as"] == "12%"
+    assert _required(typed, "gross_commission_amount")["derived_from"] == "commission_pct"
+    assert typed["missing"] == []
+    extras, _ = _staged(validation_service, data, output)
+    by_target = {target: values for _, values, target, _ in extras}
+    assert by_target["commission_pct"] == "0.12"
+    assert by_target["gross_commission_amount"].to_list()[0] == "120.12"  # 0.12 x 1001
+
+    url = f"/api/validations/{data['id']}/outputs/{output['key']}"
+    not_number = client.patch(url, json={"fills": {"commission_pct": {"kind": "value", "value": "lots"}}})
+    assert not_number.status_code == 422 and not_number.json()["error"]["code"] == "fill_not_a_number"
+    # An amount is never typed (nor set to null): it follows its rate.
+    for fill in ({"kind": "value", "value": "120"}, {"kind": "null"}):
+        typed_amount = client.patch(url, json={"fills": {"gross_commission_amount": fill}})
+        assert typed_amount.status_code == 422 and typed_amount.json()["error"]["code"] == "not_fillable"
+        assert "CommissionPct × Premium" in typed_amount.json()["error"]["message"]
+
+
+def test_commission_values_are_read_as_written():
+    import polars as pl
+
+    from ahi_bronze import commission
+
+    values = commission.numbers(pl.Series(["1,250.50", "$12", "(30)", "12%", "", "n/a"]))
+    assert values.to_list() == [1250.5, 12.0, -30.0, 0.12, None, None]
+    assert [commission.typed_rate(text) for text in ("12", "12%", "0.12", "x")] == [0.12, 0.12, 0.12, None]
