@@ -308,10 +308,13 @@ def test_a_month_after_the_year_to_date_file_is_appended_and_its_schema_compared
     schema = july["schema"]
     assert schema["against"] == "PC0101_H1_07132026.xlsx" and schema["kind"] == "evolved"
     assert schema["added"] == ["notes"] and schema["missing"] == []
+    # Advisory only, read from the configured similarity bands -- never a blocker.
+    assert schema["recommendation"] in ("evolve", "new_table", "reject")
+    assert schema["recommendation_label"]
     # The same columns as H1: identical.
     data2, same = _validate(client, "PC0101_July_08142026.xlsx", _book([7]))
     same = _set_period(client, data2, data2["files"][0]["job_id"], "INCREMENTAL", "2026-07")["outputs"][0]
-    assert same["schema"]["kind"] == "identical"
+    assert same["schema"]["kind"] == "identical" and same["schema"]["recommendation"] == "evolve"
 
 
 def test_an_incremental_files_earlier_months_offer_a_replace_when_close_enough(client, context):

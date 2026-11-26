@@ -1,0 +1,39 @@
+profit_center: PC0515
+# The CPro Billing Register: PC0515 and PC2007 receive the same file, and the PC2007
+# notebook is the one that fits its layout.
+rules:
+  - key: pc0515.cpro.renewal_flag
+    kind: translate
+    scope_file_like: "*Billing Register*"
+    column: renewal_flag
+    spec:
+      source: "src:Tran"
+      cases: [{when: RWL, then: true}]
+      default: false
+    note: "Tran codes in July: PCH, RWL, NBS, PAB, XLN, SYR. Only RWL is a renewal."
+    source_ref: ext_pc2007_reportbillingregister_silver_cleansed.py:841
+  - key: pc0515.cpro.policy_fees
+    kind: derive
+    scope_file_like: "*Billing Register*"
+    column: policy_fees
+    spec:
+      expr:
+        op: when
+        cases: [{if: {op: eq, args: ["src:LineOfBusiness", Policy Fee]}, then: "src:PolicyFees"}]
+        else: 0
+    source_ref: ext_pc2007_reportbillingregister_silver_cleansed.py:932
+  - key: pc0515.cpro.broker_address
+    kind: lookup
+    scope_file_like: "*Billing Register*"
+    spec:
+      source: bronze_table
+      table: "*brokerlist*"
+      key: "src:3CommPersName"
+      key_to: Broker
+      columns:
+        producer_billing_address: Address1
+        producer_billing_city: City
+        producer_billing_state: State
+        producer_billing_zipcode: Zip
+    note: "From the BrokerList file that comes with the register. The first row per broker wins."
+    source_ref: ext_pc2007_reportbillingregister_silver_cleansed.py:645-656,779-785,865-875

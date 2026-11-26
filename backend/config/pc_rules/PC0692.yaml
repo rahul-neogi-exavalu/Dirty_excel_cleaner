@@ -1,0 +1,25 @@
+profit_center: PC0692
+rules:
+  - key: pc0692.effective_date_format
+    kind: date_format
+    column: policy_effective_date
+    spec: {formats: ["M/d/yyyy", "M/d/yy"]}
+    note: "A two-digit year is read only for this file."
+    source_ref: ext_pc0692_data_silver_cleansed.py:640-648
+  - key: pc0692.accounting_date_format
+    kind: date_format
+    column: accounting_effective_date
+    spec: {formats: ["M/d/yyyy", "M/d/yy"]}
+    source_ref: ext_pc0692_data_silver_cleansed.py:664-672
+  - key: pc0692.commission_pct
+    kind: derive
+    column: commission_pct
+    spec:
+      expr: {op: div_safe, args: ["src:MGA Commission", "silver:premium"]}
+    source_ref: ext_pc0692_data_silver_cleansed.py:745-748
+  - key: pc0692.producer_commission_pct
+    kind: derive
+    column: producer_commission_pct
+    spec:
+      expr: {op: div_safe, args: ["src:Agent Commission", "silver:premium"]}
+    source_ref: ext_pc0692_data_silver_cleansed.py:763-766

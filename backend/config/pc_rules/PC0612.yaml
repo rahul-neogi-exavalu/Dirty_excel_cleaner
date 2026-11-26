@@ -1,0 +1,12 @@
+profit_center: PC0612
+rules:
+  - key: pc0612.renewal_flag
+    kind: translate
+    column: renewal_flag
+    spec:
+      source: "src:DecpageTypeCode"
+      cases: [{when: REN, then: true}, {when: NEW, then: false}]
+    note: >-
+      July values: REN, NEW. The notebook ran clean_boolean on them, which gave NULL for
+      every row.
+    source_ref: ext_pc0612_data_silver_cleansed.py:693

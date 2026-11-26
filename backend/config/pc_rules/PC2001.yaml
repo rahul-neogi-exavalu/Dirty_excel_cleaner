@@ -1,0 +1,23 @@
+profit_center: PC2001
+# The report writes dates day first (dd/MM/yyyy); without these, 05/07/2026 is read as 7 May.
+rules:
+  - key: pc2001.policy_effective_date
+    kind: date_format
+    column: policy_effective_date
+    spec: {formats: ["dd/MM/yyyy"]}
+    source_ref: ext_pc2001_report_silver_cleansed.py:637-638
+  - key: pc2001.transaction_effective_date
+    kind: date_format
+    column: transaction_effective_date
+    spec: {formats: ["dd/MM/yyyy"]}
+    source_ref: ext_pc2001_report_silver_cleansed.py:650-651
+  - key: pc2001.accounting_effective_date
+    kind: date_format
+    column: accounting_effective_date
+    spec: {formats: ["dd/MM/yyyy"]}
+    source_ref: ext_pc2001_report_silver_cleansed.py:657-658
+  - key: pc2001.policy_expiration_date
+    kind: date_format
+    column: policy_expiration_date
+    spec: {formats: ["dd/MM/yyyy"]}
+    source_ref: ext_pc2001_report_silver_cleansed.py:661-662

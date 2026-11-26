@@ -1064,7 +1064,6 @@ function ReportingDates({ output, busy, onChange }: { output: ValidationOutput; 
     <section aria-labelledby={`dates-${output.key}`}>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <h3 id={`dates-${output.key}`} className="flex items-center gap-2 text-card text-ink-900"><CalendarRange className="h-4 w-4 text-ink-500" aria-hidden />Reporting dates</h3>
-        <span className="text-caption text-ink-500">AED, then TED, then PED: the first populated on every row decides. Any other populated on every row can be used instead.</span>
       </div>
       <div className="overflow-hidden rounded-lg border border-ink-200">
         <div className="relative overflow-x-auto scroll-thin">
@@ -1334,6 +1333,9 @@ function SchemaChangeView({ schema }: { schema: NonNullable<ValidationOutput["sc
         <Badge tone={kind.tone}>{kind.label}</Badge>
         {schema.reordered && schema.kind === "evolved" && <Badge tone="neutral">Reordered too</Badge>}
         <span className="text-caption text-ink-500">{schema.common_percent}% of the columns in common</span>
+        {schema.recommendation_label && (
+          <span className="text-caption text-ink-500"> · {schema.recommendation_label}</span>
+        )}
       </div>
       <p className="mt-1 text-caption text-ink-500">{kind.note}</p>
       {schema.added.length > 0 && (

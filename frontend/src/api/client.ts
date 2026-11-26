@@ -20,6 +20,7 @@ import type {
   SilverJoinHow,
   SilverRun,
   SilverAggregateRow,
+  SilverRule,
   JobResults,
   JobStatus,
   OutputSummary,
@@ -326,6 +327,16 @@ export const api = {
   deleteSilverMapping: (row: DrtMapping) =>
     request<void>("/api/silver/mapping", { method: "DELETE", body: JSON.stringify(row) }),
   silverAggregate: () => request<SilverAggregateRow[]>("/api/silver/aggregate"),
+  silverRules: (profit_center?: string) =>
+    request<SilverRule[]>(`/api/silver/rules${profit_center ? `?profit_center=${encodeURIComponent(profit_center)}` : ""}`),
+  validateSilverRule: (rule: SilverRule) =>
+    request<{ valid: boolean; errors: string[] }>("/api/silver/rules/validate", { method: "POST", body: JSON.stringify(rule) }),
+  /** The signed-in user is recorded as the rule's approver. */
+  saveSilverRule: (rule: SilverRule) =>
+    rule.id == null
+      ? request<SilverRule>("/api/silver/rules", { method: "POST", body: JSON.stringify(rule) })
+      : request<SilverRule>(`/api/silver/rules/${rule.id}`, { method: "PUT", body: JSON.stringify(rule) }),
+  deleteSilverRule: (id: number) => request<void>(`/api/silver/rules/${id}`, { method: "DELETE" }),
 };
 
 export interface ValidationWatch {

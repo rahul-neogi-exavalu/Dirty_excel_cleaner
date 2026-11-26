@@ -1,0 +1,16 @@
+profit_center: PC0094
+rules:
+  - key: pc0094.5n5.grain
+    kind: constant
+    target: aggregate
+    scope_file_like: "*5 n 5*"
+    column: record_grain
+    spec: {value: CARRIER_AGENT}
+    source_ref: ext_pc0094_data_silver_cleansed.py:669
+  - key: pc0094.5n5.data_source
+    kind: constant
+    target: aggregate
+    scope_file_like: "*5 n 5*"
+    column: agg_data_source
+    spec: {value: EXTERNAL_FILE}
+    source_ref: ext_pc0094_data_silver_cleansed.py:670

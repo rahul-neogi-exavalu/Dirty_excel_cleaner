@@ -964,6 +964,22 @@ Follows `enhancements/AHI-Bronze-Silver-Scenario-Doc.docx`. Same split as §15: 
 | `profit_center.py` | The document's four LOTL scenarios against the business's LOTL (Active rows win), 4-digit numbers |
 | `hashing.py` | Business-key and row SHA-256 over normalised values |
 | `transform.py` | One table's bronze rows to Silver rows; used for the dry run *and* the load |
+| `rules.py` | Per-profit-center rules: filter, date_format, lookup, translate, derive, constant; JSON expression trees interpreted over polars Series (no `eval`) |
+
+**Profit-center rules.** Logic one profit center's files need (the manual Databricks
+notebooks' per-PC code) is data: `<control>.silver_pc_rule` (migration `015_pc_rules.sql`),
+seeded from `backend/config/pc_rules/*.yaml` by `backend/tools/load_pc_rules.py`, edited in
+the Silver page's Rules tab (`api/services/pc_rules_service.py`, `/api/silver/rules`). A rule
+is scoped to its profit center and optionally to a bronze table, file-name glob and sheet,
+and to the transaction or aggregate target. For each load:
+1. Filters drop bronze rows.
+2. Date formats read a date column the file's way.
+3. Lookups, translations, derivations and constants run before the profit center is settled from the LOTL, and before the hashes.
+
+Every value a rule writes goes through the column's own cleansing. A rule that reads a
+column the file lacks is skipped for that load and reported. The dry run shows what each
+rule changed, so the reviewer approves the values that will load. A change to the rules
+bumps `silver_pc_rule_version`, and approval refuses a review made against an older version.
 
 **Eligibility** is the document's rule, read from the audit table:
 `ingest.ingestion.status = 'ingested' AND silver_status IS DISTINCT FROM 'succeeded'`.

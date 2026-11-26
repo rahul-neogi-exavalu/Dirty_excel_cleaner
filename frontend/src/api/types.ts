@@ -360,7 +360,13 @@ export interface PlanItem {
   table_name: string;
   action: IngestAction;
   allowed_actions: IngestAction[];
-  comparison: { kind: "identical" | "reordered" | "evolved" | "different"; added: string[]; missing: string[] } | null;
+  comparison: {
+    kind: "identical" | "reordered" | "evolved" | "different";
+    added: string[];
+    missing: string[];
+    reordered: boolean;
+    common_percent: number;
+  } | null;
   columns_after: string[];
   columns_before: string[] | null;
   replaces: PlanReplaceRef[];
@@ -370,6 +376,8 @@ export interface PlanItem {
   blockers: string[];
   /** Month (YYYY-MM) -> the earlier loads it replaces that month of, which keep their other months. */
   replace_months: Record<string, PlanReplaceRef[]>;
+  /** A schema mismatch only: which action the configured similarity bands recommend -- advisory, not a restriction. */
+  recommendation: "evolve" | "new_table" | "reject" | null;
 }
 
 export interface IngestPlan {
@@ -478,6 +486,9 @@ export interface SchemaChange {
   reordered: boolean;
   /** The shared columns over their union, as a percentage: how much the two overlap. */
   common_percent: number;
+  /** Which action the configured similarity bands recommend -- advisory, not a restriction. */
+  recommendation: "evolve" | "new_table" | "reject" | null;
+  recommendation_label: string | null;
 }
 
 export interface ValidationFile {
@@ -834,11 +845,54 @@ export interface SilverMappingRow {
   candidates: SilverCandidate[];
 }
 
+export type SilverRuleKind = "filter" | "date_format" | "lookup" | "translate" | "derive" | "constant";
+export type SilverRuleTarget = "transaction" | "aggregate" | "both";
+
+/** A profit center's Silver rule (backend/src/ahi_silver/rules.py). */
+export interface SilverRule {
+  id?: number;
+  profit_center: string;
+  key: string;
+  kind: SilverRuleKind;
+  target: SilverRuleTarget;
+  /** The Silver column written; null for a filter or a lookup (its spec names its columns). */
+  column: string | null;
+  scope_bronze_table: string | null;
+  scope_file_like: string | null;
+  scope_sheet: string | null;
+  seq: number;
+  spec: Record<string, unknown>;
+  enabled: boolean;
+  note: string | null;
+  source_ref: string | null;
+  /** "seed" until a person edits it. */
+  approved_by?: string | null;
+  approved_at?: string | null;
+}
+
+/** What one rule did in a dry run or a load. */
+export interface SilverRuleStat {
+  key: string;
+  kind: SilverRuleKind;
+  columns: string[];
+  rows_in_scope: number;
+  rows_changed: number;
+  rows_dropped: number;
+  /** Values the rule produced that the column's type could not hold (loaded as NULL). */
+  unreadable: number;
+  /** Columns the rule names that the file does not have. */
+  missing_sources: string[];
+}
+
 export interface SilverQuality {
   rows: number;
   invalid_values: Record<string, number>;
   profit_center: Record<string, number>;
   unmapped_silver_columns?: string[];
+  /** The profit center's rules: rows a filter dropped, what each rule did, rules left out. */
+  rows_filtered?: number;
+  rules?: SilverRuleStat[];
+  rule_notes?: string[];
   /** Aggregated tables: rows loaded (after the unpivot), roll-up rows left out, each measure's total. */
   rows_loaded?: number;
   rollup_rows?: number;

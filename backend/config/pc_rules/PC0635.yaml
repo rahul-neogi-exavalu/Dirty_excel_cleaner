@@ -1,0 +1,38 @@
+profit_center: PC0635
+rules:
+  - key: pc0635.agency_address
+    kind: lookup
+    spec:
+      source: inline
+      key: "src:Agency"
+      match: contains
+      columns:
+        producer_billing_address: address
+        producer_billing_city: city
+        producer_billing_state: state
+        producer_billing_zipcode: zip
+        producer_office_location: address
+        producer_office_city: city
+        producer_office_state: state
+        producer_office_zipcode: zip
+      entries:
+        - {key: "Gallagher - Corona", address: "4140 Temescal Canyon Road", city: Corona, state: CA, zip: "92883"}
+        - {key: "Assured Partners", address: "196 S. Fir St.", city: Ventura, state: CA, zip: "93001"}
+        - {key: "MMT Ins", address: "10425 Double R Blvd", city: Reno, state: NV, zip: "89521"}
+        - {key: "Rick Nay", address: "PO Box 6767", city: Norco, state: CA, zip: "92860"}
+        - {key: "Tutto Ins", address: "2913 S. Pullman St.", city: Santa Ana, state: CA, zip: "92704"}
+        - {key: "Hartley Cylke", address: "2747 University Ave, Ste A", city: San Diego, state: CA, zip: "92104"}
+    note: >-
+      Matched on part of the agency name: July writes 'AJG/Rick Nay-White Water' and
+      'AJG/Hartley Cylke-San Die', which the notebook's exact names ('Rick Nay Ins-White
+      Water') never matched. The notebook flags the Tutto ZIP for verification
+      (requirement shows 9270).
+    source_ref: ext_pc0635_silver_cleansed.py:577-613,674-682
+  - key: pc0635.renewal_flag
+    kind: translate
+    column: renewal_flag
+    spec:
+      source: "src:NR"
+      cases: [{when: REN, then: true}, {when: NEW, then: false}]
+    note: "July values: NEW, REN. clean_boolean in the notebook gave NULL."
+    source_ref: ext_pc0635_silver_cleansed.py:658

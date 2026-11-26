@@ -51,6 +51,7 @@ from fastapi.encoders import jsonable_encoder
 from ahi_bronze import file_meta, grain, naming
 from ahi_bronze import validation as rules
 from ahi_bronze.schema_compare import compare as compare_schema
+from ahi_bronze.schema_compare import recommend as recommend_schema
 from ahi_bronze.validation import Decision, Loaded
 from ahi_clean.orchestrate import SOURCE_SHEET_COLUMN
 from ahi_silver import matching, semantic
@@ -1227,7 +1228,10 @@ def _schema_change(output: OutputCheck, decision: Decision | None) -> dict | Non
     kept = bronze_service.ingested_columns(_record(output))
     sheet = {name for original, name in kept if original == SOURCE_SHEET_COLUMN}
     comparison = compare_schema(list(home.column_names), [name for _, name in kept], ignore=sheet)
-    return {"against": home.file_name, "control_id": home.control_id, **comparison.as_dict()}
+    band = recommend_schema(comparison.common_percent, config.SCHEMA_SIMILARITY_BANDS)
+    return {"against": home.file_name, "control_id": home.control_id,
+            "recommendation": band.recommendation if band else None,
+            "recommendation_label": band.label if band else None, **comparison.as_dict()}
 
 
 def _origin_label(origin: str | None, detail: str | None = None) -> str:

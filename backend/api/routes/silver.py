@@ -10,7 +10,7 @@ from ahi_silver.catalog import targets as drt_targets
 
 from .. import config
 from ..auth import User, require_user
-from ..services import silver_service
+from ..services import pc_rules_service, silver_service
 from ..services.silver_service import Run
 
 router = APIRouter(prefix="/api/silver", tags=["silver"])
@@ -295,3 +295,50 @@ async def delete_saved_mapping(request: SavedMappingRow) -> None:
 @router.get("/aggregate")
 async def aggregate() -> list[dict]:
     return await run_in_threadpool(silver_service.aggregate)
+
+
+# --- per-profit-center rules (ahi_silver.rules) -------------------------------------------
+
+
+class RuleIn(BaseModel):
+    """One rule as the editor sends it; ``spec`` as the kind describes it."""
+
+    profit_center: str
+    key: str
+    kind: str
+    spec: dict
+    column: str | None = None
+    target: str = "transaction"
+    scope_bronze_table: str | None = None
+    scope_file_like: str | None = None
+    scope_sheet: str | None = None
+    seq: int = 100
+    enabled: bool = True
+    note: str | None = None
+    source_ref: str | None = None
+
+
+@router.get("/rules")
+async def list_rules(profit_center: str | None = None) -> list[dict]:
+    return await run_in_threadpool(pc_rules_service.list_rules, profit_center)
+
+
+@router.post("/rules/validate")
+async def validate_rule(request: RuleIn) -> dict:
+    errors = await run_in_threadpool(pc_rules_service.validate, request.model_dump())
+    return {"valid": not errors, "errors": errors}
+
+
+@router.post("/rules", status_code=201)
+async def add_rule(request: RuleIn, user: User = Depends(require_user)) -> dict:
+    return await run_in_threadpool(pc_rules_service.save_rule, request.model_dump(), user.user_name)
+
+
+@router.put("/rules/{rule_id}")
+async def replace_rule(rule_id: int, request: RuleIn, user: User = Depends(require_user)) -> dict:
+    return await run_in_threadpool(pc_rules_service.save_rule, request.model_dump(), user.user_name, rule_id)
+
+
+@router.delete("/rules/{rule_id}", status_code=204, response_class=Response)
+async def delete_rule(rule_id: int) -> None:
+    await run_in_threadpool(pc_rules_service.delete_rule, rule_id)

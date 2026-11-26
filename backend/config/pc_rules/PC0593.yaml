@@ -1,0 +1,19 @@
+profit_center: PC0593
+rules:
+  - key: pc0593.m9947.carrier
+    kind: lookup
+    scope_file_like: "*M9947*"
+    spec:
+      source: bronze_table
+      table: "*pc0593*key*"
+      key: "src:ICCODE"
+      key_to: ICCODE
+      columns: {insurance_company_name: DESCRIPTION}
+    note: "ICCODE -> carrier name, from PC0593's key file."
+    source_ref: ext_pc0593_sheet1_silver_cleansed.py:670,695-700,736
+  - key: pc0593.dbagent.carrier
+    kind: constant
+    scope_file_like: "*DB_AGENT*"
+    column: insurance_company_name
+    spec: {value: RLI}
+    source_ref: ext_pc0593_sheet1_dbagent_silver_cleansed.py:722

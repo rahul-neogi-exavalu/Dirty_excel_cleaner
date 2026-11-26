@@ -29,3 +29,14 @@ def test_the_catalog_marks_the_drt_columns_the_dropdowns_offer(client):
     # In the Silver table, but not DRT columns: never offered.
     assert not columns["UltimateParentProducerNames"]["target"] and not columns["ajg_apd"]["target"]
     assert not columns["row_hash"]["target"]
+
+
+def test_a_rule_is_validated_before_it_is_saved(client):
+    good = {"profit_center": "2041", "key": "pc2041.flag", "kind": "constant", "column": "renewal_flag",
+            "spec": {"value": True}}
+    assert client.post("/api/silver/rules/validate", json=good).json() == {"valid": True, "errors": []}
+    bad = {**good, "column": "record_grain", "spec": {}}
+    result = client.post("/api/silver/rules/validate", json=bad).json()
+    assert not result["valid"]
+    assert any("needs 'value'" in error for error in result["errors"])
+    assert any("not a transaction column" in error for error in result["errors"])
