@@ -40,3 +40,17 @@ def test_a_rule_is_validated_before_it_is_saved(client):
     assert not result["valid"]
     assert any("needs 'value'" in error for error in result["errors"])
     assert any("not a transaction column" in error for error in result["errors"])
+
+
+def test_a_rule_spec_converts_to_sql_and_back_through_the_api(client):
+    spec = {"expr": {"op": "mul", "args": ["src:Premium", 0.1]}}
+    shown = client.post("/api/silver/rules/to-sql", json={"kind": "derive", "spec": spec}).json()
+    assert shown == {"sql": 'src."Premium" * 0.1', "reason": None}
+    back = client.post("/api/silver/rules/from-sql",
+                       json={"kind": "derive", "sql": shown["sql"], "spec": {**spec, "mode": "fill_null"}}).json()
+    assert back == {"spec": {**spec, "mode": "fill_null"}, "error": None}
+
+    lookup = client.post("/api/silver/rules/to-sql", json={"kind": "lookup", "spec": {}}).json()
+    assert lookup["sql"] is None and "edited as JSON" in lookup["reason"]
+    broken = client.post("/api/silver/rules/from-sql", json={"kind": "derive", "sql": "UPPER(a"}).json()
+    assert broken["spec"] is None and broken["error"]["start"] == 7
