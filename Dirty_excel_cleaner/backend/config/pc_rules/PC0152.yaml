@@ -1,0 +1,14 @@
+profit_center: PC0152
+rules:
+  - key: pc0152.grain
+    kind: constant
+    target: aggregate
+    column: record_grain
+    spec: {value: CARRIER_AGENT}
+    source_ref: ext_pc0152_data_silver_cleansed.py:669
+  - key: pc0152.data_source
+    kind: constant
+    target: aggregate
+    column: agg_data_source
+    spec: {value: EXTERNAL_FILE}
+    source_ref: ext_pc0152_data_silver_cleansed.py:670

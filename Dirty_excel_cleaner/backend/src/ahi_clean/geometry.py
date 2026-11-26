@@ -1,0 +1,394 @@
+"""Split a sheet into table regions.
+
+A sheet is not assumed to hold exactly one table starting at A1. It may hold several,
+stacked with gaps or sitting side by side, surrounded by banners and footers.
+
+The governing rule: **gap size is never an input to any decision.** One blank row and
+twelve blank rows are treated identically. What decides is whether what sits on the
+other side of the gap looks like the same table -- by column type profile for rows,
+by row extent for columns.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+from . import signals
+from .typing_utils import EMPTY, is_blank
+
+PROFILE_MATCH_THRESHOLD = 0.7
+COVERAGE_MATCH_THRESHOLD = 0.7
+EXTENT_MATCH_THRESHOLD = 0.75
+GUTTER_MAX_WIDTH = 1
+MIN_TABLE_ROWS = 2
+MAX_JUNK_RUN_ROWS = 2
+PROFILE_SAMPLE_ROWS = 5
+# A join or split decided within this distance of its threshold is a close call.
+CLOSE_CALL_MARGIN = 0.1
+
+
+@dataclass
+class Region:
+    """A rectangle of a sheet believed to hold one table.
+
+    ``rows`` holds only populated rows -- interior blank runs are removed, since a
+    decorative gap carries no data. ``source_rows`` keeps each row's original sheet
+    index so the audit report can still point a reviewer at the right line.
+    """
+
+    rows: list[list]
+    source_rows: list[int] = field(default_factory=list)
+    column_offset: int = 0
+    origin: str = "row_segmentation"
+    # Boundary decisions that were close calls, in words, for the table's flags.
+    close_calls: list[str] = field(default_factory=list)
+    _width: int | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def row_offset(self) -> int:
+        return self.source_rows[0] if self.source_rows else 0
+
+    @property
+    def height(self) -> int:
+        return len(self.rows)
+
+    @property
+    def width(self) -> int:
+        """The widest row, measured once.
+
+        Cached because it is O(rows) and callers treat it as a cheap attribute. Left as a
+        live property it turned a single loop over the rows into a quadratic one: on a
+        50,000-row file that is two and a half billion comparisons to answer a question
+        whose answer never changes.
+        """
+        if self._width is None:
+            self._width = max((len(row) for row in self.rows), default=0)
+        return self._width
+
+
+def find_regions(grid: list[list]) -> list[Region]:
+    """Segment a raw sheet grid into table regions."""
+    regions: list[Region] = []
+    for row_region in _segment_rows(grid):
+        regions.extend(_segment_columns(row_region))
+    return [region for region in regions if _is_table(region)]
+
+
+def _is_table(region: Region) -> bool:
+    """Reject regions that cannot be a table however they are read.
+
+    A block of single-cell lines is a banner or a footer that happened to be fenced off
+    by blank rows -- a title, a timestamp and a confidentiality notice stacked together.
+    It has no second column, so there is nothing to tabulate.
+    """
+    if region.height < MIN_TABLE_ROWS:
+        return False
+    if _only_comments(region.rows):
+        return False
+    return signals.modal_fill(region.rows) >= 2 or _is_list(region.rows)
+
+
+LIST_MIN_ROWS = 10
+LIST_SHARE = 0.9
+COMMENT_LENGTH = 80
+
+
+def _is_list(rows) -> bool:
+    """One column, ten or more values, nine in ten of one type that is not text.
+
+    A column of dates or numbers on its own is a list of values, not a stack of titles;
+    titles and notes are text, so they keep being treated as banners.
+    """
+    values = [cell for row in rows for cell in row if not is_blank(cell)]
+    if len(values) < LIST_MIN_ROWS or any(sum(not is_blank(c) for c in row) > 1 for row in rows):
+        return False
+    kinds = [signals.infer_type(value) for value in values]
+    kind = max(set(kinds), key=kinds.count)
+    return kind not in (EMPTY, "text") and kinds.count(kind) >= LIST_SHARE * len(kinds)
+
+
+def _only_comments(rows) -> bool:
+    """Every value under the first row is a code comment (``--``) or a long sentence: notes."""
+    body = [cell for row in rows[1:] for cell in row if not is_blank(cell)]
+    return bool(body) and all(
+        isinstance(cell, str) and (cell.strip().startswith("--") or len(cell) > COMMENT_LENGTH)
+        for cell in body
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Rows
+# --------------------------------------------------------------------------- #
+
+
+def _blank_row(row) -> bool:
+    return all(is_blank(cell) for cell in row)
+
+
+def _runs_of_populated_rows(grid) -> list[tuple[int, int]]:
+    """Index ranges of consecutive non-blank rows."""
+    runs: list[tuple[int, int]] = []
+    index = 0
+    while index < len(grid):
+        if _blank_row(grid[index]):
+            index += 1
+            continue
+        start = index
+        while index < len(grid) and not _blank_row(grid[index]):
+            index += 1
+        runs.append((start, index))
+    return runs
+
+
+def _profile_rows(rows):
+    """The rows of a run that best represent its data shape.
+
+    The first row of a run is very often a header, and its all-text signature would
+    otherwise dominate the profile of a short run -- a two-row run of header plus one
+    record profiles as pure text and then matches nothing. Skip it when there is
+    anything else to go on, and prefer the rows nearest the boundary being judged.
+    """
+    body = rows[1:] if len(rows) > 1 else rows
+    return body[-PROFILE_SAMPLE_ROWS:]
+
+
+def _columns_used(profile) -> set[int]:
+    return {index for index, kind in enumerate(profile) if kind != EMPTY}
+
+
+def _belongs_to_previous(anchor_rows, candidate_rows, width) -> bool:
+    return _join_decision(anchor_rows, candidate_rows, width)[0]
+
+
+def _heads(line, profile) -> bool:
+    """Whether a lone row is the header of the rows below it, with blank rows between:
+    short text labels over exactly the columns those rows fill, and unlike them in type.
+    Alignment decides, never the gap -- a report that spaces its header from its records
+    (and its records from each other) is still one table."""
+    labels = [cell for cell in line if not is_blank(cell)]
+    if len(labels) < 2 or signals.textness(line) < 1.0 or signals.brevity(line) < 1.0:
+        return False
+    # Every column the records fill has a label. The header may also name fields that are
+    # empty in this extract (a quarter of them at most), as a full export template does.
+    labelled = {index for index, cell in enumerate(line) if not is_blank(cell)}
+    used = _columns_used(profile)
+    if not used <= labelled or len(labelled - used) > len(labelled) // 4:
+        return False
+    return signals.type_contrast(line, profile) >= 0.5
+
+
+def _join_decision(anchor_rows, candidate_rows, width) -> tuple[bool, str | None]:
+    """Whether a run continues the region before it, and a note if that was close."""
+    anchor_profile = signals.type_profile(_profile_rows(anchor_rows), width)
+    candidate_profile = signals.type_profile(_profile_rows(candidate_rows), width)
+    if len(anchor_rows) == 1 and _heads(anchor_rows[0], candidate_profile):
+        return True, None
+    anchor_fill = signals.modal_fill(anchor_rows)
+    candidate_fill = signals.modal_fill(candidate_rows)
+
+    # A short, sparse run whose columns are a subset of the table's is decoration --
+    # a subtotal, a page footer, a confidentiality line -- not a new table. Attaching
+    # it keeps it out of the region list and, just as importantly, stops it acting as
+    # a wall that cuts one table into two.
+    #
+    # Length is what separates it from a genuinely narrower table placed below: an
+    # adjustment table brings its own header and several rows, decoration does not.
+    if (
+        candidate_fill < anchor_fill
+        and len(candidate_rows) <= MAX_JUNK_RUN_ROWS
+        and _columns_used(candidate_profile) <= _columns_used(anchor_profile)
+    ):
+        return True, None
+
+    # Both questions must be answered yes. Coverage asks whether the two runs use the
+    # same columns at all; similarity asks whether those shared columns hold the same
+    # kinds of value. A banner passes the second on its single column and fails the
+    # first; a chunk of the same table with a gap in one field passes both.
+    coverage = signals.profile_coverage(anchor_profile, candidate_profile)
+    similarity = signals.profile_similarity(anchor_profile, candidate_profile)
+    joined = coverage >= COVERAGE_MATCH_THRESHOLD and similarity >= PROFILE_MATCH_THRESHOLD
+    margin = min(coverage - COVERAGE_MATCH_THRESHOLD, similarity - PROFILE_MATCH_THRESHOLD)
+    note = None
+    if abs(margin) < CLOSE_CALL_MARGIN:
+        detail = f"column overlap {coverage:.0%}, type agreement {similarity:.0%}; cut-off 70%"
+        note = (
+            f"rows after a gap were joined to this table although they only just match ({detail})"
+            if joined else
+            f"this table was split from the rows above although they nearly match ({detail})"
+        )
+    return joined, note
+
+
+def _segment_rows(grid: list[list]) -> list[Region]:
+    """Group runs of populated rows into regions by column type profile."""
+    runs = _runs_of_populated_rows(grid)
+    if not runs:
+        return []
+
+    width = max((len(row) for row in grid), default=0)
+    padded = [list(row) + [None] * (width - len(row)) for row in grid]
+
+    groups: list[list[tuple[int, int]]] = [[runs[0]]]
+    notes: list[list[str]] = [[]]
+    for run in runs[1:]:
+        anchor_rows = [row for start, end in groups[-1] for row in padded[start:end]]
+        joined, note = _join_decision(anchor_rows, padded[run[0] : run[1]], width)
+        if joined:
+            groups[-1].append(run)
+            if note:
+                notes[-1].append(note)
+        else:
+            groups.append([run])
+            notes.append([note] if note else [])
+
+    regions = []
+    for group, group_notes in zip(groups, notes):
+        indices = [index for start, end in group for index in range(start, end)]
+        regions.append(
+            Region(rows=[padded[index] for index in indices], source_rows=indices,
+                   close_calls=group_notes)
+        )
+    return regions
+
+
+# --------------------------------------------------------------------------- #
+# Columns
+# --------------------------------------------------------------------------- #
+
+
+def _runs_of_populated_columns(rows, width) -> list[tuple[int, int]]:
+    populated = [
+        any(index < len(row) and not is_blank(row[index]) for row in rows)
+        for index in range(width)
+    ]
+    runs: list[tuple[int, int]] = []
+    index = 0
+    while index < width:
+        if not populated[index]:
+            index += 1
+            continue
+        start = index
+        while index < width and populated[index]:
+            index += 1
+        runs.append((start, index))
+    return runs
+
+
+def _row_extent(rows, start, end) -> tuple[int, int] | None:
+    """First and last row index in which a column range holds anything."""
+    occupied = [
+        index
+        for index, row in enumerate(rows)
+        if any(
+            position < len(row) and not is_blank(row[position])
+            for position in range(start, end)
+        )
+    ]
+    return (occupied[0], occupied[-1]) if occupied else None
+
+
+def _extents_match(left, right) -> bool:
+    """Whether two column runs span the same rows, within a tolerance."""
+    if left is None or right is None:
+        return False
+    left_span = left[1] - left[0] + 1
+    right_span = right[1] - right[0] + 1
+    overlap = min(left[1], right[1]) - max(left[0], right[0]) + 1
+    if overlap <= 0:
+        return False
+    return overlap / max(left_span, right_span) >= EXTENT_MATCH_THRESHOLD
+
+
+def _first_labels(rows, columns) -> set[str]:
+    """The text labels of the first line holding two or more text cells in ``columns``."""
+    for row in rows:
+        cells = [row[index] for index in columns if index < len(row)]
+        texts = [cell for cell in cells if isinstance(cell, str) and cell.strip()]
+        if len(texts) >= 2:
+            return {re.sub(r"[^a-z0-9]", "", text.lower()) for text in texts} - {""}
+    return set()
+
+
+def _repeats_labels(rows, group, run) -> bool:
+    """Whether the header over ``run`` repeats at least two labels of the header over ``group``."""
+    left = _first_labels(rows, [index for start, end in group for index in range(start, end)])
+    right = _first_labels(rows, range(*run))
+    return len(left & right) >= 2
+
+
+def _segment_columns(region: Region) -> list[Region]:
+    """Split a row region where blank columns separate genuinely different tables.
+
+    Two column runs spanning the same rows are one table with a decorative gutter --
+    File1's column F. Two runs spanning different rows are separate tables placed side
+    by side, and are returned as separate regions.
+    """
+    width = region.width
+    runs = _runs_of_populated_columns(region.rows, width)
+    if not runs:
+        return []
+
+    groups: list[list[tuple[int, int]]] = [[runs[0]]]
+    column_notes: list[str] = []
+    for run in runs[1:]:
+        previous = groups[-1][-1]
+        left = _row_extent(region.rows, *previous)
+        right = _row_extent(region.rows, *run)
+        gap = run[0] - previous[1]
+
+        # A narrow gap spanning the same rows is decoration inside one table. A wider
+        # one is only a gutter if the two sides cover *exactly* the same rows: two
+        # tables placed side by side almost always differ in length, and that
+        # difference is the one honest signal that they are unrelated.
+        same_rows = left is not None and left == right
+        extents = _extents_match(left, right)
+        gutter = same_rows or (gap <= GUTTER_MAX_WIDTH and extents)
+        if gutter and _repeats_labels(region.rows, groups[-1], run):
+            # Same rows, but the right side's header restates the left side's labels
+            # (Agent | Premium | Revenue  ·  Carrier | Premium | Revenue): two summaries
+            # of one measure by different keys, placed side by side -- not one table.
+            gutter = False
+            column_notes.append(
+                "a blank column was read as a boundary: the header labels on its right "
+                "repeat those on its left"
+            )
+        if gutter:
+            groups[-1].append(run)
+            if not same_rows:
+                column_notes.append(
+                    "a blank column was treated as a gap inside this table although the "
+                    "two sides span slightly different rows"
+                )
+        else:
+            groups.append([run])
+            if extents:
+                column_notes.append(
+                    "a wide blank column split this table from its neighbour although "
+                    "both span nearly the same rows"
+                )
+
+    regions = []
+    for group in groups:
+        # Within a group the gutter columns are dropped; across groups the split stands.
+        keep = [index for start, end in group for index in range(start, end)]
+        rows, sources = [], []
+        for row, source in zip(region.rows, region.source_rows):
+            sliced = [row[index] if index < len(row) else None for index in keep]
+            if _blank_row(sliced):
+                # This row belonged to the neighbouring table, not this one.
+                continue
+            rows.append(sliced)
+            sources.append(source)
+        if not rows:
+            continue
+        regions.append(
+            Region(
+                rows=rows,
+                source_rows=sources,
+                column_offset=region.column_offset + group[0][0],
+                origin="column_segmentation" if len(groups) > 1 else region.origin,
+                close_calls=region.close_calls + column_notes,
+            )
+        )
+    return regions

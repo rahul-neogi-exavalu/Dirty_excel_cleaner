@@ -1,0 +1,53 @@
+profit_center: PC2024
+# Three summaries a month, told apart by file name.
+rules:
+  - key: pc2024.carrier_agent.grain
+    kind: constant
+    target: aggregate
+    scope_file_like: "*MTD by carrier by agt*"
+    column: record_grain
+    spec: {value: Carrier_Agent}
+    source_ref: ext_pc2024_carrier_agent_summary_silver_cleansed.py:654
+  - key: pc2024.carrier_agent.report_type
+    kind: constant
+    target: aggregate
+    scope_file_like: "*MTD by carrier by agt*"
+    column: report_type
+    spec: {value: Carrier_Agent_Summary}
+    source_ref: ext_pc2024_carrier_agent_summary_silver_cleansed.py:655
+  - key: pc2024.agent.grain
+    kind: constant
+    target: aggregate
+    scope_file_like: "*MTD by agt*"
+    column: record_grain
+    spec: {value: Agent}
+    source_ref: ext_pc2024_agent_summary_silver_cleansed.py:575
+  - key: pc2024.agent.report_type
+    kind: constant
+    target: aggregate
+    scope_file_like: "*MTD by agt*"
+    column: report_type
+    spec: {value: Agent_Summary}
+    source_ref: ext_pc2024_agent_summary_silver_cleansed.py:576
+  - key: pc2024.carrier.grain
+    kind: constant
+    target: aggregate
+    scope_file_like: "*MTD by carrier_*"
+    column: record_grain
+    spec: {value: Carrier}
+    note: "The notebook copied 'Agent' here by mistake; this is the carrier summary."
+    source_ref: ext_pc2024_carrier_summary_silver_cleansed.py:586
+  - key: pc2024.carrier.report_type
+    kind: constant
+    target: aggregate
+    scope_file_like: "*MTD by carrier_*"
+    column: report_type
+    spec: {value: Carrier_Summary}
+    note: "Corrected from the notebook's 'Agent_Summary'."
+    source_ref: ext_pc2024_carrier_summary_silver_cleansed.py:587
+  - key: pc2024.data_source
+    kind: constant
+    target: aggregate
+    column: agg_data_source
+    spec: {value: EXTERNAL_FILE}
+    source_ref: ext_pc2024_carrier_agent_summary_silver_cleansed.py:656

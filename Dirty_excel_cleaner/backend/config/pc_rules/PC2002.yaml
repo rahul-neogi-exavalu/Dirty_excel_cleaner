@@ -1,0 +1,22 @@
+profit_center: PC2002
+# The Arrowhead data feed carries several profit centers; the number comes from the name.
+rules:
+  - key: pc2002.number_from_name
+    kind: translate
+    column: profit_center_number
+    spec:
+      source: "src:ProfitCenterName"
+      cases:
+        - {when: "Equity Partners Insurance Services, Inc", then: "2022"}
+        - {when: Bigfoot, then: "2023"}
+        - {when: [Maritime Program Group, Atlass - Wholesale], then: "2013"}
+        - {when: Professional Risk Solutions, then: "2019"}
+        - {when: Seacoast, then: "2011"}
+        - {when: Enviant, then: "2012"}
+        - {when: Hill Programs, then: "2010"}
+        - {when: Agentic, then: "2020"}
+        - {when: International Excess, then: "2027"}
+        - {when: EE Hall, then: "2002"}
+        - {when: GMI, then: "2029"}
+        - {when: Cannasure, then: "2009"}
+    source_ref: ext_pc2002_sheet1_silver_cleansed.py:361-375,414,683

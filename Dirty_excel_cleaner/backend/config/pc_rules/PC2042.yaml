@@ -1,0 +1,24 @@
+profit_center: PC2042
+rules:
+  - key: pc2042.carrier_analysis.drop_periods
+    kind: filter
+    target: aggregate
+    scope_file_like: "*CarrierAnalysis*"
+    spec:
+      drop: {op: in, args: ["src:year_month_ytd_change"], values: [year_2025, year_2026_jul]}
+    note: >-
+      year_month_ytd_change came from the Databricks bronze unpivot. If the tool's bronze
+      table has no such column, the rule reports the missing source and drops nothing.
+    source_ref: ext_pc2042_2026_carrier_analysis_silver_cleansed.py:607-612
+  - key: pc2042.grain
+    kind: constant
+    target: aggregate
+    column: record_grain
+    spec: {value: CARRIER}
+    source_ref: ext_pc2042_2026_carrier_analysis_silver_cleansed.py:672
+  - key: pc2042.data_source
+    kind: constant
+    target: aggregate
+    column: agg_data_source
+    spec: {value: EXTERNAL_FILE}
+    source_ref: ext_pc2042_2026_carrier_analysis_silver_cleansed.py:674

@@ -1,0 +1,4 @@
+min_percent,recommendation,label
+90,evolve,Evolve the existing table
+50,new_table,Create a separate table
+0,reject,Not similar enough to combine
