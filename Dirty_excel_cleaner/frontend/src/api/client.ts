@@ -28,6 +28,9 @@ import type {
   SourcePreview,
   TaskProgress,
   Validation,
+  RequiredFill,
+  RuleSqlParse,
+  RuleSqlView,
   ValidationChoice,
   ValidationRun,
   Workbook,
@@ -260,6 +263,8 @@ export const api = {
     key: string,
     change: {
       mapping?: Record<string, string | null>;
+      /** Required column -> null or a value in place of a file column; null clears it. */
+      fills?: Record<string, RequiredFill | null>;
       reporting_start_date?: string | null;
       reporting_end_date?: string | null;
       choice?: ValidationChoice | null;
@@ -327,8 +332,20 @@ export const api = {
   deleteSilverMapping: (row: DrtMapping) =>
     request<void>("/api/silver/mapping", { method: "DELETE", body: JSON.stringify(row) }),
   silverAggregate: () => request<SilverAggregateRow[]>("/api/silver/aggregate"),
-  silverRules: (profit_center?: string) =>
-    request<SilverRule[]>(`/api/silver/rules${profit_center ? `?profit_center=${encodeURIComponent(profit_center)}` : ""}`),
+  /** With ``includeDeleted``, deleted rules too (their history). */
+  silverRules: (profit_center?: string, includeDeleted = false) => {
+    const query = new URLSearchParams();
+    if (profit_center) query.set("profit_center", profit_center);
+    if (includeDeleted) query.set("include_deleted", "true");
+    const text = query.toString();
+    return request<SilverRule[]>(`/api/silver/rules${text ? `?${text}` : ""}`);
+  },
+  /** A spec as SQL, when it has an exact SQL form. */
+  ruleToSql: (kind: string, spec: Record<string, unknown>) =>
+    request<RuleSqlView>("/api/silver/rules/to-sql", { method: "POST", body: JSON.stringify({ kind, spec }) }),
+  /** The spec SQL means (``spec``'s mode is kept), or where it cannot be read. */
+  ruleFromSql: (kind: string, sql: string, spec?: Record<string, unknown>) =>
+    request<RuleSqlParse>("/api/silver/rules/from-sql", { method: "POST", body: JSON.stringify({ kind, sql, spec }) }),
   validateSilverRule: (rule: SilverRule) =>
     request<{ valid: boolean; errors: string[] }>("/api/silver/rules/validate", { method: "POST", body: JSON.stringify(rule) }),
   /** The signed-in user is recorded as the rule's approver. */

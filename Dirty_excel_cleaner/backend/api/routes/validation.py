@@ -52,6 +52,8 @@ async def update_output(session_id: str, key: str, request: ValidationOutputUpda
         request.reporting_start_date, request.reporting_end_date, request.choice, request.use_control_dates,
         date_role=request.date_role, replaces_file=request.replaces_file, companion_of=request.companion_of,
         grain_choice=request.grain, replace_months=request.replace_months,
+        fills={target: fill.model_dump() if fill else None for target, fill in request.fills.items()}
+        if request.fills else None,
     )
     return validation_service.session_out(session)
 

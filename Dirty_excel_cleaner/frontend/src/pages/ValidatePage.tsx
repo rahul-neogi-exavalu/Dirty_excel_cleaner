@@ -31,6 +31,7 @@ import type {
   DateRole,
   ProgressPhase,
   RequiredColumn,
+  RequiredFill,
   TaskProgress,
   Validation,
   ValidationChoice,
@@ -653,7 +654,7 @@ function ValidationView({
           <FileDetails file={file} busy={busy || Boolean(output.staged)} onChange={(change) => onFile(file.job_id, change)} />
           <Grain output={output} busy={busy || Boolean(output.staged)} onChange={(grain) => onOutput(output.key, { grain })} />
           {!output.aggregated && (
-            <RequiredColumns output={output} busy={busy || Boolean(output.staged)} onChange={(mapping) => onOutput(output.key, { mapping })} />
+            <RequiredColumns output={output} busy={busy || Boolean(output.staged)} onChange={(change) => onOutput(output.key, change)} />
           )}
           <div className={clsx("grid gap-6", bodyWidth >= SPLIT_DATES_AT ? "grid-cols-[minmax(0,2fr)_minmax(0,1fr)]" : "grid-cols-[minmax(0,1fr)]")}>
             <ReportingDates output={output} busy={busy || Boolean(output.staged)} onChange={(change) => onOutput(output.key, change)} />
@@ -811,8 +812,14 @@ function FileDetails({ file, busy, onChange }: { file: ValidationFile; busy: boo
         </label>
       </div>
       <div className="mt-2 space-y-0.5">
-        {file.detected_scope && (
-          <p className="text-caption text-ink-500">From the control table: {file.detected_scope}.</p>
+        {(file.detected_scope || file.detected_date_basis || file.detected_reporting_file_type) && (
+          <p className="text-caption text-ink-500">
+            From the control table ({file.pc_id}'s last staged file):{" "}
+            {[file.detected_scope && `scope ${file.detected_scope}`,
+              file.detected_date_basis && `date basis ${file.detected_date_basis}`,
+              file.detected_reporting_file_type && `${file.detected_reporting_file_type.toLowerCase()}`]
+              .filter(Boolean).join(", ")}. Change any that differ for this file.
+          </p>
         )}
         {file.detected_received_date && (
           <p className="text-caption text-ink-500">From the file name: {dayLabel(file.detected_received_date)}{file.received_note ? ` · ${file.received_note}` : ""}</p>
@@ -844,10 +851,10 @@ function halves(groups: RequiredColumn[][]): [RequiredColumn[][], RequiredColumn
   return [groups.slice(0, split), groups.slice(split)];
 }
 
-function RequiredColumns({ output, busy, onChange }: { output: ValidationOutput; busy: boolean; onChange: (mapping: Record<string, string | null>) => void }) {
+function RequiredColumns({ output, busy, onChange }: { output: ValidationOutput; busy: boolean; onChange: (change: OutputChange) => void }) {
   const columns = useMemo(() => new Map(output.columns.map((column) => [column.original, column])), [output.columns]);
   const byName = useMemo(() => new Map(output.required.map((item) => [item.name, item])), [output.required]);
-  const present = (item: RequiredColumn) => Boolean(item.column && !columns.get(item.column)?.excluded);
+  const present = (item: RequiredColumn) => Boolean(item.fill || (item.column && !columns.get(item.column)?.excluded));
   // Each requirement once: a column on its own, or a group of alternatives any one of which will do.
   const groups: RequiredColumn[][] = [];
   const grouped = new Set<string>();
@@ -871,7 +878,10 @@ function RequiredColumns({ output, busy, onChange }: { output: ValidationOutput;
           <RequiredRow key={item.name} item={item} output={output} columns={columns} busy={busy} missingValue={MISSING}
             alternatives={alternatives} standIn={alternatives.find(present) ?? null} stacked={stacked}
             pair={group.length > 1 ? (position === 0 ? "first" : position === group.length - 1 ? "last" : "middle") : null}
-            onChange={(column) => onChange({ [item.name]: column === MISSING ? null : column })} />
+            onChange={(column) => onChange(column === MISSING && item.fill
+              ? { fills: { [item.name]: null } }
+              : { mapping: { [item.name]: column === MISSING ? null : column } })}
+            onFill={(fill) => onChange({ fills: { [item.name]: fill } })} />
         );
       }),
     );
@@ -931,6 +941,10 @@ function RequiredColumns({ output, busy, onChange }: { output: ValidationOutput;
   );
 }
 
+/** Select values for filling a required column instead of mapping a file column. */
+const NULL_FILL = "__null__";
+const VALUE_FILL = "__value__";
+
 function RequiredRow({
   item,
   output,
@@ -942,6 +956,7 @@ function RequiredRow({
   pair,
   stacked,
   onChange,
+  onFill,
 }: {
   item: RequiredColumn;
   output: ValidationOutput;
@@ -957,12 +972,27 @@ function RequiredRow({
   /** Too narrow for a table: label and match above, the file column below. */
   stacked: boolean;
   onChange: (column: string) => void;
+  /** Fill it instead of mapping a file column: null, or one value on every row. */
+  onFill: (fill: RequiredFill) => void;
 }) {
-  const column = item.column ? columns.get(item.column) : null;
+  const fill = item.fill;
+  // Choosing "Enter a value" opens the box; the value is sent once it is typed.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(fill?.kind === "value" ? fill.value : "");
+  useEffect(() => {
+    setDraft(fill?.kind === "value" ? fill.value : "");
+    if (fill) setEditing(false);
+  }, [fill]);
+  const column = item.column && !fill ? columns.get(item.column) : null;
   const leftOut = Boolean(column?.excluded);
   const proposed = new Map(item.options.map((option) => [option.column, option]));
   const choices = [
     { value: missingValue, label: "Missing", description: "No column of this file holds it" },
+    ...(item.fillable ? [
+      { value: NULL_FILL, label: "Null", description: "Stage it empty: this file does not carry it" },
+      { value: VALUE_FILL, label: fill?.kind === "value" ? `“${fill.value}”` : "Enter a value…",
+        description: "One value you type, on every row" },
+    ] : []),
     ...[...output.columns]
       .sort((a, b) => (proposed.get(b.original)?.score ?? -1) - (proposed.get(a.original)?.score ?? -1))
       .map((candidate) => {
@@ -978,7 +1008,16 @@ function RequiredRow({
       }),
   ];
   const vote = item.vote;
-  const status = (!item.column || leftOut) && standIn ? (
+  const source = item.derived_from ? output.required.find((other) => other.name === item.derived_from) : null;
+  const status = fill?.kind === "null" ? <Badge tone="neutral" icon={<CircleDashed />}>Null</Badge>
+    : fill?.kind === "value" ? <Badge tone="brand" icon={<CheckCircle2 />}>Value</Badge>
+    : source && (!item.column || leftOut) ? (
+      <Tooltip content={`Worked out row by row when staged: ${item.name.endsWith("_pct")
+        ? `${source.label} ÷ Premium` : `${source.label} × Premium`}.`}>
+        <span tabIndex={0} className="inline-flex"><Badge tone="info" icon={<Sigma />}>Derived</Badge></span>
+      </Tooltip>
+    )
+    : (!item.column || leftOut) && standIn ? (
     <Tooltip content={`${standIn.label} is found: one of the pair is enough.`}>
       <span tabIndex={0} className="inline-flex"><Badge tone="neutral">Not needed</Badge></span>
     </Tooltip>
@@ -1002,9 +1041,47 @@ function RequiredRow({
         )}
     </>
   );
+  const selected = fill?.kind === "null" ? NULL_FILL : fill?.kind === "value" || editing ? VALUE_FILL : item.column ?? missingValue;
+  const commitValue = () => {
+    const value = draft.trim();
+    if (!value) {
+      // Nothing typed: keep what was there.
+      setDraft(fill?.kind === "value" ? fill.value : "");
+      if (!fill) setEditing(false);
+      return;
+    }
+    if (fill?.kind !== "value" || fill.value !== value) onFill({ kind: "value", value });
+  };
   const select = (
-    <Select value={item.column ?? missingValue} options={choices} onChange={onChange} label={`File column for ${item.label}`} hideLabel
-      disabled={busy} width={420} className="w-full" hideSelectedMeta />
+    <>
+      <Select value={selected} options={choices} label={`File column for ${item.label}`} hideLabel
+        disabled={busy} width={420} className="w-full" hideSelectedMeta
+        onChange={(value) => {
+          if (value === NULL_FILL) {
+            setEditing(false);
+            onFill({ kind: "null" });
+          } else if (value === VALUE_FILL) {
+            setEditing(true);
+          } else {
+            setEditing(false);
+            onChange(value);
+          }
+        }} />
+      {(editing || fill?.kind === "value") && (
+        <input value={draft} disabled={busy} autoFocus={editing && !fill} placeholder={`Value of ${item.label} on every row`}
+          aria-label={`Value of ${item.label} on every row`}
+          onChange={(event) => setDraft(event.target.value)} onBlur={commitValue}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") (event.target as HTMLInputElement).blur();
+            if (event.key === "Escape") {
+              setDraft(fill?.kind === "value" ? fill.value : "");
+              if (!fill) setEditing(false);
+            }
+          }}
+          className={clsx(input, "mt-1.5", fill?.kind === "value" ? "border-ink-200" : "border-amber-400")} />
+      )}
+      {item.reads_as && <p className="mt-1 text-caption text-ink-500">Read as {item.reads_as} of the premium</p>}
+    </>
   );
   const match = (
     <>

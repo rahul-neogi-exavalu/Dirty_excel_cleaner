@@ -1,15 +1,50 @@
 import clsx from "clsx";
 import { Check, FileCode2, Pencil, Plus, Trash2, Wand2, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api/client";
-import type { SilverQuality, SilverRule, SilverRuleKind, SilverRuleTarget } from "../api/types";
+import type { RuleSqlParse, RuleSqlView, SilverQuality, SilverRule, SilverRuleKind, SilverRuleTarget } from "../api/types";
 import { SectionCard } from "../components/layout/Layout";
 import { Badge } from "../components/ui/Badge";
 import { Button, IconButton } from "../components/ui/Button";
-import { SearchInput, Switch } from "../components/ui/Controls";
+import { LabeledCheckbox, SearchInput, Switch } from "../components/ui/Controls";
 import { Alert, EmptyState, Skeleton, useToast } from "../components/ui/Feedback";
+import { Tooltip } from "../components/ui/Overlay";
 import { Select, type SelectOption } from "../components/ui/Select";
-import { plural } from "../lib/format";
+import { formatIso, plural } from "../lib/format";
+
+// CodeMirror is large: fetched only when a rule is opened for editing.
+const CodeEditor = lazy(() => import("../components/ui/CodeEditor").then((module) => ({ default: module.CodeEditor })));
+
+/** JSON | SQL: SQL is off (saying why) when the spec has no exact SQL form; JSON is off
+ * while the SQL cannot be read, so no edit is lost by switching. */
+function ViewSwitch({ view, sqlReason, jsonReason, onJson, onSql }: {
+  view: "json" | "sql";
+  sqlReason: string | null;
+  jsonReason: string | null;
+  onJson: () => void;
+  onSql: () => void;
+}) {
+  const button = (id: "json" | "sql", label: string, reason: string | null, onClick: () => void) => {
+    const selected = view === id;
+    const control = (
+      <button type="button" role="tab" aria-selected={selected} disabled={!selected && Boolean(reason)} onClick={onClick}
+        className={clsx("rounded px-2.5 py-0.5 text-caption font-semibold transition-colors focus-visible:outline-none focus-visible:shadow-focus",
+          selected ? "bg-white text-ink-900 shadow-card ring-1 ring-ink-200" : "text-ink-600 hover:text-ink-900",
+          "disabled:cursor-not-allowed disabled:text-ink-300 disabled:hover:text-ink-300")}>
+        {label}
+      </button>
+    );
+    return !selected && reason
+      ? <Tooltip content={reason}><span tabIndex={0} className="inline-flex">{control}</span></Tooltip>
+      : control;
+  };
+  return (
+    <div role="tablist" aria-label="Edit the spec as" className="flex shrink-0 gap-0.5 rounded-md bg-ink-100 p-0.5">
+      {button("json", "JSON", jsonReason, onJson)}
+      {button("sql", "SQL", sqlReason, onSql)}
+    </div>
+  );
+}
 
 const toError = (error: unknown) => (error instanceof ApiError ? error : new ApiError(0, { code: "unknown", message: String(error) }));
 
@@ -53,11 +88,12 @@ export function RulesView() {
   const [error, setError] = useState<ApiError | null>(null);
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<SilverRule | null>(null);
+  const [showDeleted, setShowDeleted] = useState(false);
 
   const load = useCallback(() => {
     setError(null);
-    api.silverRules().then(setRules).catch((err) => setError(toError(err)));
-  }, []);
+    api.silverRules(undefined, showDeleted).then(setRules).catch((err) => setError(toError(err)));
+  }, [showDeleted]);
   useEffect(load, [load]);
 
   const needle = query.trim().toLowerCase();
@@ -72,7 +108,8 @@ export function RulesView() {
 
   const toggle = async (rule: SilverRule, enabled: boolean) => {
     try {
-      const saved = await api.saveSilverRule({ ...rule, enabled });
+      // sql: null -- the stored JSON stays the rule; its SQL is kept in step by the server.
+      const saved = await api.saveSilverRule({ ...rule, enabled, sql: null });
       setRules((current) => current?.map((item) => (item.id === rule.id ? { ...item, ...saved } : item)) ?? null);
       toast({ severity: "success", title: enabled ? "Rule on" : "Rule off", description: "Applies from the next Silver run." });
     } catch (err) {
@@ -80,10 +117,11 @@ export function RulesView() {
     }
   };
   const remove = async (rule: SilverRule) => {
-    if (rule.id == null || !window.confirm(`Delete ${rule.profit_center} ${rule.key}? Switching it off keeps it for later.`)) return;
+    if (rule.id == null || !window.confirm(`Delete ${rule.profit_center} ${rule.key}? It stops applying; its history is kept (Show deleted). Switching it off keeps it ready for later.`)) return;
     try {
       await api.deleteSilverRule(rule.id);
-      setRules((current) => current?.filter((item) => item.id !== rule.id) ?? null);
+      if (showDeleted) load();
+      else setRules((current) => current?.filter((item) => item.id !== rule.id) ?? null);
       toast({ severity: "success", title: "Rule deleted", description: "Applies from the next Silver run." });
     } catch (err) {
       toast({ severity: "error", title: "Not deleted", description: toError(err).body.message });
@@ -113,7 +151,8 @@ export function RulesView() {
         title="Profit center rules"
         description="Logic one profit center's files need on the way to Silver: filters, date formats, lookups, translations, derived columns and constants."
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <LabeledCheckbox label="Show deleted" checked={showDeleted} onChange={setShowDeleted} />
             <SearchInput value={query} onChange={setQuery} placeholder="Search" label="Search rules" className="sm:w-56" />
             <Button size="sm" icon={<Plus />} onClick={() => setEditing(blank())}>Add rule</Button>
           </div>
@@ -130,21 +169,37 @@ export function RulesView() {
                 <p className="border-b border-ink-200 bg-ink-50 px-3 py-2 text-caption font-semibold text-ink-700">{pc}</p>
                 <ul className="divide-y divide-ink-100">
                   {items.map((rule) => (
-                    <li key={rule.id ?? rule.key} className={clsx("flex flex-wrap items-start gap-3 px-3 py-2", !rule.enabled && "opacity-60")}>
+                    <li key={rule.id ?? rule.key} className={clsx("flex flex-wrap items-start gap-3 px-3 py-2",
+                      rule.is_deleted ? "bg-ink-50/70 opacity-60" : !rule.enabled && "opacity-60")}>
                       <div className="min-w-0 flex-1">
                         <p className="flex flex-wrap items-center gap-1.5">
-                          <span className="font-mono text-[12.5px] font-semibold text-ink-900">{rule.key}</span>
+                          <span className={clsx("font-mono text-[12.5px] font-semibold text-ink-900", rule.is_deleted && "line-through")}>{rule.key}</span>
                           <Badge tone="brand">{rule.kind.replace("_", " ")}</Badge>
+                          {rule.is_deleted ? <Badge tone="danger">Deleted</Badge>
+                            : rule.enabled ? <Badge tone="success">Enabled</Badge> : <Badge tone="warning">Disabled</Badge>}
+                          {rule.has_sql && (
+                            <Tooltip content={<pre className="max-w-md whitespace-pre-wrap font-mono text-[11px]">{rule.sql}</pre>}>
+                              <span tabIndex={0} className="inline-flex"><Badge tone="info">SQL</Badge></span>
+                            </Tooltip>
+                          )}
                           {rule.target !== "transaction" && <Badge tone="info">{rule.target}</Badge>}
                           {rule.column && <Badge tone="neutral">{rule.column}</Badge>}
                           {rule.approved_by && rule.approved_by !== "seed" && <Badge tone="success">edited by {rule.approved_by}</Badge>}
                         </p>
                         <p className="mt-1 text-caption text-ink-500">{scopeOf(rule)}{rule.source_ref ? ` · from ${rule.source_ref}` : ""}</p>
+                        <p className="mt-0.5 text-caption text-ink-400">
+                          Created {formatIso(rule.created_at)} · Modified {formatIso(rule.modified_at)}
+                          {rule.is_deleted && ` · Deleted ${formatIso(rule.deleted_at)}${rule.deleted_by ? ` by ${rule.deleted_by}` : ""}`}
+                        </p>
                         {rule.note && <p className="mt-1 text-caption text-ink-600">{rule.note}</p>}
                       </div>
-                      <Switch id={`rule-${rule.id}`} checked={rule.enabled} label={rule.enabled ? "On" : "Off"} onChange={(value) => toggle(rule, value)} />
-                      <IconButton label={`Edit ${rule.key}`} className="!h-7 !w-7" onClick={() => setEditing(rule)}><Pencil /></IconButton>
-                      <IconButton label={`Delete ${rule.key}`} className="!h-7 !w-7" onClick={() => remove(rule)}><Trash2 /></IconButton>
+                      {!rule.is_deleted && (
+                        <>
+                          <Switch id={`rule-${rule.id}`} checked={rule.enabled} label={rule.enabled ? "On" : "Off"} onChange={(value) => toggle(rule, value)} />
+                          <IconButton label={`Edit ${rule.key}`} className="!h-7 !w-7" onClick={() => setEditing(rule)}><Pencil /></IconButton>
+                          <IconButton label={`Delete ${rule.key}`} className="!h-7 !w-7" onClick={() => remove(rule)}><Trash2 /></IconButton>
+                        </>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -173,43 +228,144 @@ function TextField({ label, value, onChange, placeholder, mono }: {
   );
 }
 
-/** Add or change one rule: checked by the server before it is saved. */
+const SQL_HELP: Partial<Record<SilverRuleKind, string>> = {
+  derive: "An expression.",
+  filter: "WHERE and a condition: the rows it holds for are kept (WHERE NOT (...) drops them).",
+  translate: "A CASE over one value, every WHEN matched the same way; rows no WHEN matches are left as they are unless there is an ELSE.",
+  constant: "One value, such as 'Hartford', 12.5 or NULL.",
+};
+
+const parseJson = (text: string): Record<string, unknown> | null => {
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+};
+
+const lineColumn = (text: string, offset: number) => {
+  const before = text.slice(0, offset);
+  return `line ${before.split("\n").length}, column ${before.length - before.lastIndexOf("\n")}`;
+};
+
+/** Add or change one rule: checked by the server before it is saved. Its logic can be
+ * read and written as JSON or, where it has an exact SQL form, as SQL. */
 function RuleEditor({ rule, onCancel, onSaved }: { rule: SilverRule; onCancel: () => void; onSaved: (rule: SilverRule) => void }) {
   const toast = useToast();
   const [draft, setDraft] = useState<SilverRule>(rule);
-  const [specText, setSpecText] = useState(JSON.stringify(rule.spec, null, 2));
+  const original = useMemo(() => JSON.stringify(rule.spec, null, 2), [rule.spec]);
+  const [specText, setSpecText] = useState(original);
   const [errors, setErrors] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const set = <K extends keyof SilverRule>(key: K, value: SilverRule[K]) => setDraft((current) => ({ ...current, [key]: value }));
   const columnKind = COLUMN_KINDS.includes(draft.kind);
 
-  const parsed = (): SilverRule | null => {
-    try {
-      const spec = JSON.parse(specText) as Record<string, unknown>;
-      const empty = (value: string | null) => (value && value.trim() ? value.trim() : null);
-      return {
-        ...draft, spec, column: columnKind ? empty(draft.column) : null, scope_bronze_table: empty(draft.scope_bronze_table),
-        scope_file_like: empty(draft.scope_file_like), scope_sheet: empty(draft.scope_sheet), note: empty(draft.note),
-        source_ref: empty(draft.source_ref),
-      };
-    } catch (err) {
-      setErrors([`The spec is not valid JSON: ${String(err)}`]);
-      return null;
+  // JSON | SQL. The JSON is what is stored and runs; SQL is offered when it says exactly the same.
+  const [view, setView] = useState<"json" | "sql">("json");
+  const [sqlView, setSqlView] = useState<RuleSqlView | null>(null);
+  const [sqlText, setSqlText] = useState("");
+  const [sqlDirty, setSqlDirty] = useState(false);
+  const [sqlParse, setSqlParse] = useState<RuleSqlParse | null>(null);
+  const [sqlChecking, setSqlChecking] = useState(false);
+
+  // In the JSON view: does the JSON as it stands have an exact SQL form?
+  useEffect(() => {
+    if (view !== "json") return;
+    const spec = parseJson(specText);
+    if (!spec) {
+      setSqlView({ sql: null, reason: "Fix the JSON first: SQL is shown for a valid spec." });
+      return;
     }
+    let live = true;
+    const timer = setTimeout(() => {
+      api.ruleToSql(draft.kind, spec)
+        .then((found) => live && setSqlView(found))
+        .catch(() => live && setSqlView({ sql: null, reason: "The SQL view is not available right now." }));
+    }, 300);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [view, specText, draft.kind]);
+
+  // In the SQL view: what the SQL means, checked as it is typed.
+  useEffect(() => {
+    if (view !== "sql" || !sqlDirty) return;
+    let live = true;
+    setSqlChecking(true);
+    const timer = setTimeout(() => {
+      api.ruleFromSql(draft.kind, sqlText, parseJson(specText) ?? undefined)
+        .then((found) => live && setSqlParse(found))
+        .catch(() => live && setSqlParse({ spec: null, error: { message: "The SQL could not be checked right now.", start: null, end: null } }))
+        .finally(() => live && setSqlChecking(false));
+    }, 300);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [view, sqlText, sqlDirty, draft.kind, specText]);
+
+  const openSql = () => {
+    if (!sqlView?.sql) return;
+    // The SQL as the reviewer last saved it, while the JSON is still that rule's.
+    setSqlText(specText === original && rule.sql ? rule.sql : sqlView.sql);
+    setSqlParse({ spec: parseJson(specText), error: null });
+    setSqlDirty(false);
+    setView("sql");
   };
-  const check = async () => {
-    const next = parsed();
-    if (!next) return false;
-    const result = await api.validateSilverRule(next);
+  const sqlBlocked = sqlDirty && (sqlChecking || !sqlParse?.spec);
+  const openJson = () => {
+    if (sqlBlocked) return;
+    if (sqlDirty && sqlParse?.spec) setSpecText(JSON.stringify(sqlParse.spec, null, 2));
+    setView("json");
+  };
+  const discardSql = () => {
+    setSqlDirty(false);
+    setSqlParse(null);
+    setView("json");
+  };
+
+  /** The rule to check or save: its spec from the JSON, or read from the SQL (sent too). */
+  const parsed = async (): Promise<SilverRule | null> => {
+    const empty = (value: string | null) => (value && value.trim() ? value.trim() : null);
+    let spec: Record<string, unknown> | null;
+    let sql: string | null = null;
+    if (view === "sql") {
+      const found = sqlDirty ? await api.ruleFromSql(draft.kind, sqlText, parseJson(specText) ?? undefined)
+        : { spec: parseJson(specText), error: null };
+      if (!found.spec) {
+        const at = found.error?.start != null ? ` (${lineColumn(sqlText, found.error.start)})` : "";
+        setErrors([`The SQL cannot be read${at}: ${found.error?.message ?? "unknown problem"}`]);
+        return null;
+      }
+      spec = found.spec;
+      sql = sqlDirty ? sqlText : null;
+    } else {
+      spec = parseJson(specText);
+      if (!spec) {
+        setErrors(["The spec is not valid JSON."]);
+        return null;
+      }
+    }
+    return {
+      ...draft, spec, sql, column: columnKind ? empty(draft.column) : null, scope_bronze_table: empty(draft.scope_bronze_table),
+      scope_file_like: empty(draft.scope_file_like), scope_sheet: empty(draft.scope_sheet), note: empty(draft.note),
+      source_ref: empty(draft.source_ref),
+    };
+  };
+  const check = async (next?: SilverRule | null) => {
+    const candidate = next ?? (await parsed());
+    if (!candidate) return false;
+    const result = await api.validateSilverRule(candidate);
     setErrors(result.errors);
     return result.valid;
   };
   const save = async () => {
-    const next = parsed();
-    if (!next) return;
     setBusy(true);
     try {
-      if (!(await check())) return;
+      const next = await parsed();
+      if (!next || !(await check(next))) return;
       const saved = await api.saveSilverRule(next);
       toast({ severity: "success", title: rule.id == null ? "Rule added" : "Rule saved", description: "Applies from the next Silver run." });
       onSaved(saved);
@@ -227,7 +383,7 @@ function RuleEditor({ rule, onCancel, onSaved }: { rule: SilverRule; onCancel: (
       <div className="grid gap-3 md:grid-cols-3">
         <TextField label="Profit center" value={draft.profit_center} onChange={(value) => set("profit_center", value)} placeholder="PC2041" />
         <TextField label="Key" value={draft.key} onChange={(value) => set("key", value)} placeholder="pc2041.retention.issued_only" mono />
-        <Select<SilverRuleKind> label="Kind" value={draft.kind} options={KINDS} onChange={(value) => {
+        <Select<SilverRuleKind> label="Kind" value={draft.kind} options={KINDS} disabled={view === "sql"} onChange={(value) => {
           set("kind", value);
           if (rule.id == null) setSpecText(JSON.stringify(EXAMPLES[value], null, 2));
         }} />
@@ -245,13 +401,42 @@ function RuleEditor({ rule, onCancel, onSaved }: { rule: SilverRule; onCancel: (
         <TextField label="Sheet (glob, optional)" value={draft.scope_sheet} onChange={(value) => set("scope_sheet", value)} placeholder="Renewal" />
         <TextField label="Bronze table (glob, optional)" value={draft.scope_bronze_table} onChange={(value) => set("scope_bronze_table", value)} />
       </div>
-      <label className="mt-3 block">
+      <div className="mt-3">
         <span className="mb-1 block text-caption font-medium text-ink-600">
-          Spec (JSON). Operands: "src:Header as written", "silver:column", a value, or {"{"}"op": …, "args": […]{"}"}.
+          {view === "json"
+            ? <>Spec (JSON). Operands: "src:Header as written", "silver:column", a value, or {"{"}"op": …, "args": […]{"}"}.</>
+            : <>Spec (SQL). {SQL_HELP[draft.kind]} Columns: src."Header as written" (bronze) or silver.column. Text comparisons ignore case
+              (LIKE and ~ respect it); dividing by zero gives NULL. Saved as the JSON it means.</>}
         </span>
-        <textarea value={specText} onChange={(event) => setSpecText(event.target.value)} rows={10} spellCheck={false}
-          className="w-full rounded-lg border border-ink-200 p-3 font-mono text-[12.5px]" />
-      </label>
+        <Suspense fallback={<Skeleton className="h-[296px] w-full rounded-lg" />}>
+          <CodeEditor
+            key={view}
+            language={view}
+            value={view === "json" ? specText : sqlText}
+            onChange={(value) => {
+              if (view === "json") {
+                setSpecText(value);
+              } else {
+                setSqlText(value);
+                setSqlDirty(true);
+              }
+            }}
+            error={view === "sql" ? sqlParse?.error ?? null : null}
+            checking={view === "sql" && sqlChecking}
+            label={`Spec of ${draft.key || "the new rule"} (${view.toUpperCase()})`}
+            toolbarStart={
+              <ViewSwitch view={view} sqlReason={sqlView?.sql ? null : sqlView?.reason ?? "Checking whether this spec has a SQL form…"}
+                jsonReason={sqlBlocked ? (sqlChecking ? "Checking the SQL…" : "Fix the SQL first, or discard the SQL edits.") : null}
+                onJson={openJson} onSql={openSql} />
+            }
+          />
+        </Suspense>
+        {view === "sql" && sqlDirty && !sqlChecking && !sqlParse?.spec && (
+          <button type="button" onClick={discardSql} className="mt-1 text-caption font-medium text-brand-700 hover:underline">
+            Discard the SQL edits and go back to the JSON
+          </button>
+        )}
+      </div>
       <div className="mt-3 grid gap-3 md:grid-cols-2">
         <TextField label="Note" value={draft.note} onChange={(value) => set("note", value)} />
         <TextField label="Where it came from" value={draft.source_ref} onChange={(value) => set("source_ref", value)} placeholder="notebook.py:123" />

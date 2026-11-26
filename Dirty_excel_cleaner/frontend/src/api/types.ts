@@ -508,11 +508,13 @@ export interface ValidationFile {
   scope: string | null;
   detected_scope: string | null;
   scope_options: string[];
-  /** AED | TED | PED: always a manual pick. */
+  /** AED | TED | PED: starts as the profit center's last staged choice, if any. */
   date_basis: string | null;
+  detected_date_basis: string | null;
   date_basis_options: string[];
-  /** INCREMENTAL | CUMULATIVE. */
+  /** INCREMENTAL | CUMULATIVE: starts as the profit center's last staged choice, if any. */
   reporting_file_type: string | null;
+  detected_reporting_file_type: string | null;
   reporting_file_type_options: string[];
   /** YYYY-MM. */
   data_collection_period: string | null;
@@ -539,7 +541,17 @@ export interface RequiredColumn {
   vote: { methods: MatchMethod[]; method: MatchMethod | "reviewer" | null; score: number | null; reason: string } | null;
   options: { column: string; methods: MatchMethod[]; score: number }[];
   reviewer: boolean;
+  /** Filled by the reviewer instead of a file column: left null, or one value on every row. */
+  fill: RequiredFill | null;
+  /** Whether it may be filled (not the dates, premium or policy number). */
+  fillable: boolean;
+  /** Worked out at staging from this required column and the premium (rate × premium, amount ÷ premium). */
+  derived_from: string | null;
+  /** A typed rate as it is read, e.g. "12%". */
+  reads_as: string | null;
 }
+
+export type RequiredFill = { kind: "null" } | { kind: "value"; value: string };
 
 export interface DateRange {
   start: string;
@@ -868,6 +880,28 @@ export interface SilverRule {
   /** "seed" until a person edits it. */
   approved_by?: string | null;
   approved_at?: string | null;
+  /** The rule's logic as SQL: sent when it was written as SQL (the spec is read from it);
+   * as stored, the SQL it reads as (null: no exact SQL form). */
+  sql?: string | null;
+  has_sql?: boolean;
+  created_at?: string | null;
+  modified_at?: string | null;
+  /** Deleted rules are kept as history, listed only when asked for. */
+  is_deleted?: boolean;
+  deleted_at?: string | null;
+  deleted_by?: string | null;
+}
+
+/** A spec as SQL, or why it has none. */
+export interface RuleSqlView {
+  sql: string | null;
+  reason: string | null;
+}
+
+/** The spec SQL means, or where and why it cannot be read. */
+export interface RuleSqlParse {
+  spec: Record<string, unknown> | null;
+  error: { message: string; start: number | null; end: number | null } | null;
 }
 
 /** What one rule did in a dry run or a load. */

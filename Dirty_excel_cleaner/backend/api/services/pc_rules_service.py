@@ -13,6 +13,7 @@ import fnmatch
 import threading
 from pathlib import Path
 
+from ahi_silver import rule_sql
 from ahi_silver import rules as pc_rules
 from ahi_silver.rules import Rule, RuleError
 
@@ -27,9 +28,17 @@ _FIELDS = [("id", "id"), ("profit_center", "profit_center"), ("rule_key", "key")
            ("target", "target"), ("column_name", "column"), ("scope_bronze_table", "scope_bronze_table"),
            ("scope_file_like", "scope_file_like"), ("scope_sheet", "scope_sheet"), ("seq", "seq"), ("spec", "spec"),
            ("enabled", "enabled"), ("note", "note"), ("source_ref", "source_ref"), ("approved_by", "approved_by"),
-           ("approved_at", "approved_at")]
+           ("approved_at", "approved_at"), ("sql_text", "sql"), ("has_sql", "has_sql"), ("created_at", "created_at"),
+           ("modified_at", "modified_at"), ("is_deleted", "is_deleted"), ("deleted_at", "deleted_at"),
+           ("deleted_by", "deleted_by")]
 _SELECT = ", ".join(column for column, _ in _FIELDS)
-_EDITABLE = [field for _, field in _FIELDS if field not in ("id", "approved_by", "approved_at")]
+# What the store keeps about a rule that is not the rule itself (never given to Rule).
+_META = ("id", "approved_by", "approved_at", "sql", "has_sql", "created_at", "modified_at", "is_deleted",
+         "deleted_at", "deleted_by")
+_TIMES = ("approved_at", "created_at", "modified_at", "deleted_at")
+_EDITABLE = [field for _, field in _FIELDS if field not in _META]
+# A rule that is not deleted: the only kind applied, listed, seeded over or exported.
+_LIVE = "NOT is_deleted"
 
 _cache: dict = {"version": None, "rules": [], "broken": []}
 _cache_lock = threading.Lock()
@@ -84,7 +93,23 @@ def _as_dict(row) -> dict:
 
 
 def _rule(data: dict) -> Rule:
-    return Rule.from_dict({k: v for k, v in data.items() if k != "id"})
+    return Rule.from_dict({k: v for k, v in data.items() if k not in _META})
+
+
+def sql_of(rule: Rule, written: str | None = None) -> str | None:
+    """The rule's SQL for the store: what the reviewer wrote (its spec was read from it),
+    else the SQL its JSON reads as; None when it has no exact SQL form."""
+    if written and written.strip():
+        return written.strip()
+    try:
+        return rule_sql.to_sql(rule.kind, rule.spec)
+    except rule_sql.NoSql:
+        return None
+
+
+def _public(data: dict) -> dict:
+    return {**data, **{name: data[name].isoformat() if hasattr(data.get(name), "isoformat")
+                       else (str(data[name]) if data.get(name) else None) for name in _TIMES}}
 
 
 def all_rules(conn) -> tuple[int | None, list[Rule], list[str]]:
@@ -99,8 +124,8 @@ def all_rules(conn) -> tuple[int | None, list[Rule], list[str]]:
     with _cache_lock:
         if _cache["version"] == current:
             return current, list(_cache["rules"]), list(_cache["broken"])
-    rows = conn.execute(sql.SQL("SELECT {} FROM {} WHERE enabled ORDER BY profit_center, seq, rule_key")
-                        .format(sql.SQL(_SELECT), _table())).fetchall()
+    rows = conn.execute(sql.SQL("SELECT {} FROM {} WHERE enabled AND {} ORDER BY profit_center, seq, rule_key")
+                        .format(sql.SQL(_SELECT), _table(), sql.SQL(_LIVE))).fetchall()
     limits = allowed()
     rules, broken = [], []
     for row in rows:
@@ -176,21 +201,24 @@ def _lookup_rows(conn, rule: Rule, batch_ids: list[str]) -> tuple[list[dict], st
 # --- the store ------------------------------------------------------------------------------
 
 
-def list_rules(profit_center: str | None = None) -> list[dict]:
+def list_rules(profit_center: str | None = None, include_deleted: bool = False) -> list[dict]:
+    """The rules, by profit center; deleted ones (history) only with ``include_deleted``."""
     db.require()
     from psycopg import sql
 
-    where, params = sql.SQL(""), []
+    where, params = [] if include_deleted else [sql.SQL(_LIVE)], []
     if profit_center:
         pc = pc_rules.normalize_pc(profit_center)
         if not pc:
             raise ApiError(422, "bad_profit_center", f"{profit_center} is not a profit center.", "Use PC2041.")
-        where, params = sql.SQL(" WHERE profit_center = %s"), [pc]
+        where.append(sql.SQL("profit_center = %s"))
+        params.append(pc)
+    clause = sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where) if where else sql.SQL("")
     with db.connection() as conn:
-        rows = conn.execute(sql.SQL("SELECT {} FROM {}{} ORDER BY profit_center, kind, seq, rule_key")
-                            .format(sql.SQL(_SELECT), _table(), where), params).fetchall()
+        rows = conn.execute(sql.SQL("SELECT {} FROM {}{} ORDER BY profit_center, kind, seq, rule_key, deleted_at")
+                            .format(sql.SQL(_SELECT), _table(), clause), params).fetchall()
         current = version(conn)
-    return [{**_as_dict(row), "approved_at": str(row[-1]) if row[-1] else None, "version": current} for row in rows]
+    return [{**_public(_as_dict(row)), "version": current} for row in rows]
 
 
 def validate(data: dict) -> list[str]:
@@ -203,49 +231,94 @@ def validate(data: dict) -> list[str]:
     return pc_rules.validate(rule, allowed())
 
 
+def with_sql(data: dict) -> dict:
+    """The rule as submitted, its spec read from ``sql`` when the reviewer wrote SQL: the
+    JSON is always what runs, so SQL is turned into it before anything is checked."""
+    written = (data.get("sql") or "").strip()
+    if not written:
+        return data
+    try:
+        spec = rule_sql.from_sql(data.get("kind"), written, data.get("spec"))
+    except rule_sql.SqlError as error:
+        raise ApiError(422, "invalid_rule_sql", "The rule's SQL cannot be read.", error.message) from None
+    return {**data, "spec": spec, "sql": written}
+
+
 def save_rule(data: dict, user: str, rule_id: int | None = None) -> dict:
-    """Add a rule, or replace rule ``rule_id``; recorded as approved by ``user``."""
+    """Add a rule, or replace rule ``rule_id``; recorded as approved by ``user``. With
+    ``sql`` the spec is read from it; either way the SQL stored is kept in step."""
     db.require()
     from psycopg import errors, sql
     from psycopg.types.json import Jsonb
 
+    data = with_sql(data)
     errors_found = validate(data)
     if errors_found:
         raise ApiError(422, "invalid_rule", "The rule cannot be applied as written.", "; ".join(errors_found))
     rule = _rule(data)
     rule.profit_center = pc_rules.normalize_pc(rule.profit_center)
     values = _values(rule)
+    text = sql_of(rule, data.get("sql"))
     with db.connection() as conn:
         try:
             if rule_id is None:
-                row = conn.execute(sql.SQL("INSERT INTO {} ({}, approved_by, approved_at) VALUES ({}, %s, now()) "
-                                           "RETURNING {}").format(
+                row = conn.execute(sql.SQL(
+                    "INSERT INTO {} ({}, sql_text, has_sql, approved_by, approved_at, created_at, modified_at) "
+                    "VALUES ({}, %s, %s, %s, now(), now(), now()) RETURNING {}").format(
                     _table(), sql.SQL(", ").join(_ident(c) for c in values),
                     sql.SQL(", ").join(sql.Placeholder() for _ in values), sql.SQL(_SELECT)),
-                    [Jsonb(v) if c == "spec" else v for c, v in values.items()] + [user]).fetchone()
+                    [Jsonb(v) if c == "spec" else v for c, v in values.items()] + [text, text is not None, user]).fetchone()
             else:
-                row = conn.execute(sql.SQL("UPDATE {} SET {}, approved_by = %s, approved_at = now() WHERE id = %s "
-                                           "RETURNING {}").format(
+                row = conn.execute(sql.SQL(
+                    "UPDATE {} SET {}, sql_text = %s, has_sql = %s, approved_by = %s, approved_at = now(), "
+                    "modified_at = now() WHERE id = %s AND {} RETURNING {}").format(
                     _table(), sql.SQL(", ").join(sql.SQL("{} = %s").format(_ident(c)) for c in values),
-                    sql.SQL(_SELECT)),
-                    [Jsonb(v) if c == "spec" else v for c, v in values.items()] + [user, rule_id]).fetchone()
+                    sql.SQL(_LIVE), sql.SQL(_SELECT)),
+                    [Jsonb(v) if c == "spec" else v for c, v in values.items()]
+                    + [text, text is not None, user, rule_id]).fetchone()
                 if row is None:
                     raise not_found(f"Rule {rule_id}")
         except errors.UniqueViolation:
             raise conflict(f"{rule.profit_center} already has a rule {rule.key!r}.", "Choose another key.") from None
         _bump(conn)
-    return _as_dict(row)
+    return _public(_as_dict(row))
 
 
-def delete_rule(rule_id: int) -> None:
+def delete_rule(rule_id: int, user: str | None = None) -> None:
+    """Delete a rule, keeping its row as history: it is never applied or listed again
+    (unless deleted rules are asked for), and its key is free for a new rule."""
     db.require()
     from psycopg import sql
 
     with db.connection() as conn:
-        removed = conn.execute(sql.SQL("DELETE FROM {} WHERE id = %s").format(_table()), [rule_id]).rowcount
+        removed = conn.execute(sql.SQL(
+            "UPDATE {} SET is_deleted = true, deleted_at = now(), deleted_by = %s, modified_at = now() "
+            "WHERE id = %s AND {}").format(_table(), sql.SQL(_LIVE)), [user, rule_id]).rowcount
         if not removed:
             raise not_found(f"Rule {rule_id}")
         _bump(conn)
+
+
+def backfill_sql(conn) -> int:
+    """The SQL of every live rule that has none yet (rules made before it was stored, or
+    seeded by an older loader). Leaves modified_at alone: the rule itself did not change.
+    Returns how many rules got their SQL."""
+    from psycopg import sql
+
+    rows = conn.execute(sql.SQL("SELECT {} FROM {} WHERE sql_text IS NULL AND {} AND kind = ANY(%s)").format(
+        sql.SQL(_SELECT), _table(), sql.SQL(_LIVE)), [list(rule_sql.SQL_KINDS)]).fetchall()
+    filled = 0
+    for row in rows:
+        data = _as_dict(row)
+        try:
+            text = sql_of(_rule(data))
+        except (RuleError, TypeError):
+            continue
+        if text is not None:
+            conn.execute(sql.SQL("UPDATE {} SET sql_text = %s, has_sql = true WHERE id = %s").format(_table()),
+                         [text, data["id"]])
+            filled += 1
+    return filled
 
 
 def _values(rule: Rule) -> dict:
@@ -278,19 +351,29 @@ def load_seeds(conn, rules: list[Rule], force: bool = False, dry_run: bool = Fal
     from psycopg.types.json import Jsonb
 
     existing = {(r[0], r[1]): (r[2], _as_dict(r[3:])) for r in conn.execute(sql.SQL(
-        "SELECT profit_center, rule_key, approved_by, {} FROM {}").format(sql.SQL(_SELECT), _table())).fetchall()}
-    report: dict[str, list[str]] = {"added": [], "updated": [], "unchanged": [], "kept_edited": []}
+        "SELECT profit_center, rule_key, approved_by, {} FROM {} WHERE {}").format(
+        sql.SQL(_SELECT), _table(), sql.SQL(_LIVE))).fetchall()}
+    deleted = {(r[0], r[1]): r[2] for r in conn.execute(sql.SQL(
+        "SELECT profit_center, rule_key, deleted_by FROM {} WHERE is_deleted").format(_table())).fetchall()}
+    report: dict[str, list[str]] = {"added": [], "updated": [], "unchanged": [], "kept_edited": [],
+                                    "kept_deleted": []}
     for rule in rules:
         values = _values(rule)
+        text = sql_of(rule)
         name = f"{rule.profit_center} {rule.key}"
         current = existing.get((rule.profit_center, rule.key))
+        if current is None and (rule.profit_center, rule.key) in deleted and not force:
+            # Deleted in the UI: a person's decision, as an edit is.
+            report["kept_deleted"].append(f"{name} (deleted by {deleted[(rule.profit_center, rule.key)] or 'someone'})")
+            continue
         if current is None:
             report["added"].append(name)
             if not dry_run:
-                conn.execute(sql.SQL("INSERT INTO {} ({}, approved_by) VALUES ({}, %s)").format(
-                    _table(), sql.SQL(", ").join(_ident(c) for c in values),
-                    sql.SQL(", ").join(sql.Placeholder() for _ in values)),
-                    [Jsonb(v) if c == "spec" else v for c, v in values.items()] + [pc_rules.SEED_USER])
+                conn.execute(sql.SQL("INSERT INTO {} ({}, sql_text, has_sql, approved_by) VALUES ({}, %s, %s, %s)")
+                             .format(_table(), sql.SQL(", ").join(_ident(c) for c in values),
+                                     sql.SQL(", ").join(sql.Placeholder() for _ in values)),
+                             [Jsonb(v) if c == "spec" else v for c, v in values.items()]
+                             + [text, text is not None, pc_rules.SEED_USER])
             continue
         edited_by, stored = current
         same = all(stored.get(field) == getattr(rule, field) for field in _EDITABLE)
@@ -301,11 +384,15 @@ def load_seeds(conn, rules: list[Rule], force: bool = False, dry_run: bool = Fal
         else:
             report["updated"].append(name)
             if not dry_run:
-                conn.execute(sql.SQL("UPDATE {} SET {}, approved_by = %s, approved_at = now() "
-                                     "WHERE profit_center = %s AND rule_key = %s").format(
-                    _table(), sql.SQL(", ").join(sql.SQL("{} = %s").format(_ident(c)) for c in values)),
+                conn.execute(sql.SQL("UPDATE {} SET {}, sql_text = %s, has_sql = %s, approved_by = %s, "
+                                     "approved_at = now(), modified_at = now() "
+                                     "WHERE profit_center = %s AND rule_key = %s AND {}").format(
+                    _table(), sql.SQL(", ").join(sql.SQL("{} = %s").format(_ident(c)) for c in values),
+                    sql.SQL(_LIVE)),
                     [Jsonb(v) if c == "spec" else v for c, v in values.items()]
-                    + [pc_rules.SEED_USER, rule.profit_center, rule.key])
+                    + [text, text is not None, pc_rules.SEED_USER, rule.profit_center, rule.key])
+    if not dry_run:
+        backfill_sql(conn)  # seeded before the SQL was stored
     if not dry_run and (report["added"] or report["updated"]):
         _bump(conn)
     return report
@@ -316,8 +403,8 @@ def export(conn, folder: Path) -> list[Path]:
     import yaml
     from psycopg import sql
 
-    rows = conn.execute(sql.SQL("SELECT {} FROM {} ORDER BY profit_center, kind, seq, rule_key")
-                        .format(sql.SQL(_SELECT), _table())).fetchall()
+    rows = conn.execute(sql.SQL("SELECT {} FROM {} WHERE {} ORDER BY profit_center, kind, seq, rule_key")
+                        .format(sql.SQL(_SELECT), _table(), sql.SQL(_LIVE))).fetchall()
     by_pc: dict[str, list[dict]] = {}
     for row in rows:
         data = _as_dict(row)

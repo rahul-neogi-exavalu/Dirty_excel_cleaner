@@ -5,11 +5,12 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from ahi_silver import aggregate as aggregates
-from ahi_silver import matching
+from ahi_silver import matching, rule_sql
 from ahi_silver.catalog import targets as drt_targets
 
 from .. import config
 from ..auth import User, require_user
+from ..errors import ApiError
 from ..services import pc_rules_service, silver_service
 from ..services.silver_service import Run
 
@@ -316,17 +317,54 @@ class RuleIn(BaseModel):
     enabled: bool = True
     note: str | None = None
     source_ref: str | None = None
+    # Written as SQL: the spec is read from it (the JSON stays what runs).
+    sql: str | None = None
 
 
 @router.get("/rules")
-async def list_rules(profit_center: str | None = None) -> list[dict]:
-    return await run_in_threadpool(pc_rules_service.list_rules, profit_center)
+async def list_rules(profit_center: str | None = None, include_deleted: bool = False) -> list[dict]:
+    return await run_in_threadpool(pc_rules_service.list_rules, profit_center, include_deleted)
 
 
 @router.post("/rules/validate")
 async def validate_rule(request: RuleIn) -> dict:
-    errors = await run_in_threadpool(pc_rules_service.validate, request.model_dump())
+    try:
+        data = pc_rules_service.with_sql(request.model_dump())
+    except ApiError as error:
+        return {"valid": False, "errors": [f"{error.message} {error.advice}"]}
+    errors = await run_in_threadpool(pc_rules_service.validate, data)
     return {"valid": not errors, "errors": errors}
+
+
+class RuleSpecIn(BaseModel):
+    kind: str
+    spec: dict
+
+
+class RuleSqlIn(BaseModel):
+    kind: str
+    sql: str
+    # The JSON it replaces: its ``mode`` is carried over.
+    spec: dict | None = None
+
+
+@router.post("/rules/to-sql")
+def rule_to_sql(request: RuleSpecIn) -> dict:
+    """A rule's spec as SQL, when it has an exact SQL form; else why not (the editor's
+    SQL view is then off)."""
+    try:
+        return {"sql": rule_sql.to_sql(request.kind, request.spec), "reason": None}
+    except rule_sql.NoSql as error:
+        return {"sql": None, "reason": str(error)}
+
+
+@router.post("/rules/from-sql")
+def rule_from_sql(request: RuleSqlIn) -> dict:
+    """The spec SQL means, or where and why it cannot be read (for the editor to mark)."""
+    try:
+        return {"spec": rule_sql.from_sql(request.kind, request.sql, request.spec), "error": None}
+    except rule_sql.SqlError as error:
+        return {"spec": None, "error": {"message": error.message, "start": error.start, "end": error.end}}
 
 
 @router.post("/rules", status_code=201)
@@ -340,5 +378,6 @@ async def replace_rule(rule_id: int, request: RuleIn, user: User = Depends(requi
 
 
 @router.delete("/rules/{rule_id}", status_code=204, response_class=Response)
-async def delete_rule(rule_id: int) -> None:
-    await run_in_threadpool(pc_rules_service.delete_rule, rule_id)
+async def delete_rule(rule_id: int, user: User = Depends(require_user)) -> None:
+    # Kept as history: is_deleted, deleted_at and deleted_by say when and by whom.
+    await run_in_threadpool(pc_rules_service.delete_rule, rule_id, user.user_name)
