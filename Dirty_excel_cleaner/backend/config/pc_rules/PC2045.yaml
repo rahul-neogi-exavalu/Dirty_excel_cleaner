@@ -1,0 +1,20 @@
+profit_center: PC2045
+rules:
+  - key: pc2045.agency
+    kind: constant
+    scope_file_like: "*Underwriter Agreements*"
+    column: producer_agency_name
+    spec: {value: "Montage, LLC"}
+    source_ref: ext_pc2045_data_silver_cleansed.py:674
+  - key: pc2045.carrier
+    kind: constant
+    scope_file_like: "*Underwriter Agreements*"
+    column: insurance_company_name
+    spec: {value: Assurant}
+    source_ref: ext_pc2045_data_silver_cleansed.py:706
+  - key: pc2045.jewelry.market_provider
+    kind: constant
+    scope_file_like: "*Agreements - Jewelry*"
+    column: market_provider
+    spec: {value: Assurant Inc}
+    source_ref: ext_pc2045_data_silver_cleansed.py:679

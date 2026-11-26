@@ -1,0 +1,55 @@
+profit_center: PC0792
+rules:
+  - key: pc0792.agency.drop_blank_agency
+    kind: filter
+    target: aggregate
+    scope_file_like: "*Agency Premium*"
+    spec:
+      drop: {op: is_null, args: ["src:Agency Account"]}
+    source_ref: ext_pc0792_ahi_agency_premium_silver_cleansed.py:782-785
+  - key: pc0792.agency.grain
+    kind: constant
+    target: aggregate
+    scope_file_like: "*Agency Premium*"
+    column: record_grain
+    spec: {value: AGENT}
+    source_ref: ext_pc0792_ahi_agency_premium_silver_cleansed.py:656
+  - key: pc0792.carrier.grain
+    kind: constant
+    target: aggregate
+    scope_file_like: "*Carrier Premium*"
+    column: record_grain
+    spec: {value: CARRIER}
+    source_ref: ext_pc0792_ahi_carrier_premium_silver_cleansed.py:656
+  - key: pc0792.data_source
+    kind: constant
+    target: aggregate
+    column: agg_data_source
+    spec: {value: EXTERNAL_FILE}
+    source_ref: ext_pc0792_ahi_agency_premium_silver_cleansed.py:657
+  - key: pc0792.5in5.agent_address
+    kind: lookup
+    scope_file_like: "*5 in 5*"
+    spec:
+      source: inline
+      key: {op: concat, args: ["src:Agency Account: Account Name", "src:Agent Contact: Full Name"], sep: " | "}
+      columns:
+        producer_billing_address: address
+        producer_billing_city: city
+        producer_billing_state: state
+        producer_billing_zipcode: zip
+      entries:
+        - {key: "Arthur J. Gallagher & Co. | Shannon Hord", address: "3322 West End Avenue Suite 500", city: Nashville, state: TN, zip: "37203"}
+        - {key: "Arthur J. Gallagher & Co. | Reno Benson", address: "3322 West End Avenue Suite 500", city: Nashville, state: TN, zip: "37203"}
+        - {key: "Arthur J. Gallagher & Co. | Steve Buzzell", address: "3322 West End Avenue Suite 500", city: Nashville, state: TN, zip: "37203"}
+        - {key: "Arthur J. Gallagher of New Mexico | Jake Rodar", address: "400 Kiva Court", city: Santa Fe, state: NM, zip: "87505"}
+        - {key: "Arthur J Gallagher | Susan Blankenburg", address: "1255 Battery Street, Suite 450", city: San Francisco, state: CA, zip: "94111"}
+        - {key: "Arthur J Gallagher | Tyler Van Der Voort", address: "5420 Lyndon B Johnson Freeway, suite 400", city: Dallas, state: TX, zip: "75240"}
+        - {key: "Arthur J. Gallagher Risk Management Services, Inc. | Tate Featherstone", address: "220 Emerson Place STE 200", city: Davenport, state: IA, zip: "52801"}
+        - {key: "Arthur J. Gallagher Risk Management Services, Inc. | Travis Cutler", address: "220 Emerson Place STE 200", city: Davenport, state: IA, zip: "52801"}
+        - {key: "Arthur J Gallagher | Chip Treadway", address: "1300 S Main Street", city: Tulsa, state: OK, zip: "74119"}
+    note: >-
+      Keyed on agency account and agent contact together, as the notebook did. The July
+      file's agents are Travis Cutler and Chip Treadway, whom the notebook's map lacks; their
+      two entries come from the PC2041 notebook's address list (confirm with the business).
+    source_ref: ext_pc0792_ajg_5_in_5_initiatives_cleansed.py:608-742,806-809

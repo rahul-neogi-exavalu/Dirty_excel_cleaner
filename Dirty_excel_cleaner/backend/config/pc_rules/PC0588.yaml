@@ -1,0 +1,13 @@
+profit_center: PC0588
+rules:
+  - key: pc0588.renewal_flag
+    kind: translate
+    column: renewal_flag
+    spec:
+      source: "src:New Renewal"
+      match: contains
+      cases: [{when: renewal, then: true}, {when: new, then: false}]
+    note: >-
+      July values: New, Carrier Renewal, Rollover Renewal. The notebook ran clean_boolean
+      on them, which gave NULL for every row.
+    source_ref: ext_pc0588_data_silver_cleansed.py:738

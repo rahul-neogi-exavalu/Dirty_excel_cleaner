@@ -53,7 +53,7 @@ from ahi_silver.matching import Suggestion
 
 from .. import config, db
 from ..errors import ApiError, conflict, not_found
-from . import job_history, reference_service
+from . import job_history, pc_rules_service, reference_service
 from .column_matching import NOT_A_COLUMN as _NOT_A_COLUMN
 from .column_matching import header_key as _header_key  # noqa: F401 - shared with the Validate step
 from .column_matching import matchers as _matchers
@@ -156,6 +156,8 @@ class Run:
     # Tables of files that came together (a companion and the file it came with), which
     # the reviewer may join: {left_table, right_table, pairs, keys (suggested), saved}.
     links: list[dict] = field(default_factory=list)
+    # The profit-center rules' version the dry runs used: approval refuses a newer one.
+    rules_version: int | None = None
 
 
 def _ident(name: str):
@@ -451,6 +453,7 @@ def _state(run: Run) -> dict:
         "cleanup": run.cleanup,
         "lotl_rows": run.lotl_rows,
         "loaded": run.loaded,
+        "rules_version": run.rules_version,
     }
 
 
@@ -482,7 +485,7 @@ def _from_row(row) -> tuple[Run, datetime | None]:
         message=message or "", error=error, reviewed_by=reviewed_by, approved_by=approved_by, result=result or {},
         loaded=dict(state.get("loaded") or {}), created_at=_stamp(created_at) or time.time(),
         started_at=_stamp(started_at), finished_at=_stamp(finished_at), updated_at=_stamp(updated_at) or time.time(),
-        version=version, links=list(state.get("links") or []),
+        version=version, links=list(state.get("links") or []), rules_version=state.get("rules_version"),
     )
     return run, expires_at
 
@@ -661,6 +664,7 @@ def create_run(ingestion_ids: list[str]) -> Run:
                     for review, frame, *rest in gathered]
         lotl = _lotl(conn)
         cleanup = _superseded(conn)
+        rules_version = pc_rules_service.version(conn)
     if not ids and not cleanup:
         raise conflict("There is nothing to load or remove.", "Select at least one bronze load.")
 
@@ -693,7 +697,8 @@ def create_run(ingestion_ids: list[str]) -> Run:
         _quality(review, columns_catalog, lotl, frame)
         tables.append(review)
 
-    run = Run(id=str(uuid.uuid4()), tables=tables, notes=notes, cleanup=cleanup, lotl_rows=lotl.rows, links=links)
+    run = Run(id=str(uuid.uuid4()), tables=tables, notes=notes, cleanup=cleanup, lotl_rows=lotl.rows, links=links,
+              rules_version=rules_version)
     if lotl.empty:
         run.notes.append("LOTL not loaded: profit centers are kept as they are and flagged lotl_unavailable.")
     with db.connection() as conn:
@@ -880,7 +885,7 @@ def update_join(run_id: str, left_table: str, right_table: str, how: str | None,
             raise conflict("This review changed while the join was being made.", "Make the join again.")
         for review in (left, right):
             if not review.joined_into:
-                _quality(review, catalog(), lotl, _frame(conn, review))
+                _quality(review, catalog(), lotl, _frame(conn, review), conn)
         _write_run(conn, run)
     return run
 
@@ -924,13 +929,30 @@ def _context(review: TableReview, processed_at: datetime | None = None) -> trans
     )
 
 
-def _quality(review: TableReview, columns_catalog, lotl, frame: pl.DataFrame) -> None:
-    """The dry run the reviewer sees: the load's own transform, on the loads' bronze rows."""
+def _review_rules(conn, review: TableReview) -> tuple[list, dict, list[str]]:
+    """The profit-center rules for a review's loads, their lookups' rows, and notes."""
+    pcs = review.pc_ids or ([review.pc_id] if review.pc_id else [])
+    ids = [load.ingestion_id for load in review.loads] + list((review.join or {}).get("ids") or [])
+    return pc_rules_service.for_review(conn, pcs, ids)
+
+
+def _quality(review: TableReview, columns_catalog, lotl, frame: pl.DataFrame, conn=None) -> None:
+    """The dry run the reviewer sees: the load's own transform -- the profit center's
+    rules included -- on the loads' bronze rows."""
+    if conn is None:
+        with db.connection() as own:
+            rules, lookups, notes = _review_rules(own, review)
+    else:
+        rules, lookups, notes = _review_rules(conn, review)
     if review.aggregated:
         _, quality = aggregates.transform(frame, _mapping(review), aggregates.Spread.from_dict(review.spread),
-                                         aggregate_catalog(), review.pc_id, lotl, _context(review), review.headers)
+                                         aggregate_catalog(), review.pc_id, lotl, _context(review), review.headers,
+                                         rules=rules, lookups=lookups)
     else:
-        _, quality = transform.transform(frame, _mapping(review), columns_catalog, review.pc_id, lotl, _context(review))
+        _, quality = transform.transform(frame, _mapping(review), columns_catalog, review.pc_id, lotl, _context(review),
+                                         rules=rules, lookups=lookups, headers=review.headers)
+    if notes:
+        quality["rule_notes"] = notes
     review.quality = quality
 
 
@@ -1025,7 +1047,7 @@ def update_spread(run_id: str, table: str, columns: list[str], measure: str | No
         review.suggestions = [kept.get(name) or matching.Suggestion(name, candidates=[], samples=[])
                               for name in review.columns
                               if name not in parts and name not in review.rollups and name not in review.lineage]
-        _quality(review, catalog(), _lotl(conn), _frame(conn, review))
+        _quality(review, catalog(), _lotl(conn), _frame(conn, review), conn)
         _write_run(conn, run)
     return run
 
@@ -1091,7 +1113,7 @@ def update_mapping(run_id: str, table: str, column: str, silver_column: str | No
             matching.choose(suggestion, silver_column, ignored)
         if "also" in fields and also is not None:
             matching.set_also(suggestion, also)
-        _quality(review, columns_catalog, _lotl(conn), _frame(conn, review))
+        _quality(review, columns_catalog, _lotl(conn), _frame(conn, review), conn)
         _write_run(conn, run)
     return run
 
@@ -1113,7 +1135,7 @@ def assign_target(run_id: str, table: str, silver_column: str, bronze_column: st
         if bronze_column is not None and bronze_column not in {s.bronze_column for s in review.suggestions}:
             raise ApiError(422, "unknown_bronze_column", f"{table} has no column '{bronze_column}'.", field="bronze_column")
         matching.assign(review.suggestions, silver_column, bronze_column)
-        _quality(review, columns_catalog, _lotl(conn), _frame(conn, review))
+        _quality(review, columns_catalog, _lotl(conn), _frame(conn, review), conn)
         _write_run(conn, run)
     return run
 
@@ -1143,7 +1165,7 @@ def ignore_unmapped(run_id: str, table_name: str | None = None) -> Run:
                     changed += 1
             if changed:
                 lotl = lotl or _lotl(conn)
-                _quality(review, columns_catalog, lotl, _frame(conn, review))
+                _quality(review, columns_catalog, lotl, _frame(conn, review), conn)
         _write_run(conn, run)
     return run
 
@@ -1160,6 +1182,10 @@ def _still_valid(conn, run: Run, columns_catalog: list[SilverColumn]) -> None:
     """
     from psycopg import sql
 
+    current_rules = pc_rules_service.version(conn)
+    if run.rules_version is not None and current_rules != run.rules_version:
+        raise ApiError(409, "plan_changed", "The profit-center rules changed since the review.",
+                       "Start a new Silver run to review the data with the current rules.")
     for review in run.tables:
         if review.joined_into:
             continue
@@ -1439,8 +1465,10 @@ def _load_aggregate(conn, run: Run, review: TableReview, lotl, processed_at) -> 
     for load in review.loads:
         _delete_load(conn, source_table, load.file_name, load.processing_date, AGGREGATE)
     frame = _bronze_frame(conn, review.table_name, review.columns, ids, aggregated=True)
+    rules, lookups, _ = _review_rules(conn, review)
     rows, report = aggregates.transform(frame, _mapping(review), aggregates.Spread.from_dict(review.spread), columns,
-                                       review.pc_id, lotl, _context(review, processed_at), review.headers, extras=True)
+                                       review.pc_id, lotl, _context(review, processed_at), review.headers, extras=True,
+                                       rules=rules, lookups=lookups)
     target = [c.name for c in _cleansed_columns(columns, aggregates.IDENTITY)]
     with conn.cursor() as cursor, cursor.copy(sql.SQL("COPY {} ({}) FROM STDIN").format(cleansed, sql.SQL(", ").join(
             _ident(n) for n in target + aggregates.EXTRAS + ["_silver_run_id", "_cleansed_at"]))) as copy:
@@ -1455,8 +1483,11 @@ def _load_aggregate(conn, run: Run, review: TableReview, lotl, processed_at) -> 
     counts = Counter(rows["_ingestion_id"].to_list())
     for load in review.loads:
         run.loaded[load.ingestion_id] = counts.get(load.ingestion_id, 0)
+    filtered = report.get("rows_filtered") or 0
     job_history.note(run.id, f"{review.table_name}: {inserted} aggregate rows into {config.SILVER_SCHEMA}.{AGGREGATE} "
-                             f"({report['rollup_rows']} roll-up rows left out)")
+                             f"({report['rollup_rows']} roll-up rows left out"
+                             + (f", {filtered} dropped by the profit center's rules" if filtered else "") + ")")
+    run.result.setdefault("aggregate_quality", {})[review.table_name] = report
     return inserted
 
 
@@ -1505,6 +1536,7 @@ def _execute(conn, run: Run) -> None:
             continue  # its rows came in with the table it is joined into
         if review.aggregated:
             loaded += _load_aggregate(conn, run, review, lotl, processed_at)
+            quality[review.table_name] = run.result.pop("aggregate_quality", {}).get(review.table_name)
             conn.execute(sql.SQL("UPDATE {}.ingestion SET silver_status = 'succeeded', silver_run_id = %s, "
                                  "silver_loaded_at = now() WHERE id = ANY(%s)").format(control), [run.id, ids])
             done += len(ids)
@@ -1519,8 +1551,10 @@ def _execute(conn, run: Run) -> None:
         if review.join and review.join["stats"].get("repeated_keys"):
             raise conflict(f"{review.table_name}: the join key repeats in {review.join['table']}.",
                            "Add a key column so each row matches one, then approve again.")
+        rules, lookups, _ = _review_rules(conn, review)
         silver, report = transform.transform(frame, _mapping(review), columns_catalog, review.pc_id, lotl,
-                                             _context(review, processed_at), extras=True)
+                                             _context(review, processed_at), extras=True, rules=rules,
+                                             lookups=lookups, headers=review.headers)
         if review.join:
             report["join"] = {**review.join["asked"], **review.join["stats"]}
         quality[review.table_name] = report
@@ -1529,7 +1563,9 @@ def _execute(conn, run: Run) -> None:
         with conn.cursor() as cursor, cursor.copy(copy_sql) as copy:
             for row in silver.select(target + transform.EXTRAS).iter_rows():
                 copy.write_row(row + (run.id, processed_at))
-        expected = Counter(frame["_ingestion_id"].to_list())
+        # A profit center's filter rules may drop rows: Silver is checked against what the
+        # transform kept, and the drop is reported.
+        expected = Counter(silver["_ingestion_id"].to_list())
         counts = dict(conn.execute(sql.SQL("SELECT _ingestion_id, count(*) FROM {} WHERE _ingestion_id = ANY(%s) "
                                            "GROUP BY _ingestion_id").format(cleansed), [ids]).fetchall())
         if any(counts.get(i, 0) != expected.get(i, 0) for i in ids):
@@ -1538,13 +1574,15 @@ def _execute(conn, run: Run) -> None:
         _progress(run, done / total, f"Loading {review.table_name} into {TRANSACTION}")
         inserted = conn.execute(sql.SQL("INSERT INTO {} ({}) SELECT {} FROM {} WHERE _ingestion_id = ANY(%s)").format(
             detail, names, names, cleansed), [ids]).rowcount
-        if inserted != frame.height:
+        if inserted != silver.height:
             raise ApiError(500, "row_mismatch", f"{review.table_name}: Silver row counts do not match bronze.",
                            "Nothing was loaded. Retry, and report it if it happens again.")
         for load in review.loads:
             run.loaded[load.ingestion_id] = counts.get(load.ingestion_id, 0)
+        filtered = report.get("rows_filtered") or 0
         job_history.note(run.id, f"{review.table_name}: {inserted} rows into {config.CLEANSED_SCHEMA}.{review.table_name} "
-                                 f"and {config.SILVER_SCHEMA}.{TRANSACTION}")
+                                 f"and {config.SILVER_SCHEMA}.{TRANSACTION}"
+                                 + (f" ({filtered} dropped by the profit center's rules)" if filtered else ""))
         loaded += inserted
         if review.join:
             # The companion's loads came in through the join.

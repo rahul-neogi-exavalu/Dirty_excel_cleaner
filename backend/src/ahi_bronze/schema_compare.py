@@ -24,7 +24,9 @@ file of the same report does not.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass, field
+from pathlib import Path
 
 IDENTICAL = "identical"
 REORDERED = "reordered"
@@ -80,3 +82,24 @@ def _in_order(table: list[str], incoming: list[str]) -> bool:
 def evolved_columns(table: list[str], incoming: list[str]) -> list[str]:
     """The table's columns after case 3: existing ones first, new ones appended."""
     return list(table) + [name for name in incoming if name not in set(table)]
+
+
+@dataclass(frozen=True)
+class Band:
+    """How similar two schemas must be for the business to recommend acting on it, read
+    from ``backend/config/schema_similarity_bands.csv`` -- never a number in this module."""
+    min_percent: float
+    recommendation: str  # "evolve" | "new_table" | "reject"
+    label: str
+
+
+def load_bands(path) -> tuple[Band, ...]:
+    with open(Path(path), encoding="utf-8", newline="") as handle:
+        rows = [Band(float(row["min_percent"]), row["recommendation"].strip(), row["label"].strip())
+                for row in csv.DictReader(handle) if (row.get("recommendation") or "").strip()]
+    return tuple(sorted(rows, key=lambda band: band.min_percent, reverse=True))
+
+
+def recommend(common_percent: float, bands: tuple[Band, ...]) -> Band | None:
+    """The tightest band common_percent still clears, or None if bands is empty."""
+    return next((band for band in bands if common_percent >= band.min_percent), None)

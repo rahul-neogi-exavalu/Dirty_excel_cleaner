@@ -1,0 +1,21 @@
+profit_center: PC2037
+rules:
+  - key: pc2037.grain
+    kind: constant
+    target: aggregate
+    column: record_grain
+    spec: {value: CARRIER_AGENT}
+    source_ref: ext_pc2037_sheet1_silver_cleansed.py:675
+  - key: pc2037.data_source
+    kind: constant
+    target: aggregate
+    column: agg_data_source
+    spec: {value: EXTERNAL_FILE}
+    source_ref: ext_pc2037_sheet1_silver_cleansed.py:677
+  - key: pc2037.agency_na
+    kind: derive
+    target: aggregate
+    column: producer_agency_name
+    spec:
+      expr: {op: null_if, args: ["silver:producer_agency_name"], values: ["N/A"]}
+    source_ref: ext_pc2037_sheet1_silver_cleansed.py:704-710

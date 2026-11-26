@@ -1,0 +1,8 @@
+profit_center: PC2015
+rules:
+  - key: pc2015.carrier
+    kind: constant
+    scope_sheet: July
+    column: insurance_company_name
+    spec: {value: Great American}
+    source_ref: ext_pc2015_policies_cleansed.py:775

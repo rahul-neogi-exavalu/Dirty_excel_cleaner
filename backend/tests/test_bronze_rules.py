@@ -11,7 +11,7 @@ import pytest
 from ahi_bronze import naming, periods, planner
 from ahi_bronze.periods import Period
 from ahi_bronze.planner import Candidate, Ingested, TableState
-from ahi_bronze.schema_compare import DIFFERENT, EVOLVED, IDENTICAL, REORDERED, compare
+from ahi_bronze.schema_compare import DIFFERENT, EVOLVED, IDENTICAL, REORDERED, Band, compare, load_bands, recommend
 
 PATTERN = r"(?:^|[_\-\s.])([a-z]{1,6}[_\-]?\d{2,6})(?=$|[_\-\s.])"
 COLS = ["profitcentername", "profitcenternumber", "premium", "accountingeffectivedate"]
@@ -119,6 +119,39 @@ def test_common_percent_reflects_the_actual_overlap():
     assert compare(COLS, COLS).common_percent == 100.0
     assert compare(COLS, list(reversed(COLS))).common_percent == 100.0
     assert compare(COLS, ["a", "b", "c"]).common_percent == 0.0
+
+
+# --- schema similarity bands: the recommendation, never a number in code ----------
+
+BANDS = (
+    Band(90, "evolve", "Evolve the existing table"),
+    Band(50, "new_table", "Create a separate table"),
+    Band(0, "reject", "Not similar enough to combine"),
+)
+
+
+def test_load_bands_reads_the_real_config_file():
+    from api import config
+    bands = load_bands(config.SCHEMA_SIMILARITY_BANDS_FILE)
+    assert [b.min_percent for b in bands] == [90.0, 50.0, 0.0]
+    assert [b.recommendation for b in bands] == ["evolve", "new_table", "reject"]
+
+
+def test_load_bands_sorts_descending_regardless_of_file_order(tmp_path):
+    path = tmp_path / "bands.csv"
+    path.write_text("min_percent,recommendation,label\n0,reject,Reject\n90,evolve,Evolve\n50,new_table,Split\n")
+    bands = load_bands(path)
+    assert [b.min_percent for b in bands] == [90.0, 50.0, 0.0]
+
+
+@pytest.mark.parametrize("percent, expected", [(100.0, "evolve"), (90.0, "evolve"), (89.9, "new_table"),
+                                                 (50.0, "new_table"), (49.9, "reject"), (0.0, "reject")])
+def test_recommend_picks_the_tightest_band_cleared(percent, expected):
+    assert recommend(percent, BANDS).recommendation == expected
+
+
+def test_recommend_with_no_bands_is_none():
+    assert recommend(75.0, ()) is None
 
 
 # --- periods ------------------------------------------------------------------
@@ -370,6 +403,55 @@ def test_swapped_duplicate_headers_load_into_their_own_columns():
     assert item.column_map == {"amount": "amount_2", "amount_2": "amount"}
     # Matched by header, the file simply lists the two the other way round.
     assert item.action == planner.REORDER and item.columns_after == ["amount", "amount_2"]
+
+
+def test_plan_with_no_bands_keeps_todays_different_schema_default():
+    # The parameter is additive: calling plan() without bands reproduces the exact
+    # default, only widening the reviewer's choices to also offer evolve.
+    tables, history = _loaded()
+    item = only(planner.plan([candidate(period=JULY, cols=["a", "b"])], tables, history))
+    assert item.action == planner.NEW_TABLE and item.table_name == "ext_pc0515_arr_v2"
+    assert item.allowed_actions == [planner.EVOLVE, planner.NEW_TABLE, planner.SKIP]
+    assert item.recommendation is None
+
+
+def test_a_different_schema_recommended_to_evolve_still_offers_new_table_and_skip():
+    # 3 of 4 table columns shared plus 2 new ones (3 / 6 union = 50% common) with a band
+    # that recommends evolving at that level: the file is routed to evolve the mismatched
+    # table by default, but the reviewer can still pick a separate table or skip.
+    tables, history = _loaded()
+    bands = (Band(50, "evolve", "Evolve the existing table"), Band(0, "reject", "Not similar enough"))
+    item = only(planner.plan([candidate(period=JULY, cols=COLS[:3] + ["x", "y"])], tables, history, bands=bands))
+    assert item.action == planner.EVOLVE and item.table_name == "ext_pc0515_arr"
+    assert item.allowed_actions == [planner.EVOLVE, planner.NEW_TABLE, planner.SKIP]
+    assert item.recommendation == "evolve"
+    assert item.columns_after == COLS + ["x", "y"]
+
+
+def test_a_different_schema_recommended_to_reject_defaults_to_skip():
+    tables, history = _loaded()
+    item = only(planner.plan([candidate(period=JULY, cols=["a", "b"])], tables, history, bands=BANDS))
+    assert item.action == planner.SKIP and item.recommendation == "reject"
+    assert item.allowed_actions == [planner.EVOLVE, planner.NEW_TABLE, planner.SKIP]
+
+
+def test_a_low_overlap_evolved_file_is_recommended_a_separate_table_instead():
+    # EVOLVED (2 of 4 table columns shared, nothing added: 50% common), but below the
+    # evolve band: the bands can still recommend a separate table even though the naive
+    # kind would just evolve.
+    tables, history = _loaded()
+    item = only(planner.plan([candidate(period=JULY, cols=COLS[:2])], tables, history, bands=BANDS))
+    assert item.action == planner.NEW_TABLE and item.recommendation == "new_table"
+    assert item.table_name == "ext_pc0515_arr_v2"
+    assert item.allowed_actions == [planner.EVOLVE, planner.NEW_TABLE, planner.SKIP]
+
+
+def test_the_reviewer_can_override_back_to_evolving_the_original_table():
+    tables, history = _loaded()
+    item = only(planner.plan([candidate(period=JULY, cols=["a", "b"], action_override=planner.EVOLVE)],
+                             tables, history, bands=BANDS))
+    assert item.action == planner.EVOLVE and item.table_name == "ext_pc0515_arr"
+    assert item.columns_after == COLS + ["a", "b"]
 
 
 def test_a_second_report_reuses_its_own_table_next_month():

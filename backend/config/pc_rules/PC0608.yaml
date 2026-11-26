@@ -1,0 +1,36 @@
+profit_center: PC0608
+rules:
+  - key: pc0608.pif.market_provider
+    kind: constant
+    scope_sheet: Policies in Force
+    column: market_provider
+    spec: {value: AIG}
+    note: "Tow PIF and Forestry files (sheet 'Policies in Force')."
+    source_ref: ext_pc0608_policies_in_force_silver_cleansed.py:695
+  - key: pc0608.pif.renewal_flag
+    kind: derive
+    scope_sheet: Policies in Force
+    column: renewal_flag
+    spec:
+      expr: {op: contains, args: ["src:Transaction Description"], value: RENEWAL}
+    source_ref: ext_pc0608_policies_in_force_silver_cleansed.py:738-740
+  - key: pc0608.accelerate.expiration
+    kind: derive
+    scope_file_like: "*Accelerate*"
+    column: policy_expiration_date
+    spec:
+      expr: {op: make_date, args: ["src:X_Year", "src:X_Month", "src:X_Day"]}
+    source_ref: ext_pc0608_acceleraterenewalschedule_silver_cleansed.py:734-742
+  - key: pc0608.book_of_business.renewal_flag
+    kind: translate
+    scope_file_like: "*Book of Business*"
+    column: renewal_flag
+    enabled: false
+    spec:
+      source: "src:Status"
+      cases: [{when: Renewal Policy, then: true}]
+      default: false
+    note: >-
+      Disabled until the business confirms which notebook handles the IWA and Railroad
+      Book of Business files (policy_list or book_of_business).
+    source_ref: ext_pc0608_policy_list_cleansed.py:742-745

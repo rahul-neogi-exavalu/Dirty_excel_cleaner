@@ -1,0 +1,9 @@
+profit_center: PC0691
+rules:
+  - key: pc0691.effective_year
+    kind: derive
+    column: policy_effective_year
+    spec:
+      mode: fill_null
+      expr: {op: year, args: ["src:Policy[Original Effective Date]"]}
+    source_ref: ext_pc0691_ah_programs_silver_cleansed.py:672-677

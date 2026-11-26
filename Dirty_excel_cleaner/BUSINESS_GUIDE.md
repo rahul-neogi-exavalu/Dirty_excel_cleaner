@@ -1,0 +1,638 @@
+# How the Cleaner Reads a Spreadsheet — Business Reference
+
+A plain-language explanation of how the tool decides what it is looking at: where the
+column names are, which rows are not data, whether a sheet has been turned on its side,
+and how sheets in the same file relate to each other.
+
+Written for reviewers, analysts and anyone who has to explain or defend the output. No
+code, no file paths.
+
+---
+
+## The one idea behind everything
+
+**The tool is not given a list of expected column names.** It has never been told that a
+file should contain "Premium" or "Policy Number", and it does not look for them.
+
+That is deliberate. Real files from real sources never agree on names. One month a column
+is `Producer/AgencyName`, the next it is `Producer`, and a different broker calls it
+`Agent`. A tool built around a fixed list of names needs a person to update that list
+every time a new source appears — which means it never really finishes.
+
+So instead, the tool works the way an experienced person does when handed an unfamiliar
+spreadsheet. You don't read a spreadsheet by recognising the words. You read it by
+noticing **patterns**:
+
+- the row of column names *looks different* from the rows underneath it
+- a total row is *mostly empty* and its number *adds up*
+- a footer is a *lone sentence* sitting under a block of figures
+- a table that has been turned sideways *reads consistently* down the page instead of
+  across it
+
+Every decision below is one of those observations, made explicit. And every one is
+recorded, with its reasoning, in an audit file you can read afterwards.
+
+---
+
+## 1. How does it find the header row?
+
+### What the question really is
+
+A header row is not "the first row". In real exports it is usually buried under a company
+name, a logo, a "Report generated on…" line, a confidentiality notice, and a couple of
+blank rows. In one of our test files the real header sits on **row 300**.
+
+### How it decides
+
+The tool scores each of the first rows on five things. None of them require knowing what
+the columns are called.
+
+| What it looks at | The reasoning |
+|---|---|
+| **Does this row look unlike the rows below it?** | This is the strongest clue. A header holds words sitting on top of columns full of numbers, dates and reference codes. A data row looks like every other data row. |
+| **Is it made of words?** | Column names are text even when the column beneath them is money or dates. |
+| **Are the entries all different?** | Column names never repeat. Data repeats constantly — the same branch, the same broker, over and over. |
+| **Is the row as full as the rows below?** | A header fills roughly the same number of cells as a record. A title fills one. |
+| **Are the entries short?** | Column names are labels, not sentences. |
+| **Is it styled differently?** | Bold, shading or a bottom border, where the data rows have none. A bonus only — plenty of files have no formatting at all, and those still work. |
+
+The row with the best overall score wins.
+
+### Two obvious-sounding rules that are wrong
+
+- *"The header is the first row with something in it."* This picks up the company name
+  banner instead.
+- *"The header is the first row with no gaps."* Headers routinely have a blank cell where
+  someone forgot to label a column.
+
+### When it refuses to answer
+
+If no row scores well enough, the tool **does not pick one anyway.** It reports that the
+table has no header and names the columns by position (`column_1`, `column_2`…).
+
+This matters commercially. Promoting a genuine data row to be the header silently destroys
+a record *and* mislabels every column beneath it. Saying "I could not find a header here"
+is a far cheaper outcome — someone spends two minutes looking instead of discovering a
+discrepancy three months later.
+
+### Headers that aren't in one piece
+
+- **Split over two rows** — `Profit Center` above `Name`. If the second row also reads like
+  labels *and* looks unlike the data below it, the two are joined into `Profit Center Name`.
+  The second condition matters: without it, the first genuine record of every text-heavy
+  file gets eaten.
+- **A category band on top** — a merged `POLICY INFORMATION` stretched across several
+  columns. Recognised as decoration because it is one value repeated across the row.
+- **Blank or duplicated labels** — a blank label keeps its column and gets a positional
+  name; the column is never dropped just because nobody named it. Duplicates are numbered.
+
+### When the data doesn't line up with the header
+
+Some exports put a decorative gap in the *data* rows but not in the header. The header
+occupies columns 1–8; every record occupies 1, 2, 3, 5, 6, 7, 9, 10.
+
+Read naively, everything after the first gap lands one column to the left — the insurer's
+name arrives in the Premium column, and **nothing announces the error**. This is the most
+dangerous failure available, because the file still looks perfectly reasonable.
+
+The tool checks whether the header and the data agree on which columns they use. When they
+disagree but hold the **same number of values**, the mismatch is only spacing, so the data
+is re-seated under the correct labels and the audit records both layouts. When the counts
+differ, nothing is moved — the shapes genuinely differ, and guessing would be worse.
+
+---
+
+## 2. How does it identify footers, totals and other non-data rows?
+
+### The principle
+
+A record is a full row. Everything that isn't a record is, in some way, **thinner** than
+the rows around it.
+
+The tool works out the "normal" fullness of a table — how many cells a typical row fills —
+and treats anything noticeably below that as a candidate for removal. Not removed yet:
+*a candidate*.
+
+### What it finds, and how
+
+| Row type | How it is recognised |
+|---|---|
+| **Title / banner** | Sits above the header, or is a single cell of text, or one value stretched across the whole row. |
+| **Footer** | A lone cell of text with no figures — `*** End of Report ***`, `Page 2 of 3`, `Confidential`, `Prepared by Finance`. |
+| **Subtotal / Grand Total** | Thin, has a figure, **and that figure equals the sum of the rows above it.** |
+| **Repeated header** | The column names appearing again part-way down, from a page break. |
+
+### The arithmetic test is the important one
+
+A subtotal is not identified because it says "Subtotal". It is identified because **the
+number adds up**.
+
+This has two commercial advantages:
+
+1. **It works in any language.** A German report's `Zwischensumme` is removed on exactly
+   the same evidence as an English `Subtotal`, with no word list to maintain.
+2. **It cannot be fooled by a name.** A profit centre legitimately called `Total Risk PC`
+   keeps its row — it is a full record and its figures don't sum to anything.
+
+The tool also checks totals in the right order: individual section subtotals first, then
+the grand total tested against both the remaining records *and* the subtotals already
+found. Without that ordering, a grand total gets missed because it double-counts rows a
+subtotal already covered.
+
+### Repeated headers, in three disguises
+
+Page-break headers don't always reappear identically:
+
+1. **Word for word** — the simple case.
+2. **A fragment** — `Policy Summary | | | | Premium | Policy Number`. Recognised because
+   its entries match the real header's labels in the same positions.
+3. **Reworded** — a second section using `PC Number` where the first used
+   `ProfitCenterNumber`. No label matches, so it is caught the same way the original header
+   was: it is **words sitting where the column holds numbers and dates**.
+
+### Two safety rules
+
+**A thin row that doesn't add up, and doesn't call itself a total, is kept.** Records with
+several empty fields are ordinary in real data. Losing one silently is the worst thing this
+tool could do, so the benefit of the doubt always goes to keeping the row — flagged, at
+reduced confidence, so a reviewer can look.
+
+**Wording on its own can never remove a row.** A row must be structurally thin *first*. The
+words only decide which kind of non-record it is.
+
+### The one judgement call we made deliberately
+
+Real reports contain totals whose figures are simply **wrong** — stale, hand-edited, or
+rounded by someone. Our test files include a `TOTAL West Zone PC` of `48,387.01` where the
+rows above sum to `48,383.11`, and a `Grand Total` of `999,999.99`.
+
+Keeping those as data corrupts every downstream sum. So a row that is *both* thin *and*
+labelled a total is removed — but into its **own separate category**, flagged for review,
+and never mixed in with totals the arithmetic actually proved.
+
+This is a trade, and we state it plainly: it is the one place where wording carries weight.
+It buys correct figures on files that would otherwise be quietly wrong.
+
+---
+
+## 3. How does it know a table has been turned sideways?
+
+### What this looks like
+
+Occasionally a sheet is built the wrong way round — the field names run **down** the first
+column, and each **record runs across** the page:
+
+```
+Profit Centre     | South Zone PC | West Zone PC | East Zone PC
+Producer          | Pinnacle      | Apex         | Metro
+Premium           | 15,109.20     | 35,586.47    | 37,066.89
+Policy Number     | POL-200001    | POL-200002   | POL-200003
+```
+
+Loaded as-is, this is unusable — every customer becomes a column.
+
+### How it decides
+
+Two observations, both about consistency:
+
+**Consistency down the page.** In a normal table, each column holds one kind of thing all
+the way down — Premium is money in every row, Policy Number is a reference in every row. A
+single *row*, by contrast, is a mixture: some text, a number, a date, a code. In a sideways
+table this is exactly reversed.
+
+So the tool asks: *which direction is consistent?* That direction is the field direction.
+
+**Repetition.** Field names never repeat. Data repeats constantly. In the example above,
+the first row contains `South Zone PC` more than once, while the first column — the real
+field names — has no repeats at all. That contrast is decisive.
+
+### Doing it in the right order
+
+The tool decides orientation for the **whole sheet before** it starts breaking the sheet
+into tables. This matters: in a sideways sheet, a blank row is a blank *field*, not a
+break between tables. Deciding orientation afterwards means the table has already been cut
+in half before anyone noticed it was sideways.
+
+Titles and banners are also removed **before** this judgement. A merged title stretched
+across every column is perfectly "consistent" across the row, and left in place it drags
+the whole sheet towards looking sideways.
+
+### When it genuinely can't tell
+
+A small lookup table — four columns, five rows — is nearly square and reads plausibly
+either way. There is no clever answer here; both readings are defensible from the content
+alone.
+
+The tool falls back on the plainest fact available: **tables are far more often taller than
+they are wide.** It takes the reading that yields more records than fields, and marks the
+result as *decided by shape* so a reviewer can see the judgement was close.
+
+We tried a cleverer tiebreaker — asking which reading produced a better-looking header —
+and **measured it as worse.** On a small lookup, the column of company names scores as well
+as the real header, and the table gets stood on its side. We reverted it and kept the
+simple rule.
+
+### A special case: the pivot report
+
+Some reports aren't sideways, they are **pivoted** — a grid with one measure spread across
+the page:
+
+```
+Producer                 | Jan-2026  | Feb-2026  | Mar-2026
+Pinnacle Agency Partners | 12,299.66 | 35,117.88 | 32,440.79
+Apex Insurance Brokers   | 28,850.98 | 33,239.15 | 11,003.51
+```
+
+The month columns are **not fields** — they are values of one field (the month), laid
+sideways. Loaded as-is you get a column per month, which no table can use, and next month
+you get a different set of columns.
+
+These are recognised by three things together: a run of column headings that are all the
+same kind of thing and all different from each other; a grid beneath them containing one
+consistent measure; and remaining columns that identify each row uniquely. Any ordinary
+table fails at least one of those.
+
+The grid is then **unfolded** into the shape a table can actually take — one row per cell:
+
+| Producer | Period | Value |
+|---|---|---|
+| Pinnacle Agency Partners | Jan-2026 | 12,299.66 |
+| Apex Insurance Brokers | Jan-2026 | 28,850.98 |
+| … | … | … |
+
+A pivot is also genuinely ambiguous about orientation — it reads consistently in *both*
+directions — so it is recognised before the sideways check runs, which would otherwise flip
+a perfectly readable grid.
+
+---
+
+## 4. Multiple sheets or tables — what comes out?
+
+### One table in, one file out
+
+A file may contain several sheets — say, a sheet of transactions and a sheet of producer
+addresses. **Each one comes out as its own cleaned file**, with its own summary. Three
+sheets with different columns give three files and three summaries.
+
+The tool does **not** join sheets together. Deciding that two sheets describe the same
+producers, and which column links them, is a judgement about meaning — and when the
+names don't quite agree (`MJC ` in one sheet, `MJC Agency Group` in the other), any
+automatic match is a guess that can attach the wrong address to a record without anyone
+noticing. Keeping the sheets separate leaves that decision to whoever loads the data,
+with a key they chose.
+
+The tool still notes what kind of table each one looks like — transactions or reference
+details — in the audit, for a reviewer. It does not change what is produced.
+
+## 5. Which sheets get appended together?
+
+### The question
+
+A file may hold the same report split across sheets — `Jan` and `Feb`. These can be
+**appended**: laid end to end into one table.
+
+### How it decides
+
+Two sheets are appended **only when their column headings match exactly** — every
+heading present in both, none extra. The columns may be in a different order; they are
+lined up by name.
+
+Nothing less counts. Seven of eight headings in common is not enough, and neither is two
+sheets that look alike but are headed differently. Those come out as separate files. It
+is better to hand back two files that someone chooses to combine than one file that was
+combined on a guess.
+
+### The provenance column — why it exists
+
+When sheets are stacked, a **Source Sheet** column is added, recording which sheet each row
+came from.
+
+This is not decoration. In our test data, January and February contain the **same policy
+numbers** — the same policies, reported in two periods. Stack them without recording the
+source and:
+
+- the rows become indistinguishable
+- they look like duplicates
+- any de-duplication step silently destroys half the dataset
+
+Nothing in the row data itself says which period it belongs to. The sheet name is the only
+record of it, so it is captured before it is lost.
+
+For the same reason, **duplicate checks are run within each sheet, not across the stack.**
+Checking across would flag every row in a legitimate two-period file.
+
+### Continuation sheets with no header at all
+
+A common pattern: the first sheet has headers and data, and a second sheet named
+`Continued` holds the remaining rows with **no header whatsoever** — every row is data.
+
+Looked at on its own, that sheet honestly has no header, and the tool says so rather than
+promoting a record. But at **file level** the answer is visible: another sheet in the same
+file has the same number of columns, holding the same kinds of content, and it *does* have
+a header.
+
+So the continuation sheet **adopts** those column names. The match is made on shape and
+content, never on sheet order — so a continuation is recognised whether it comes before or
+after the sheet it belongs to. The adoption is recorded in the audit, naming the sheet the
+names came from.
+
+Because those names were borrowed rather than read from the sheet, the continuation is
+**not** appended: it comes out as its own file, with the right column names.
+
+---
+
+## What happens when the tool isn't sure
+
+This is the part worth understanding commercially, because it determines how much review
+effort the output needs.
+
+The tool distinguishes between **being wrong** and **being uncertain**, and it never
+disguises the second as the first.
+
+| Situation | What it does |
+|---|---|
+| No header can be found | Names the columns by position and says so |
+| Orientation is a close call | Uses the fallback rule and marks it "decided by shape" |
+| A thin row doesn't add up | Keeps the row, at reduced confidence |
+| Two sheets look alike but their headings differ | Keeps them as separate files rather than appending |
+| A column is entirely empty | Says whether the source was blank or the values are formulas Excel never saved |
+
+Every removed row is recorded with **the evidence**, not a label. The audit says
+*"this figure equals the sum of the three rows above it"* — not *"matched subtotal
+pattern"*. A reviewer can check the claim.
+
+**Where to look first.** Every file's audit carries two headline counts:
+
+- tables where no header could be found
+- orientations that were a close call
+
+If both are zero, the file went through cleanly.
+
+---
+
+## CSV files
+
+A `.csv` or `.tsv` goes through exactly the same reasoning. A delimited file is a single
+sheet by definition — there is no second tab to look for — and once its cells are read it
+is indistinguishable from a worksheet as far as every rule above is concerned.
+
+Two things are worked out rather than assumed: **which character separates the fields**
+(comma, semicolon, tab or pipe — European exports commonly use semicolons because the
+comma is their decimal separator) and **which text encoding the file uses**, so an
+accented name does not stop the file opening.
+
+A CSV cannot carry cell formatting or formulas, so those clues are simply unavailable —
+the tool copes, because none of them were ever the deciding vote. One thing a CSV does
+better than Excel: an identifier like `08085` keeps its leading zero, which Excel would
+have thrown away before the tool ever saw the file.
+
+## What you get back
+
+For every table the tool produces, it hands back two files that belong together, plus one
+audit report per input file:
+
+- **the cleaned table** itself
+- **a summary of that table**, one line per column. It shows the column's type, how many
+  values it holds, how many are distinct, and what share is empty. For figures and dates
+  it also gives the smallest and the largest, and for figures the total. Each line names
+  the original file and the sheet the column came from.
+
+Both files are named after the original file and stamped with the same unique job
+number, so the two are easy to pair. The audit report uses those same final names.
+
+The summary is the quickest check that a file came through sensibly. A column that should
+be full but shows 40% empty, or a premium total nowhere near the figure you expected, is
+visible before anyone opens the table. Where a figure does not apply, such as the total of
+a name column, the cell says "NA" (not applicable), so it is never mistaken for a
+missing figure.
+
+**The type column is worth reading.** The tool decides what each column is from its
+contents, never its name:
+
+- anything mixing letters and digits (`12AB`) is text;
+- a number with a leading zero (`08085`) is a code, kept as text;
+- a column of whole numbers that are all the same length and all different, such as
+  `1005, 1006, 1007`, is the one genuinely hard case. It could be postcodes or account
+  numbers, or it could be amounts that happen never to repeat. With **more than 10
+  values** it is treated as a code; with **10 or fewer**, as a number.
+
+Either way, that last kind of column is **flagged** in the summary with a "CHECK" note.
+Glance at the column's heading and you will know at once which it is: "ZIP" or "Premium".
+
+**Every tricky case is flagged the same way.** The last column of the summary lists
+anything about a column you should know, in plain words:
+
+- **CHECK** means the tool had to make a call it could not prove, or had to leave some
+  values empty. For example: a date like 01/02/2026 that could be January or February, a
+  "99%" stored as 99, a column whose heading was blank, a table that might be sideways, or
+  "N/A" entries in a column of figures. Look at the column and confirm.
+- **INFO** means the tool changed something deliberately and is sure of it. For example:
+  times of day dropped from dates, "$" and "," removed from figures, an Excel date number
+  like 46030 turned into 2026-01-08, or a sideways table turned upright.
+
+**The ZIP-or-date puzzle.** The number 46030 is both a US ZIP code and, as Excel stores
+dates, 8 January 2026. When a column holds nothing but numbers like that, the tool reads
+the column's heading. A heading that names a date ("Txn Dt", "Created At", "Posted On",
+"Effective Date") turns them into dates. Any other heading ("ZIP", "Postal") leaves them
+as numbers. Either way the summary says CHECK, because the heading, not the data, made
+the call. Headings are read sensibly: anything containing "date", "dt" or "time" counts
+("TxnDate", "Expiry Dt"), but ordinary words like "Update", "Width" or "Lifetime" do not.
+Short words such as "at" and "on" count only on their own ("Created At"), so "State" or
+"Rate" never counts as a date just because it contains the letters "at". And "Created
+By" holds a person, not a date.
+
+**Numbers from Europe.** Many European exports write one thousand two hundred and
+thirty-four point five six as "1.234,56", with the comma and dot swapped. The tool
+works out which style each column uses from the figures themselves. A figure like "99,5"
+can only be European, and "10.5" can only be US. It then reads every figure in the
+column the same way. When a column's figures fit both styles (only values like "1,234"),
+it reads them the US way and says CHECK.
+
+**Things about the whole file or sheet are flagged too.** For example: a spreadsheet
+error such as #REF! that was left empty, formulas Excel never saved a result for, a CSV
+whose separator or character encoding was a close call, a "Total" row that was removed
+even though its figure did not add up, or a row kept even though it looked incomplete.
+Those notes appear on every column of the table they affect, so they cannot be missed.
+
+A column with nothing to report says "NA". So the fastest review of any file is to read
+the CHECK notes in its summary and nothing else. The summary
+also shows what a loading tool would guess on its own if left to itself. Where the two
+disagree, the loader should be told the type rather than left to guess.
+
+When sheets were appended into one table, the summary is worked out separately for each
+original sheet and labelled with its name, so January and February can be compared side by
+side.
+
+## What happens when a file cannot be read at all
+
+A folder of five hundred files will contain a few that are not really spreadsheets: a
+download that was cut short, a workbook someone password-protected, an old `.xls`, a file
+saved in the wrong format.
+
+**A bad file costs you that file and nothing else.** Each workbook is handled on its own,
+so one unreadable file no longer stops the run and skips everything after it. The report
+names the file and says which of these it was, because each calls for a different response:
+
+| What the report says | What to do about it |
+|---|---|
+| corrupt | ask for the file again; the copy you have is incomplete |
+| password-protected | it must be opened and re-saved without the password |
+| unsupported format | an old `.xls`, `.xlsb` or `.ods`; re-save it as `.xlsx` |
+| too large | it exceeds the configured ceiling and was refused rather than attempted |
+
+Telling these apart matters. A password-protected file and a truly corrupt one produce the
+*same* error from the underlying reader, and reporting "corrupt" for a file that is merely
+locked sends someone looking in entirely the wrong place.
+
+## Refusing to look trustworthy when it is wrong
+
+The checks described above decide what the data *is*. A separate set of checks asks whether
+the result can be believed at all, and these do not merely report — they **fail the run**:
+
+- every row is accounted for, either kept or removed with a stated reason
+- no identifying column came out empty
+- no column emptied without a cause being named
+- a total that was removed still agrees with the rows that were kept
+
+The reasoning is that the dangerous failure of a cleaning tool is not crashing. It is
+producing a file that looks entirely reasonable and is quietly wrong, which loads into a
+table without complaint and is discovered months later, if ever.
+
+## Speed, and doing several files at once
+
+One million rows in a single sheet takes **about a minute and a half**. Several workbooks
+can be processed at the same time with `--workers`.
+
+Both numbers come from measurement rather than expectation, and one of them contradicted
+what we predicted: we expected that using separate processes would be faster than using
+threads, and measured the opposite by a wide margin. The default follows the measurement.
+
+## Loading into the bronze layer
+
+The last steps, **Validate** and **Ingest**, put the cleaned tables into the bronze database. They follow the same rules the team applied by hand (the AHI File → Bronze scenario document), but a person still approves every change that matters.
+
+**What happens in Validate:**
+- **Required columns:** each file's columns are matched to your 14 required columns. The match uses what was approved before, exact spelling, fuzzy, semantic meaning, and AI. Any required column still missing means the file is rejected. Two pairs need only one of the pair (either, or both, is fine): **CommissionPct or GrossCommissionAmount**, and **ProducerCommissionAmount or ProducerCommissionPct** (the `one_of` column of `backend/config/bronze_required_columns.csv`). Each screen shows a "% fit for Bronze" score.
+- **The whole file, but for sheets that are not data:** a sheet missing the required columns (a lookup or notes sheet beside the data) is left out on its own, and the file's valid sheets still go to Bronze. Any other unfit sheet (dates flagged, rejected by you) rejects all the file's sheets, and a file is staged with all its sheets at once.
+- **Reporting dates:** AED (Accounting Effective Date) decides if every row has a readable date, otherwise TED (Transaction Effective Date), then PED (Policy Effective Date). Otherwise the reviewer enters them. Dates are stored as whole months.
+  - **You may pick the date column:** the Reporting dates table shows each date column populated on every row with its months and whether that is year to date, monthly or neither. When AED's months are neither (Feb–Jun) but TED's are a clean year to date, pick TED: its months become the reporting dates and the control table's `date_detail` records **TED**. Only a column readable on every row can be picked.
+  - **`date_detail` for dates you type:** the date column whose months they exactly are (TED, say), and blank only when they match none of AED, TED and PED.
+  - **YTD or monthly:** YTD is January through month N of one year, monthly is a single month.
+  - **Neither** (e.g. Mar–Jun, or dates spanning several years): flagged, and rejected unless the reviewer corrects the dates.
+- **Against the profit center's files already in Bronze** (the profit center is read from the file name, so the files may be named anything):
+  - **A month after them** (July after a Jan–Jun year-to-date file): appended, into the **same bronze table** as the files it follows, whatever its sheet is called. Validate shows its columns against the earlier file's (the same, reordered, columns added or missing, or different), and Ingest evolves the table where columns were added or left out.
+  - **A month already loaded** (June again after Jan–Jun): **flagged, and the control table rejects it.** A side-by-side comparison of rows, columns and AED/TED/PED population shows why.
+  - **Exactly the reporting dates of a loaded file:** your call. A **revision** replaces the file you name (type or pick its exact name; it is looked up in the control table among the profit center's loaded files of those dates, and refused otherwise), and Ingest deletes the old file's rows and loads the new one, recreating the table with the new columns when nothing else is in it. A **companion** came with it and is kept beside it (below). Or reject it.
+- **Companion files:** a file that came with another of the same profit center (the same received date in the name) and carries only part of the picture: a broker list beside the transactions. Mark it as that file's companion: the two are checked **together** for the required columns (the broker list's MarketProvider counts for the transactions), the companion takes the other file's reporting dates, and Silver joins the two.
+- **Aggregated files:** some profit centers send figures they already aggregated (a premium summary per partner and product line, a month to a sheet) instead of transactions. Validate tells them by their shape: a column or row that totals the others, mostly amounts, no policy number and no transaction dates. They are not held to the transaction columns, take their dates from the month each sheet names (or the file name), are compared only with the profit center's other aggregated files, and the control table flags them (`is_aggregated = Y`). You can say otherwise either way.
+- **File received date:** read from the file name in any common order (`_07132026` → 2026-07-13), using the last full date in the name. It is never used for the reporting dates.
+
+After Validate, the file is copied into a temporary `staging` schema, under the name of the bronze table it is bound for with `_stg` (`ext_pc0515_sheet1_stg`; `_stg_2` while another file for that table still waits to load; an aggregated file's `ext_pc2030_data_agg_stg`), and its plan is recorded in the **control table** (`ingest.control_table`): one row per sheet's table, with the sheet in `sheet_name` beside `file_name` (several sheets, comma-separated, when sheets with the same columns were stacked into one table).
+
+**What the tool works out on its own for Ingest:**
+
+- **Source system:** read from the file name's `PC` code, the same one as the profit center (`ARR_PC515.xlsx` → `pc0515`). A name with two different PC codes is left for you to fill in.
+- **Profit center (pc_id):** read from the file name. `PC796_2026-06 796 TPI - AJG Data Submission_796 TPI` becomes `PC0796`.
+- **Division:** looked up in the business's division table by profit center. For the few profit centers listed under two divisions, you choose.
+- **Table name:** `ext_pc0515_arr`, or `ext_pc0515_data` when sheets are named after months; an aggregated file's ends with `_agg` (`ext_pc2030_data_agg`). A month appended after the profit center's earlier files goes to their table instead, and a companion never replaces the file it came with.
+- **What to do** with the file against what is already loaded:
+  - A first file creates the table.
+  - A July file with the same columns is appended. If the columns are only in a different order, they are put back in the table's order first.
+  - A July file with extra or missing columns widens the table. This needs your confirmation.
+  - A July file with a different layout goes to a table of its own. This needs your confirmation.
+  - A revised Jan–Jun file, or a Jan–Jul file, replaces the earlier load. This needs your confirmation and a final check.
+  - The very same file again is skipped.
+
+**What you decide:** you check the profit center, file received date, division, source system
+and reporting dates, can rename a table or choose another action, and tick a confirmation for every
+risky item. You approve as the signed-in user. Nothing is written until then, and a file
+with no profit center or file received date can't be approved.
+
+**What every bronze row carries:** the profit center first, then the file's own columns,
+then the file received date, the division, the exact file name, and the time it was loaded.
+
+**What protects the data:**
+
+- **All or nothing:** the whole plan loads in one go. If anything fails, nothing is written.
+- **Row counts are checked** before the load is committed.
+- **Nothing is ever silently overwritten.** A replaced load is kept in the history as "superseded", with who approved its replacement and when.
+- **If something changes after you review it,** for example another load into the same table, the tool asks you to review again. It does not run a plan you didn't see.
+
+## Bringing files together in Silver
+
+Every source names its columns differently: one file says `Carrier`, another
+`Insurance Company Name`, a third `Carrier Name`. The last step, **Silver**, puts them all
+into one common table, with exactly the columns of the business's Silver schema.
+
+**How a column finds its Silver name.** Five checks look at every column, each on its own, and each casts a vote:
+
+1. **What was approved before.** The business's DRT column mapping says, per profit center, which source column means which Silver column. Every decision you approve is added to it, so next month's file reuses last month's decisions.
+2. **The same name.** `Acct Eff Date` is recognised as Accounting Effective Date.
+3. **A near spelling.** `Premium Amt` is recognised as Premium. A guess that rests only on a shared word like "name" is never made.
+4. **The same meaning,** from a language model of English words. `Carrier` is recognised as the insurance company and `Agency` as the producer.
+5. **AI (Azure OpenAI),** which reads report abbreviations: `acc_eff_dt` is the accounting effective date, `incp_dt` the policy start. Only the column names are sent, never the data.
+
+**You choose.** The answer most checks agree on is pre-selected and marked *Recommended*. Open a row's list to see every suggestion and which checks voted for it, for example "total_premium: Semantic + AI" and "premium: Fuzzy". Rows where the checks disagree are flagged *Split*, so look at those first. You work from the Silver side: each of the 48 DRT columns takes one source column from its list (suggestions first, then every other column, then "None"), so a file of 100 columns is still 48 choices. Columns with no recommendation sit on their own *Not mapped* tab, and source columns nothing takes are listed under *Bronze not loaded*. One source column can feed two DRT columns: choose it for both. Some profit centers use one "Effective Date" for both the policy and the accounting date.
+
+**Nothing is remembered until you approve.** Approving saves the whole mapping, including the rows the tool filled in from before, so the next file from that source maps itself.
+
+**What happens to the values:**
+
+- **Text:** spaces are trimmed, and empty cells become empty, not blank text.
+- **Dates:** read in every format the AHI document lists, including Excel's day numbers.
+- **Amounts:** `$1,200.50` and `(250.00)`, which means minus 250, are understood.
+- **Unreadable values** are left empty and counted, so you see how many there were before you approve.
+
+**Profit centers** are filled in and corrected from the business's LOTL table, exactly as the AHI document describes. A missing number is looked up from the name, a wrong number is corrected, and a row with neither gets the office of its source. Numbers are always four digits (`94` becomes `0094`). Rows the LOTL can't settle are kept and flagged, never dropped.
+
+**When a file is replaced in bronze** (a revised Jan–Jun file), its old rows are removed from Silver on the next run, so nothing is counted twice.
+
+**The aggregate** adds up premium, fees, commissions, revenue and the number of policies per profit center and month, in the business's aggregate table. It is rebuilt after every load.
+
+## What this tool does not do
+
+Stated plainly, because it affects what has to happen next.
+
+**It does not map columns onto your target table on its own.** The Silver step suggests a
+mapping, but a person approves every one; the rest of this point explains why. It will faithfully clean a file whose
+columns are called `Producer`, and another whose columns are called `Agent Name`. It will
+**not** decide that those two are the same field in your database.
+
+That decision cannot be derived from the files. It requires one of: a defined target
+schema, a mapping configuration, an AI suggestion reviewed by a person, or a person. There
+is no fifth option, and anything claiming otherwise is guessing.
+
+What the tool gives you is per-file-correct structure with every column's content
+identified — which is the right input to that mapping step, and makes it a one-off task per
+source rather than a recurring one per file.
+
+**It cannot recover what Excel already destroyed.** A postcode saved as the number `8085`
+lost its leading zero before the file was ever written. Where the zero survives in the
+file, it is preserved.
+
+**Near-square tables are a genuine judgement call.** A four-column, five-row lookup reads
+plausibly either way. The tool picks the more likely reading and flags it. It does not
+pretend to certainty it doesn't have.
+
+---
+
+## How we know it works
+
+**The files check themselves.** Every genuine record in the test set carries a policy
+number; banners, totals, footers and repeated headers do not. Counting those in the raw
+file gives an expected record count that owes nothing to the tool being tested. For pivot
+reports, which have no policy numbers, the check is that unfolding the grid produces
+exactly one row per value — nothing lost, nothing invented.
+
+**The discarded rows verify the kept ones.** Totals are removed *and* retained in the audit,
+so their stated figures can be checked against the sum of the cleaned rows. When a report's
+own grand total agrees with our cleaned output to the penny, that is independent
+confirmation — no hand-built expected answer required.
+
+**Every rule is tested by switching it off.** Each piece of reasoning is disabled in turn
+and the whole test set re-scored, which shows exactly which files depend on it. This stops
+any assumption quietly becoming load-bearing without anyone noticing.
+
+That check has caught our own measurement three times — cases where switching a rule off
+appeared harmless because the scoring couldn't see the damage. Each gap is now closed with
+a direct check. A test that cannot fail is not measuring anything.
